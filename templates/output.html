@@ -22,6 +22,21 @@
             color: #333;
             text-align: center;
         }
+        .section {
+            margin-bottom: 20px;
+        }
+        .section h3 {
+            color: #555;
+            margin-bottom: 8px;
+            font-size: 16px;
+        }
+        .info-box {
+            background-color: #f0f8ff;
+            border: 1px solid #b0d4f1;
+            padding: 10px;
+            border-radius: 4px;
+            font-size: 14px;
+        }
         .output-box {
             background-color: #f9f9f9;
             border: 1px solid #ddd;
@@ -30,7 +45,22 @@
             min-height: 100px;
             white-space: pre-wrap;
             word-wrap: break-word;
+            line-height: 1.6;
+        }
+        .recommendation {
+            background-color: #f0fff0;
+            padding: 15px;
+            border-radius: 8px;
+            border: 2px solid #90ee90;
+        }
+        .disclaimer {
+            background-color: #fff3cd;
+            border: 1px solid #ffc107;
+            padding: 10px;
+            border-radius: 4px;
             margin-bottom: 20px;
+            font-size: 13px;
+            color: #856404;
         }
         a {
             display: inline-block;
@@ -51,10 +81,38 @@
 <body>
     <div class="container">
         <h1>Health Recommendation System</h1>
-        <h2>Text Output</h2>
-        <p><strong>You entered:</strong></p>
-        <div class="output-box">{{ text|e }}</div>
-        <a href="/">Go Back</a>
+        <h2>Health Recommendations</h2>
+        
+        <div class="section">
+            <h3>Your Symptoms:</h3>
+            <div class="info-box">{{ symptoms|e }}</div>
+        </div>
+        
+        <div class="section">
+            <h3>Duration:</h3>
+            <div class="info-box">{{ duration|e }}</div>
+        </div>
+        
+        <div class="section">
+            <h3>Severity:</h3>
+            <div class="info-box">{{ severity }}/10</div>
+        </div>
+        
+        {% if additional_info %}
+        <div class="section">
+            <h3>Additional Information:</h3>
+            <div class="info-box">{{ additional_info|e }}</div>
+        </div>
+        {% endif %}
+        
+        <div class="section recommendation">
+            <h3>AI Health Recommendations:</h3>
+            <div class="output-box">{{ recommendation|e }}</div>
+        </div>
+        
+        <p class="disclaimer"><strong>Disclaimer:</strong> This is an AI-generated recommendation and should not replace professional medical advice. Please consult a healthcare provider for proper diagnosis and treatment.</p>
+        
+        <a href="/">Enter New Symptoms</a>
     </div>
 </body>
 </html>

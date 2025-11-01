@@ -28,14 +28,17 @@
             color: #555;
             font-weight: bold;
         }
-        textarea {
+        textarea, input[type="text"], input[type="number"] {
             width: 100%;
             padding: 10px;
             border: 1px solid #ddd;
             border-radius: 4px;
             font-size: 14px;
-            resize: vertical;
             box-sizing: border-box;
+            margin-bottom: 15px;
+        }
+        textarea {
+            resize: vertical;
         }
         button {
             background-color: #007bff;
@@ -56,11 +59,21 @@
 <body>
     <div class="container">
         <h1>Health Recommendation System</h1>
-        <h2>Text Input</h2>
+        <h2>Patient Symptoms Input</h2>
         <form action="/output" method="post">
-            <label for="text_input">Enter your text:</label>
-            <textarea id="text_input" name="text_input" rows="10" placeholder="Type something here..." required></textarea>
-            <button type="submit">Submit</button>
+            <label for="symptoms">Describe your symptoms:</label>
+            <textarea id="symptoms" name="symptoms" rows="6" placeholder="E.g., I have a headache, fever, and sore throat..." required></textarea>
+            
+            <label for="duration">How long have you had these symptoms?</label>
+            <input type="text" id="duration" name="duration" placeholder="E.g., 2 days, 1 week..." required>
+            
+            <label for="severity">Severity (1-10):</label>
+            <input type="number" id="severity" name="severity" min="1" max="10" placeholder="1 = mild, 10 = severe" required>
+            
+            <label for="additional_info">Additional Information (optional):</label>
+            <textarea id="additional_info" name="additional_info" rows="3" placeholder="Any other relevant details (medical history, current medications, allergies, etc.)"></textarea>
+            
+            <button type="submit">Get Health Recommendations</button>
         </form>
     </div>
 </body>
