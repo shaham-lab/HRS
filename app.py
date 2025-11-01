@@ -12,7 +12,14 @@ def index():
 @app.route('/output', methods=['POST'])
 def output():
     """Display the output with the submitted text."""
-    text_input = request.form.get('text_input', '')
+    if request.content_type and 'application/x-www-form-urlencoded' not in request.content_type and 'multipart/form-data' not in request.content_type:
+        return "Invalid content type", 400
+    
+    text_input = request.form.get('text_input', '').strip()
+    
+    if not text_input:
+        return render_template('index.html')
+    
     return render_template('output.html', text=text_input)
 
 
