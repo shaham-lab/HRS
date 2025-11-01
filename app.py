@@ -1,4 +1,5 @@
 import os
+import re
 from flask import Flask, render_template, request
 from openai import OpenAI
 from dotenv import load_dotenv
@@ -18,8 +19,34 @@ def index():
     return render_template('index.html')
 
 
+def sanitize_input(text, max_length=1000):
+    """Sanitize user input to prevent injection attacks."""
+    if not text:
+        return ""
+    # Remove any potential control characters and limit length
+    text = re.sub(r'[\x00-\x1f\x7f-\x9f]', '', text)
+    return text[:max_length].strip()
+
+
+def validate_severity(severity):
+    """Validate severity input."""
+    try:
+        severity_int = int(severity)
+        if 1 <= severity_int <= 10:
+            return severity_int
+        return 5  # Default to middle if out of range
+    except (ValueError, TypeError):
+        return 5  # Default to middle if invalid
+
+
 def get_health_recommendation(symptoms, duration, severity, additional_info):
     """Get health recommendations from OpenAI."""
+    # Sanitize all inputs
+    symptoms = sanitize_input(symptoms, 500)
+    duration = sanitize_input(duration, 100)
+    additional_info = sanitize_input(additional_info, 500)
+    severity = validate_severity(severity)
+    
     # Check if OpenAI client is initialized
     if client is None:
         # Return a demo response if no API key is configured
@@ -75,7 +102,9 @@ Keep the response clear, concise, and easy to understand."""
         
         return response.choices[0].message.content
     except Exception as e:
-        return f"Error getting recommendation: {str(e)}. Please make sure your OPENAI_API_KEY is set correctly in the .env file."
+        # Log the error for debugging but don't expose details to users
+        print(f"Error getting recommendation: {str(e)}")
+        return "Unable to generate health recommendations at this time. Please try again later or ensure your OpenAI API key is configured correctly."
 
 
 @app.route('/output', methods=['POST'])
@@ -92,6 +121,14 @@ def output():
     
     # Validate required fields
     if not symptoms or not duration or not severity:
+        return render_template('index.html')
+    
+    # Validate severity is a number between 1-10
+    try:
+        severity_int = int(severity)
+        if not (1 <= severity_int <= 10):
+            return render_template('index.html')
+    except ValueError:
         return render_template('index.html')
     
     # Get AI recommendation
