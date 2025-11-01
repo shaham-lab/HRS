@@ -28,7 +28,7 @@ pip install -r requirements.txt
 python app.py
 ```
 
-3. Run with Gunicorn (production):
+3. Run with Gunicorn (Linux only):
 ```bash
 gunicorn --bind 0.0.0.0:5000 app:app
 ```
