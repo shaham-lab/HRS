@@ -57,6 +57,9 @@ class LLMProvider(ABC):
 class OpenAIProvider(LLMProvider):
     """OpenAI LLM provider implementation."""
     
+    # Model configuration as class constant
+    DEFAULT_MODEL = 'gpt-3.5-turbo'
+    
     def initialize(self) -> bool:
         """Initialize the OpenAI client."""
         if not self.api_key or self.api_key == 'your_openai_api_key_here':
@@ -84,8 +87,11 @@ class OpenAIProvider(LLMProvider):
             ]
             messages_typed = cast(Iterable[Any], messages)
             
+            # Use environment variable for model if provided, otherwise use default
+            model_name = os.getenv('OPENAI_MODEL', self.DEFAULT_MODEL)
+            
             response = self._client.chat.completions.create(
-                model="gpt-3.5-turbo",
+                model=model_name,
                 messages=messages_typed,
                 temperature=0.7,
                 max_tokens=500
@@ -120,6 +126,9 @@ Based on your query, this is a demonstration response. To get real AI-powered he
 class GeminiProvider(LLMProvider):
     """Google Gemini LLM provider implementation."""
     
+    # Model configuration as class constant
+    DEFAULT_MODEL = 'gemini-1.5-flash'
+    
     def initialize(self) -> bool:
         """Initialize the Gemini client."""
         if not self.api_key or self.api_key == 'your_gemini_api_key_here':
@@ -128,7 +137,9 @@ class GeminiProvider(LLMProvider):
         try:
             import google.generativeai as genai
             genai.configure(api_key=self.api_key)
-            self._client = genai.GenerativeModel('gemini-1.5-flash')
+            # Use environment variable for model if provided, otherwise use default
+            model_name = os.getenv('GEMINI_MODEL', self.DEFAULT_MODEL)
+            self._client = genai.GenerativeModel(model_name)
             return True
         except Exception as e:
             print(f"Error initializing Gemini client: {str(e)}")
@@ -151,7 +162,12 @@ class GeminiProvider(LLMProvider):
                 }
             )
             
-            return response.text
+            # Check if response has text content
+            if response and hasattr(response, 'text') and response.text:
+                return response.text
+            else:
+                print("Warning: Gemini response did not contain text content")
+                return "Unable to generate health recommendations at this time. The AI service returned an empty response. Please try again."
         except Exception as e:
             print(f"Error generating Gemini response: {str(e)}")
             return "Unable to generate health recommendations at this time. Please try again later or ensure your Gemini API key is configured correctly."
