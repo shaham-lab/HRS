@@ -68,7 +68,8 @@ docker rm hrs
 
 ```
 HRS/
-├── app.py                  # Flask application with OpenAI integration
+├── app.py                  # Flask web application (routes and web logic)
+├── llm_service.py         # LLM service module (OpenAI API integration, prompts)
 ├── templates/
 │   ├── index.html         # Patient symptoms input form
 │   └── output.html        # AI recommendations display page
