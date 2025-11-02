@@ -80,7 +80,11 @@ docker rm hrs
 HRS/
 ├── app.py                  # Flask web application (routes and web logic)
 ├── llm_service.py         # LLM service module (provider integration, prompts)
-├── llm_providers.py       # LLM provider abstraction (OpenAI, Gemini implementations)
+├── llm_providers.py       # LLM provider factory and re-exports
+├── llm_provider.py        # Abstract base class for LLM providers
+├── openai_provider.py     # OpenAI provider implementation
+├── gemini_provider.py     # Google Gemini provider implementation
+├── llm_constants.py       # Shared constants and message templates
 ├── templates/
 │   ├── index.html         # Patient symptoms input form
 │   └── output.html        # AI recommendations display page
