@@ -58,7 +58,8 @@ class OpenAIProvider(LLMProvider):
                 max_tokens=500
             )
             
-            return response.choices[0].message.content
+            content = response.choices[0].message.content
+            return content if content is not None else ERROR_RESPONSE_TEMPLATE.format(provider_name=self.PROVIDER_NAME)
         except Exception as e:
             print(ERROR_GENERATION_TEMPLATE.format(provider_name=self.PROVIDER_NAME, error=str(e)))
             return ERROR_RESPONSE_TEMPLATE.format(provider_name=self.PROVIDER_NAME)

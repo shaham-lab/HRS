@@ -59,7 +59,7 @@ class GeminiProvider(LLMProvider):
             if response and hasattr(response, 'text') and response.text:
                 return response.text
             else:
-                print(f"Warning: {self.PROVIDER_NAME} response did not contain text content")
+                print("Warning: {} response did not contain text content".format(self.PROVIDER_NAME))
                 return ERROR_EMPTY_RESPONSE
         except Exception as e:
             print(ERROR_GENERATION_TEMPLATE.format(provider_name=self.PROVIDER_NAME, error=str(e)))
