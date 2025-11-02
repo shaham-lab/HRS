@@ -1,13 +1,15 @@
 # HRS
 Health Recommendation System
 
-A Flask-based web application that provides AI-powered health recommendations based on patient symptoms. The application uses OpenAI's GPT model to analyze symptoms and provide general health advice. It runs using Gunicorn as the WSGI server and can be deployed as a Docker container.
+A Flask-based web application that provides AI-powered health recommendations based on patient symptoms. The application supports multiple LLM providers (Google Gemini and OpenAI GPT) to analyze symptoms and provide general health advice. It runs using Gunicorn as the WSGI server and can be deployed as a Docker container.
 
 ## Features
 
 - Clean and responsive web interface
 - Patient symptoms input form with multiple fields (symptoms, duration, severity, additional info)
-- AI-powered health recommendations using OpenAI GPT
+- **Multiple LLM provider support**: Choose between Google Gemini (default) or OpenAI GPT
+- Flexible provider configuration through environment variables
+- AI-powered health recommendations with configurable providers
 - Detailed output screen showing symptoms summary and AI-generated recommendations
 - Medical disclaimer for user safety
 - Production-ready with Gunicorn WSGI server
@@ -16,7 +18,9 @@ A Flask-based web application that provides AI-powered health recommendations ba
 ## Prerequisites
 
 - Python 3.13 or higher
-- OpenAI API key (get one from https://platform.openai.com/api-keys)
+- An API key from one of the supported providers:
+  - **Gemini API key** (recommended, default provider): Get from https://makersuite.google.com/app/apikey
+  - **OpenAI API key** (optional): Get from https://platform.openai.com/api-keys
 - Docker (for containerized deployment)
 
 ## Running Locally
@@ -29,7 +33,9 @@ pip install -r requirements.txt
 2. Set up environment variables:
 ```bash
 cp .env.example .env
-# Edit .env and add your OpenAI API key
+# Edit .env and configure your preferred LLM provider:
+# - Set LLM_PROVIDER to either 'gemini' (default) or 'openai'
+# - Add the corresponding API key (GEMINI_API_KEY or OPENAI_API_KEY)
 ```
 
 3. Run with Flask development server:
@@ -51,9 +57,13 @@ gunicorn --bind 0.0.0.0:5000 app:app
 docker build -t hrs-flask-app .
 ```
 
-2. Run the container with your OpenAI API key:
+2. Run the container with your LLM provider configuration:
 ```bash
-docker run -d -p 8080:5000 -e OPENAI_API_KEY=your_api_key_here --name hrs hrs-flask-app
+# Using Gemini (default)
+docker run -d -p 8080:5000 -e GEMINI_API_KEY=your_api_key_here --name hrs hrs-flask-app
+
+# Or using OpenAI
+docker run -d -p 8080:5000 -e LLM_PROVIDER=openai -e OPENAI_API_KEY=your_api_key_here --name hrs hrs-flask-app
 ```
 
 3. Open your browser and navigate to `http://localhost:8080`
@@ -69,7 +79,8 @@ docker rm hrs
 ```
 HRS/
 ├── app.py                  # Flask web application (routes and web logic)
-├── llm_service.py         # LLM service module (OpenAI API integration, prompts)
+├── llm_service.py         # LLM service module (provider integration, prompts)
+├── llm_providers.py       # LLM provider abstraction (OpenAI, Gemini implementations)
 ├── templates/
 │   ├── index.html         # Patient symptoms input form
 │   └── output.html        # AI recommendations display page
@@ -80,6 +91,46 @@ HRS/
 ├── .gitignore           # Git ignore file
 └── README.md            # This file
 ```
+
+## LLM Provider Configuration
+
+The application supports multiple LLM providers with easy configuration:
+
+### Supported Providers
+
+1. **Google Gemini** (Default)
+   - Model: `gemini-1.5-flash`
+   - Configuration: Set `LLM_PROVIDER=gemini` (or omit, as it's the default)
+   - API Key: `GEMINI_API_KEY`
+
+2. **OpenAI GPT**
+   - Model: `gpt-3.5-turbo`
+   - Configuration: Set `LLM_PROVIDER=openai`
+   - API Key: `OPENAI_API_KEY`
+
+### Configuration Steps
+
+1. Copy the example environment file:
+   ```bash
+   cp .env.example .env
+   ```
+
+2. Edit `.env` and set your preferred provider:
+   ```bash
+   # For Gemini (default)
+   LLM_PROVIDER=gemini
+   GEMINI_API_KEY=your_gemini_api_key_here
+   
+   # For OpenAI
+   LLM_PROVIDER=openai
+   OPENAI_API_KEY=your_openai_api_key_here
+   ```
+
+3. The application will automatically use the configured provider
+
+### Demo Mode
+
+If no API key is configured, the application runs in demo mode, showing example responses instead of real AI-generated recommendations.
 
 ## Usage
 
