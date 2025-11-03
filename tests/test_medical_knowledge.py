@@ -3,7 +3,7 @@ Unit tests for medical knowledge base module.
 """
 
 import unittest
-from LLM.RAG.medical_knowledge import MEDICAL_DOCUMENTS
+from RAG.medical_knowledge import MEDICAL_DOCUMENTS
 
 
 class TestMedicalKnowledge(unittest.TestCase):

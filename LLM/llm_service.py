@@ -15,7 +15,7 @@ from dotenv import load_dotenv
 from .llm_provider import LLMProvider
 from .openai_provider import OpenAIProvider
 from .gemini_provider import GeminiProvider
-from .RAG.rag_service import get_rag_service
+from RAG.rag_service import get_rag_service
 
 load_dotenv()
 
