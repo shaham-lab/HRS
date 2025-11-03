@@ -83,16 +83,23 @@ HRS/
 ├── app.py                  # Flask web application (routes and web logic)
 ├── LLM/                    # LLM module containing all LLM-related functionality
 │   ├── __init__.py         # Module initialization and exports
-│   ├── llm_service.py     # LLM service module (provider factory, integration, prompts, RAG)
+│   ├── llm_service.py     # LLM service module (provider factory, integration, prompts)
 │   ├── llm_provider.py    # Abstract base class for LLM providers
 │   ├── openai_provider.py # OpenAI provider implementation
 │   ├── gemini_provider.py # Google Gemini provider implementation
 │   ├── llm_constants.py   # Shared constants and message templates
-│   ├── rag_service.py     # RAG service for document retrieval and context augmentation
-│   └── medical_knowledge.py # Medical knowledge base for RAG
+│   └── RAG/               # RAG module for Retrieval-Augmented Generation
+│       ├── __init__.py    # RAG module initialization and exports
+│       ├── rag_service.py # RAG service for document retrieval and context augmentation
+│       └── medical_knowledge.py # Medical knowledge base for RAG
 ├── templates/
 │   ├── index.html         # Patient symptoms input form
 │   └── output.html        # AI recommendations display page
+├── tests/                 # Unit tests
+│   ├── __init__.py        # Tests module initialization
+│   ├── test_llm_service.py # Unit tests for LLM service
+│   ├── test_rag_service.py # Unit tests for RAG service
+│   └── test_medical_knowledge.py # Unit tests for medical knowledge base
 ├── requirements.txt       # Python dependencies
 ├── .env.example          # Environment variables template
 ├── Dockerfile            # Docker configuration
@@ -182,6 +189,36 @@ The system supports various sentence-transformer models:
 - Any model from the sentence-transformers library
 
 **Note**: The first time RAG initializes, it will download the embedding model from HuggingFace. This requires internet access. In offline environments, RAG will gracefully disable itself and the system will function normally.
+
+## Testing
+
+The project includes comprehensive unit tests using Python's `unittest` framework.
+
+### Running Tests
+
+Run all tests:
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+Run a specific test file:
+```bash
+python -m unittest tests.test_llm_service -v
+```
+
+Run a specific test class:
+```bash
+python -m unittest tests.test_rag_service.TestRAGService -v
+```
+
+### Test Coverage
+
+The test suite includes:
+- **test_llm_service.py**: Tests for input sanitization, severity validation, and provider factory
+- **test_rag_service.py**: Tests for RAG service initialization, context retrieval, and prompt augmentation
+- **test_medical_knowledge.py**: Tests for medical knowledge base structure and content
+
+All tests use mocks where appropriate to avoid external dependencies (ChromaDB, LLM APIs, etc.).
 
 ## Usage
 
