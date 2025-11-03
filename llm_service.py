@@ -5,6 +5,7 @@ This module handles all interactions with LLM providers, including:
 - Provider initialization and selection
 - Input sanitization and validation
 - Prompt construction
+- RAG integration for context-aware recommendations
 - API calls to generate health recommendations
 """
 
@@ -14,6 +15,7 @@ from dotenv import load_dotenv
 from llm_provider import LLMProvider
 from openai_provider import OpenAIProvider
 from gemini_provider import GeminiProvider
+from rag_service import get_rag_service
 
 load_dotenv()
 
@@ -50,6 +52,9 @@ def get_provider(provider_name: str = None) -> LLMProvider:
 # Initialize LLM provider (defaults to Gemini)
 provider = get_provider()
 
+# Initialize RAG service if enabled
+rag_service = get_rag_service()
+
 
 def sanitize_input(text, max_length=1000):
     """Sanitize user input to prevent injection attacks."""
@@ -72,14 +77,14 @@ def validate_severity(severity):
 
 
 def get_health_recommendation(symptoms, duration, severity, additional_info):
-    """Get health recommendations from the configured LLM provider."""
+    """Get health recommendations from the configured LLM provider with RAG enhancement."""
     # Sanitize all inputs
     symptoms = sanitize_input(symptoms, 500)
     duration = sanitize_input(duration, 100)
     additional_info = sanitize_input(additional_info, 500)
     severity = validate_severity(severity)
     
-    # Construct the prompt
+    # Construct the base prompt
     prompt = f"""You are a helpful medical assistant. Based on the following patient information, provide best next medical test to diagnose, also suggest diagnosis.
 
 Symptoms: {symptoms}
@@ -95,6 +100,12 @@ Please provide:
 5. General lifestyle advice
 
 Keep the response clear, concise, and easy to understand."""
+
+    # Augment prompt with RAG context if available
+    if rag_service:
+        # Create a query combining symptoms and additional info for better retrieval
+        query = f"{symptoms}. {additional_info if additional_info else ''}"
+        prompt = rag_service.augment_prompt_with_context(prompt, query)
 
     system_message = "You are a helpful medical assistant who provides general health information and recommendations."
     

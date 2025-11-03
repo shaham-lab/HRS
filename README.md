@@ -1,15 +1,17 @@
 # HRS
 Health Recommendation System
 
-A Flask-based web application that provides AI-powered health recommendations based on patient symptoms. The application supports multiple LLM providers (Google Gemini and OpenAI GPT) to analyze symptoms and provide general health advice. It runs using Gunicorn as the WSGI server and can be deployed as a Docker container.
+A Flask-based web application that provides AI-powered health recommendations based on patient symptoms. The application supports multiple LLM providers (Google Gemini and OpenAI GPT) and uses RAG (Retrieval-Augmented Generation) to provide more accurate, context-aware medical recommendations by leveraging a curated medical knowledge base. It runs using Gunicorn as the WSGI server and can be deployed as a Docker container.
 
 ## Features
 
 - Clean and responsive web interface
 - Patient symptoms input form with multiple fields (symptoms, duration, severity, additional info)
+- **RAG (Retrieval-Augmented Generation)**: Enhanced recommendations using a medical knowledge base
 - **Multiple LLM provider support**: Choose between Google Gemini (default) or OpenAI GPT
 - Flexible provider configuration through environment variables
 - AI-powered health recommendations with configurable providers
+- Context-aware responses using vector-based document retrieval
 - Detailed output screen showing symptoms summary and AI-generated recommendations
 - Medical disclaimer for user safety
 - Production-ready with Gunicorn WSGI server
@@ -79,11 +81,13 @@ docker rm hrs
 ```
 HRS/
 ├── app.py                  # Flask web application (routes and web logic)
-├── llm_service.py         # LLM service module (provider factory, integration, prompts)
+├── llm_service.py         # LLM service module (provider factory, integration, prompts, RAG)
 ├── llm_provider.py        # Abstract base class for LLM providers
 ├── openai_provider.py     # OpenAI provider implementation
 ├── gemini_provider.py     # Google Gemini provider implementation
 ├── llm_constants.py       # Shared constants and message templates
+├── rag_service.py         # RAG service for document retrieval and context augmentation
+├── medical_knowledge.py   # Medical knowledge base for RAG
 ├── templates/
 │   ├── index.html         # Patient symptoms input form
 │   └── output.html        # AI recommendations display page
@@ -134,6 +138,48 @@ The application supports multiple LLM providers with easy configuration:
 ### Demo Mode
 
 If no API key is configured, the application runs in demo mode, showing example responses instead of real AI-generated recommendations.
+
+## RAG (Retrieval-Augmented Generation) Configuration
+
+The application uses RAG to enhance health recommendations with relevant medical knowledge from a curated knowledge base.
+
+### How RAG Works
+
+1. **Medical Knowledge Base**: Contains curated medical information about common conditions, symptoms, diagnostic tests, and treatment approaches
+2. **Vector Embeddings**: Documents are converted to numerical vectors using sentence-transformers
+3. **Semantic Search**: When a user submits symptoms, the system retrieves the most relevant medical documents
+4. **Context Augmentation**: Retrieved information is added to the LLM prompt for more accurate recommendations
+
+### RAG Configuration
+
+RAG is enabled by default. You can configure it in your `.env` file:
+
+```bash
+# Enable/disable RAG functionality (default: true)
+RAG_ENABLED=true
+
+# ChromaDB storage path (default: ./chromadb_data)
+CHROMADB_PATH=./chromadb_data
+
+# Embedding model (default: all-MiniLM-L6-v2)
+EMBEDDING_MODEL=all-MiniLM-L6-v2
+```
+
+### RAG Features
+
+- **Automatic Initialization**: Medical knowledge base is automatically indexed on first run
+- **Graceful Fallback**: If RAG fails to initialize, the system continues to work normally without RAG
+- **Semantic Retrieval**: Uses vector similarity to find the most relevant medical information
+- **Context-Aware Responses**: LLM receives both the user query and relevant medical context
+
+### Embedding Models
+
+The system supports various sentence-transformer models:
+- `all-MiniLM-L6-v2` (default): Fast and efficient, good for most use cases
+- `all-mpnet-base-v2`: More accurate but slower
+- Any model from the sentence-transformers library
+
+**Note**: The first time RAG initializes, it will download the embedding model from HuggingFace. This requires internet access. In offline environments, RAG will gracefully disable itself and the system will function normally.
 
 ## Usage
 

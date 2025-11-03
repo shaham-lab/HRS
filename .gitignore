@@ -12,3 +12,4 @@ build/
 venv/
 env/
 .venv/
+chromadb_data/
