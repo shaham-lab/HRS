@@ -35,11 +35,16 @@ class RAGService:
             bool: True if initialization successful, False otherwise.
         """
         try:
-            # Initialize ChromaDB client with ephemeral mode for simplicity
-            # In production, use persistent mode with proper directory
-            self.client = chromadb.Client(Settings(
-                anonymized_telemetry=False
-            ))
+            # Initialize ChromaDB client with persistent storage
+            persist_directory = os.getenv('CHROMADB_PATH', './chromadb_data')
+            
+            # Create directory if it doesn't exist
+            os.makedirs(persist_directory, exist_ok=True)
+            
+            self.client = chromadb.PersistentClient(
+                path=persist_directory,
+                settings=Settings(anonymized_telemetry=False)
+            )
             
             # Initialize embedding model
             # Try to load the model, handle offline scenarios
