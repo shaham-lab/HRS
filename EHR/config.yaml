@@ -1,0 +1,27 @@
+# config.yaml
+
+# Global settings for the pipeline
+pipeline:
+  name: "mimic4_standard"
+  output_dir: "./data/processed"
+  # How many rows to read for testing? (Set to null for all rows)
+  max_rows: 50000
+
+# Data Source 1: MIMIC-IV
+mimic4:
+  root_dir: "C:\\Users\\Eli\\Data\\physionet.org\\files\\mimiciv\\3.1\\Unzipped"
+  files:
+    patients: "patients.csv"
+    admissions: "admissions.csv"
+    labevents: "labevents.csv"
+
+  # Column mappings (in case raw names change)
+  columns:
+    subject_id: "subject_id"
+    item_id: "itemid"
+    label: "flag"
+
+# Future Data Source (Example)
+# hospital_x:
+#   root_dir: "/mnt/hospital_x/data"
+#   files: ...
