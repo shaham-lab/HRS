@@ -87,6 +87,32 @@ gunicorn --bind 0.0.0.0:5000 app:app
 
 ## Running with Docker
 
+### Using Conda-based Docker Image (Recommended)
+
+1. Build the Docker image:
+```bash
+docker build -f Dockerfile.conda -t hrs-flask-app .
+```
+
+2. Run the container with your LLM provider configuration:
+```bash
+# Using Gemini (default)
+docker run -d -p 8080:5000 -e GEMINI_API_KEY=your_api_key_here --name hrs hrs-flask-app
+
+# Or using OpenAI
+docker run -d -p 8080:5000 -e LLM_PROVIDER=openai -e OPENAI_API_KEY=your_api_key_here --name hrs hrs-flask-app
+```
+
+3. Open your browser and navigate to `http://localhost:8080`
+
+4. Stop the container:
+```bash
+docker stop hrs
+docker rm hrs
+```
+
+### Using pip-based Docker Image
+
 1. Build the Docker image:
 ```bash
 docker build -t hrs-flask-app .
@@ -136,7 +162,8 @@ HRS/
 ├── requirements.txt       # Python dependencies (pip)
 ├── environment.yml        # Conda environment specification
 ├── .env.example          # Environment variables template
-├── Dockerfile            # Docker configuration
+├── Dockerfile            # Docker configuration (pip-based)
+├── Dockerfile.conda      # Docker configuration (conda-based)
 ├── .dockerignore        # Docker ignore file
 ├── .gitignore           # Git ignore file
 └── README.md            # This file
