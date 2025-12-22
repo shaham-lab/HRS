@@ -2,9 +2,8 @@ FROM continuumio/miniconda3:latest
 
 WORKDIR /app
 
-COPY environment.yml .
-
-# Install packages using conda and pip
+# Install packages directly (not using environment.yml to avoid conda env overhead in Docker)
+# This matches the dependencies specified in environment.yml
 RUN conda install -y -c conda-forge -c defaults \
     python=3.13 \
     pyyaml \
