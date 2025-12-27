@@ -4,7 +4,7 @@ Unit tests for LLM service module.
 
 import unittest
 from unittest.mock import Mock, patch, MagicMock
-from LLM.llm_service import sanitize_input, validate_severity, get_provider
+from src.LLM.llm_service import sanitize_input, validate_severity, get_provider
 
 
 class TestSanitizeInput(unittest.TestCase):
@@ -105,7 +105,7 @@ class TestValidateSeverity(unittest.TestCase):
 class TestGetProvider(unittest.TestCase):
     """Test cases for provider factory function."""
     
-    @patch('LLM.llm_service.GeminiProvider')
+    @patch('src.LLM.llm_service.GeminiProvider')
     @patch.dict('os.environ', {'GEMINI_API_KEY': 'test_key'})
     def test_get_provider_gemini_default(self, mock_gemini):
         """Test that Gemini is the default provider."""
@@ -118,7 +118,7 @@ class TestGetProvider(unittest.TestCase):
                 mock_gemini.assert_called_once_with('test_key')
                 mock_instance.initialize.assert_called_once()
     
-    @patch('LLM.llm_service.GeminiProvider')
+    @patch('src.LLM.llm_service.GeminiProvider')
     @patch.dict('os.environ', {'LLM_PROVIDER': 'gemini', 'GEMINI_API_KEY': 'test_key'})
     def test_get_provider_gemini_explicit(self, mock_gemini):
         """Test explicit Gemini provider selection."""
@@ -129,7 +129,7 @@ class TestGetProvider(unittest.TestCase):
         mock_gemini.assert_called_once_with('test_key')
         mock_instance.initialize.assert_called_once()
     
-    @patch('LLM.llm_service.OpenAIProvider')
+    @patch('src.LLM.llm_service.OpenAIProvider')
     @patch.dict('os.environ', {'LLM_PROVIDER': 'openai', 'OPENAI_API_KEY': 'test_key'})
     def test_get_provider_openai(self, mock_openai):
         """Test OpenAI provider selection."""
@@ -147,7 +147,7 @@ class TestGetProvider(unittest.TestCase):
         
         self.assertIn('Unknown provider', str(context.exception))
     
-    @patch('LLM.llm_service.GeminiProvider')
+    @patch('src.LLM.llm_service.GeminiProvider')
     @patch.dict('os.environ', {'LLM_PROVIDER': 'GEMINI', 'GEMINI_API_KEY': 'test_key'})
     def test_get_provider_case_insensitive(self, mock_gemini):
         """Test that provider name is case-insensitive."""
