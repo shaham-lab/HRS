@@ -1,0 +1,53 @@
+{
+  "user_specific_project_path": "${USER_SPECIFIC_VALUE}",
+  "code_rel_path": "Integration\\",
+  "input_rel_path": "input\\",
+  "output_rel_path": "output\\",
+  "input_file_name" : "",
+  "__comment__input_file_name": "NEED TO SWITH HERE- UTILS",
+  "embedder_gueser":
+      {
+      "num_epochs" : 1000,
+      "hidden_dim1":64,
+      "hidden-dim2":32 ,
+      "lr": 1e-4,
+      "weight_decay":0.001, 
+      "val_trials_wo_im": 10,
+      "fraction_mask":0.1,
+      "run_validation":10,
+      "batch_size":128,
+      "text_embed_dim":768,
+      "reduced_dim":20
+      },
+   "agent":
+    {
+      "decay_step_size":50000,
+      "lr_decay_factor":0.1, 
+      "min_lr":1e-5  
+    },
+  "main_robust":
+      {
+      "save_dir":"ddqn_robust_models",
+      "save_guesser_dir":"model_robust_embedder_guesser",
+      "directory":"Integration",
+      "__comment__": "REMOVE DIRECTORY CONFIG - code_rel_path",
+      "gamma":0.9,
+      "n_update_target_dqn":50,
+      "ep_per_trainee":1000,
+      "batch_size":128,
+      "hidden-dim":64,
+      "capacity":1000000,
+      "max-episode":2000,
+      "min_epsilon":0.01,
+      "initial_epsilon":1,
+      "anneal_steps":1000,
+      "lr":1e-4,
+      "weight_decay":1e-4,
+      "lr_decay_factor":0.1,
+      "val_interval":300,
+      "val_trials_wo_im":6,
+      "cost_budget": 17,
+      "__cos_budget comment": "MOVE TO INPUT DURING LOAD"
+      }
+  }
+
