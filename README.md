@@ -147,10 +147,13 @@ HRS/
 │   ├── openai_provider.py # OpenAI provider implementation
 │   ├── gemini_provider.py # Google Gemini provider implementation
 │   └── llm_constants.py   # Shared constants and message templates
-├── RAG/                   # RAG module for Retrieval-Augmented Generation
-│   ├── __init__.py        # RAG module initialization and exports
-│   ├── rag_service.py     # RAG service for document retrieval and context augmentation
-│   └── medical_knowledge.py # Medical knowledge base for RAG
+├── src/                   # Source directory containing core modules
+│   ├── EHR/               # Electronic Health Records module
+│   ├── P-CAFE/            # P-CAFE module
+│   └── RAG/               # RAG module for Retrieval-Augmented Generation
+│       ├── __init__.py        # RAG module initialization and exports
+│       ├── rag_service.py     # RAG service for document retrieval and context augmentation
+│       └── medical_knowledge.py # Medical knowledge base for RAG
 ├── templates/
 │   ├── index.html         # Patient symptoms input form
 │   └── output.html        # AI recommendations display page

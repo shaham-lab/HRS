@@ -5,7 +5,7 @@ Unit tests for RAG service module.
 import unittest
 from unittest.mock import Mock, patch, MagicMock
 import os
-from RAG.rag_service import RAGService, get_rag_service, RAG_PROMPT_TEMPLATE
+from src.RAG.rag_service import RAGService, get_rag_service, RAG_PROMPT_TEMPLATE
 
 
 class TestRAGService(unittest.TestCase):
@@ -29,8 +29,8 @@ class TestRAGService(unittest.TestCase):
         custom_service = RAGService(collection_name="test_collection")
         self.assertEqual(custom_service.collection_name, "test_collection")
     
-    @patch('RAG.rag_service.chromadb.PersistentClient')
-    @patch('RAG.rag_service.SentenceTransformer')
+    @patch('src.RAG.rag_service.chromadb.PersistentClient')
+    @patch('src.RAG.rag_service.SentenceTransformer')
     @patch('os.makedirs')
     def test_initialize_success(self, mock_makedirs, mock_transformer, mock_chromadb):
         """Test successful initialization of RAG service."""
@@ -50,8 +50,8 @@ class TestRAGService(unittest.TestCase):
         self.assertTrue(self.rag_service.initialized)
         mock_makedirs.assert_called_once()
     
-    @patch('RAG.rag_service.chromadb.PersistentClient')
-    @patch('RAG.rag_service.SentenceTransformer')
+    @patch('src.RAG.rag_service.chromadb.PersistentClient')
+    @patch('src.RAG.rag_service.SentenceTransformer')
     def test_initialize_model_loading_failure(self, mock_transformer, mock_chromadb):
         """Test initialization fails gracefully when model loading fails."""
         # Setup mocks to fail on model loading
@@ -64,8 +64,8 @@ class TestRAGService(unittest.TestCase):
         self.assertFalse(result)
         self.assertFalse(self.rag_service.initialized)
     
-    @patch('RAG.rag_service.chromadb.PersistentClient')
-    @patch('RAG.rag_service.SentenceTransformer')
+    @patch('src.RAG.rag_service.chromadb.PersistentClient')
+    @patch('src.RAG.rag_service.SentenceTransformer')
     def test_initialize_chromadb_failure(self, mock_transformer, mock_chromadb):
         """Test initialization fails gracefully when ChromaDB fails."""
         # Setup mocks to fail on ChromaDB
@@ -132,8 +132,8 @@ class TestGetRAGService(unittest.TestCase):
     
     def setUp(self):
         """Reset global RAG service instance before each test."""
-        import RAG.rag_service
-        RAG.rag_service._rag_service = None
+        import src.RAG.rag_service
+        src.RAG.rag_service._rag_service = None
     
     @patch.dict('os.environ', {'RAG_ENABLED': 'false'})
     def test_get_rag_service_disabled(self):
@@ -142,7 +142,7 @@ class TestGetRAGService(unittest.TestCase):
         self.assertIsNone(result)
     
     @patch.dict('os.environ', {'RAG_ENABLED': 'true'})
-    @patch('RAG.rag_service.RAGService')
+    @patch('src.RAG.rag_service.RAGService')
     def test_get_rag_service_enabled(self, mock_rag_service):
         """Test that RAG service is created when enabled."""
         mock_instance = Mock()
@@ -156,7 +156,7 @@ class TestGetRAGService(unittest.TestCase):
         mock_instance.initialize.assert_called_once()
     
     @patch.dict('os.environ', {'RAG_ENABLED': 'true'})
-    @patch('RAG.rag_service.RAGService')
+    @patch('src.RAG.rag_service.RAGService')
     def test_get_rag_service_initialization_failure(self, mock_rag_service):
         """Test that None is returned when RAG service initialization fails."""
         mock_instance = Mock()
@@ -168,7 +168,7 @@ class TestGetRAGService(unittest.TestCase):
         self.assertIsNone(result)
     
     @patch.dict('os.environ', {'RAG_ENABLED': '1'})
-    @patch('RAG.rag_service.RAGService')
+    @patch('src.RAG.rag_service.RAGService')
     def test_get_rag_service_enabled_numeric(self, mock_rag_service):
         """Test that '1' is treated as enabled."""
         mock_instance = Mock()
@@ -180,7 +180,7 @@ class TestGetRAGService(unittest.TestCase):
         self.assertIsNotNone(result)
     
     @patch.dict('os.environ', {'RAG_ENABLED': 'yes'})
-    @patch('RAG.rag_service.RAGService')
+    @patch('src.RAG.rag_service.RAGService')
     def test_get_rag_service_enabled_yes(self, mock_rag_service):
         """Test that 'yes' is treated as enabled."""
         mock_instance = Mock()
@@ -192,7 +192,7 @@ class TestGetRAGService(unittest.TestCase):
         self.assertIsNotNone(result)
     
     @patch.dict('os.environ', {}, clear=True)
-    @patch('RAG.rag_service.RAGService')
+    @patch('src.RAG.rag_service.RAGService')
     def test_get_rag_service_default_enabled(self, mock_rag_service):
         """Test that RAG is enabled by default when env var is not set."""
         mock_instance = Mock()
