@@ -67,7 +67,7 @@ Repository = "https://github.com/ekazum/HRS"
 Issues = "https://github.com/ekazum/HRS/issues"
 
 [tool.setuptools]
-packages = ["LLM", "src.RAG", "src.EHR", "src.P-CAFE"]
+packages = ["LLM", "src.RAG", "src.EHR", "src.P_CAFE"]
 include-package-data = true
 
 [tool.setuptools.package-data]
