@@ -48,12 +48,12 @@ cp .env.example .env
 
 3. Run with Flask development server:
 ```bash
-python app.py
+python -m src.app
 ```
 
 4. Run with Gunicorn (Linux only):
 ```bash
-gunicorn --bind 0.0.0.0:5000 app:app
+gunicorn --bind 0.0.0.0:5000 src.app:app
 ```
 
 5. Open your browser and navigate to `http://localhost:5000`
@@ -75,12 +75,12 @@ cp .env.example .env
 
 3. Run with Flask development server:
 ```bash
-python app.py
+python -m src.app
 ```
 
 4. Run with Gunicorn (Linux only):
 ```bash
-gunicorn --bind 0.0.0.0:5000 app:app
+gunicorn --bind 0.0.0.0:5000 src.app:app
 ```
 
 5. Open your browser and navigate to `http://localhost:5000`
@@ -139,8 +139,8 @@ docker rm hrs
 
 ```
 HRS/
-├── app.py                  # Flask web application (routes and web logic)
 ├── src/                   # Source directory containing core modules
+│   ├── app.py             # Flask web application (routes and web logic)
 │   ├── LLM/                # LLM module containing all LLM-related functionality
 │   │   ├── __init__.py         # Module initialization and exports
 │   │   ├── llm_service.py     # LLM service module (provider factory, integration, prompts)
