@@ -1,5 +1,5 @@
 from flask import Flask, render_template, request
-from LLM.llm_service import get_health_recommendation
+from src.LLM.llm_service import get_health_recommendation
 
 app = Flask(__name__)
 

@@ -67,7 +67,7 @@ Repository = "https://github.com/ekazum/HRS"
 Issues = "https://github.com/ekazum/HRS/issues"
 
 [tool.setuptools]
-packages = ["LLM", "src.RAG", "src.EHR", "src.P_CAFE"]
+packages = ["src.LLM", "src.RAG", "src.EHR", "src.P_CAFE"]
 include-package-data = true
 
 [tool.setuptools.package-data]
@@ -111,7 +111,7 @@ disallow_untyped_defs = false
 ignore_missing_imports = true
 
 [tool.coverage.run]
-source = ["LLM", "src"]
+source = ["src"]
 omit = [
     "*/tests/*",
     "*/test_*.py",

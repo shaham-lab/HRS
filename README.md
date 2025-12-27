@@ -140,14 +140,14 @@ docker rm hrs
 ```
 HRS/
 ├── app.py                  # Flask web application (routes and web logic)
-├── LLM/                    # LLM module containing all LLM-related functionality
-│   ├── __init__.py         # Module initialization and exports
-│   ├── llm_service.py     # LLM service module (provider factory, integration, prompts)
-│   ├── llm_provider.py    # Abstract base class for LLM providers
-│   ├── openai_provider.py # OpenAI provider implementation
-│   ├── gemini_provider.py # Google Gemini provider implementation
-│   └── llm_constants.py   # Shared constants and message templates
 ├── src/                   # Source directory containing core modules
+│   ├── LLM/                # LLM module containing all LLM-related functionality
+│   │   ├── __init__.py         # Module initialization and exports
+│   │   ├── llm_service.py     # LLM service module (provider factory, integration, prompts)
+│   │   ├── llm_provider.py    # Abstract base class for LLM providers
+│   │   ├── openai_provider.py # OpenAI provider implementation
+│   │   ├── gemini_provider.py # Google Gemini provider implementation
+│   │   └── llm_constants.py   # Shared constants and message templates
 │   ├── EHR/               # Electronic Health Records module
 │   ├── P-CAFE/            # P-CAFE module
 │   └── RAG/               # RAG module for Retrieval-Augmented Generation
