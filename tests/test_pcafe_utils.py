@@ -9,8 +9,8 @@ from unittest.mock import Mock, patch
 import sys
 import os
 
-# Add parent directory to path to import modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Add P-CAFE directory to path to import modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'P-CAFE'))
 
 from pcafe_utils import (
     add_noise,

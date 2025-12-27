@@ -10,8 +10,8 @@ import shutil
 from unittest.mock import patch, mock_open
 import sys
 
-# Add parent directory to path to import modules
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src'))
+# Add P-CAFE directory to path to import modules
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'P-CAFE'))
 
 from load_config import deep_update, load_hierarchical_config, load_config
 
