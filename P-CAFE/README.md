@@ -38,7 +38,7 @@ To generate the benchmark datasets:
 - **eICU Dataset**
   - git clone to the repository: https://github.com/mostafaalishahi/eICU_Benchmark.git
   - Follow the code to extract the time series data for inhospital mortality in 48 hours
-save the time series data
+  - Save the time series data and run P-CAFE
 
 Navigate to the **`data`** directory for instructions.
 
