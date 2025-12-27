@@ -10,7 +10,7 @@ readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
-    {name = "HRS Contributors"}
+    {name = "Eli Kazum", email = "ekazum@gmail.com"}
 ]
 keywords = ["health", "recommendations", "ai", "llm", "rag", "flask", "medical"]
 classifiers = [

@@ -1,5 +1,5 @@
 import gymnasium
-from src.embedder_guesser import *
+from ..embedder_guesser import *
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 class myEnv(gymnasium.Env):

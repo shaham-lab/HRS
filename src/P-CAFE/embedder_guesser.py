@@ -11,9 +11,8 @@ from sklearn.model_selection import train_test_split
 from transformers import AutoModel, AutoTokenizer, \
     BartForConditionalGeneration, BartTokenizer
 import argparse
-from src import pcafe_utils
+import pcafe_utils
 import pandas as pd
-import json
 from pathlib import Path
 from load_config import load_hierarchical_config
 
@@ -27,7 +26,7 @@ config = load_hierarchical_config(
 )
 
 # Extract embedder_guesser configuration with fallback to root-level config
-embedder_config = config.get("embedder_gueser", {})  # Note: typo in original config file
+embedder_config = config.get("embedder_guesser", {})
 
 # Get the project path from the JSON configuration
 project_path = Path(config.get("user_specific_project_path", os.getcwd()))
@@ -275,7 +274,7 @@ class MultimodalGuesser(nn.Module):
         # load LSTM model for time series data
         if isinstance(self.X, list):
             self.time_series_embedder = LSTMEncoder(self.X[0].shape[1], 20).to(self.device)
-        # define dimention of embedding
+        # define dimension of embedding
         self.text_reducer = nn.Linear(FLAGS.text_embed_dim, FLAGS.reduced_dim).to(self.device)
         self.text_reduced_dim = FLAGS.reduced_dim
         self.num_classes = len(np.unique(self.y))
@@ -549,7 +548,7 @@ def create_mask(model) -> np.array:
     return binary_mask
 
 
-def create_adverserial_input(sample, label, pretrained_model):
+def create_adversarial_input(sample, label, pretrained_model):
     """
     Generates an adversarial mask by identifying the most influential feature
     for a given sample and zeroing it out.
@@ -738,7 +737,7 @@ def train_model(model,
             if random.random() < prob_mask:
                 mask = create_mask(model)
             else:
-                mask = create_adverserial_input(input, label, model)
+                mask = create_adversarial_input(input, label, model)
 
             # Forward pass
             output = model(input, mask)

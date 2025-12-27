@@ -1,13 +1,17 @@
 import shutil
 import torch.nn
 from typing import List, Tuple
-from src.DDQN.env_robust import *
-from src.DDQN.agent import *
-from src.DDQN.PrioritiziedReplayMemory import *
-from sklearn.metrics import roc_auc_score, average_precision_score
+from matplotlib import pyplot as plt
+from env_robust import *
+from agent import *
+from PrioritiziedReplayMemory import *
+from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
 import time
-#with open(r'C:\Users\kashann\PycharmProjects\PCAFE-MIMIC\Integration\user_config_naama.json', 'r') as f:
-#    config = json.load(f)
+import json
+import os
+from pathlib import Path
+from ..embedder_guesser import MultimodalGuesser
+
 with open(r'config\user_config.json', 'r') as f:
     config = json.load(f)
 
@@ -541,52 +545,6 @@ def main():
     os.chdir(FLAGS.directory)
     acc, epochs, intersect, union, steps = run(FLAGS.cost_budget)
 
-
-
-# def show_sample_paths(n_patients, env, agent):
-#     """A method to run episodes on randomly chosen positive and negative test patients, and print trajectories to console  """
-#     print('Loading best networks')
-#     input_dim, output_dim = get_env_dim(env)
-#     env.guesser, agent.dqn = load_networks(i_episode='best', env=env, state_dim=env.guesser.features_total, output_dim=output_dim)
-#     for i in range(n_patients):
-#         print('Starting new episode with a new test patient')
-#         idx = np.random.randint(0, len(env.X_test))
-#         state = env.reset(mode='test',
-#                           patient=idx,
-#                           train_guesser=False)
-#
-#         mask = env.reset_mask()
-#
-#         # run episode
-#         for t in range(int(env.episode_length)):
-#             action = agent.get_action(state, env, eps=0, mask=mask, mode='test')
-#             mask[action] = 0
-#             if action != env.guesser.features_size:
-#                 print('Step: {}, Question: '.format(t + 1), env.guesser.question_names[action], ', Answer: ',
-#                       env.X_test[idx, action])
-#             # take the action
-#             state, reward, done, guess = env.step(action, mask, mode='test')
-#
-#             if guess != -1:
-#                 print('Step: {}, Ready to make a guess: Prob({})={:1.3f}, Guess: y={}, Ground truth: {}'.format(t + 1,
-#                                                                                                                 guess,
-#                                                                                                                 env.probs[
-#                                                                                                                     guess],
-#                                                                                                                 guess,
-#                                                                                                                 env.y_test[
-#                                                                                                                     idx]))
-#
-#                 break
-#
-#         if guess == -1:
-#             state, reward, done, guess = env.step(agent.output_dim - 1, mask, mode='test')
-#             print('Step: {}, Ready to make a guess: Prob({})={:1.3f}, Guess: y={}, Ground truth: {}'.format(t + 1,
-#                                                                                                             guess,
-#                                                                                                             env.probs[
-#                                                                                                                 guess],
-#                                                                                                             guess,
-#                                                                                                             env.y_test[
-#                                                                                                                 idx]))
 
 
 

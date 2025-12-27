@@ -13,3 +13,5 @@ venv/
 env/
 .venv/
 chromadb_data/
+/guesser_eICU/
+/ddqn_robust_models/
