@@ -15,6 +15,8 @@ import pcafe_utils
 import pandas as pd
 from pathlib import Path
 from load_config import load_hierarchical_config
+from image_embedder import ImageEmbedder
+from lstm_encoder import LSTMEncoder
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -100,38 +102,6 @@ parser.add_argument(
 FLAGS = parser.parse_args()
 
 
-class ImageEmbedder(nn.Module):
-    """
-    A CNN-based module for embedding grayscale images.
-    It resizes input images to 28x28, applies 2 convolutional layers,
-    followed by pooling and two fully connected layers to produce a 20-dim embedding.
-    """
-
-    def __init__(self):
-        super(ImageEmbedder, self).__init__()
-        # Define CNN layers for embedding
-        self.conv1 = nn.Conv2d(1, 32, kernel_size=3, padding=1)
-        self.conv2 = nn.Conv2d(32, 64, kernel_size=3, padding=1)
-        self.pool = nn.MaxPool2d(2, 2)
-        self.fc1 = nn.Linear(64 * 7 * 7, 128)  # Flatten to 128 dimensions
-        self.fc2 = nn.Linear(128, 20)
-        # Define the image transform (convert to tensor and normalize)
-        self.transform = transforms.Compose([
-            transforms.Resize((28, 28)),  # Resize the image to 28x28 if needed
-            transforms.ToTensor(),  # Convert PIL image to tensor
-            transforms.Normalize((0.5,), (0.5,))  # Normalize with mean=0.5, std=0.5
-        ])
-
-    def forward(self, x):
-        x = self.pool(F.relu(self.conv1(x)))  # First conv + pooling
-        x = self.pool(F.relu(self.conv2(x)))  # Second conv + pooling
-        x = x.view(-1, 64 * 7 * 7)  # Flatten the output from (batch_size, 64, 7, 7) to (batch_size, 64*7*7)
-        x = F.relu(self.fc1(x))  # Embedding output (128 features)
-        # embedd to 30 features
-        x = F.relu(self.fc2(x))
-        return x
-
-
 def map_features_to_indices(data):
     """
     Assigns index mappings to each feature based on whether the feature is text or numeric.
@@ -163,37 +133,6 @@ def map_features_to_indices(data):
                 current_index += 1
 
     return index_map, current_index
-
-
-class LSTMEncoder(nn.Module):
-    """
-     Encodes sequential data using a standard or bidirectional LSTM.
-
-     :param input_dim: Size of input features
-     :param hidden_dim: Size of LSTM hidden state
-     :param num_layers: Number of LSTM layers
-     :param bidirectional: Whether to use bidirectional LSTM
-     """
-
-    def __init__(self, input_dim, hidden_dim, num_layers=1, bidirectional=False):
-        super(LSTMEncoder, self).__init__()
-        self.lstm = nn.LSTM(
-            input_size=input_dim,
-            hidden_size=hidden_dim,
-            num_layers=num_layers,
-            batch_first=True,
-            bidirectional=bidirectional
-        )
-
-        self.num_directions = 2 if bidirectional else 1
-
-    def forward(self, x):
-        # x: [batch_size, seq_len, input_dim]
-        _, (h_n, _) = self.lstm(x)  # h_n: [num_layers * num_directions, batch, hidden_dim]
-        # Take the last layer's output
-        h_last = h_n[-self.num_directions:]  # shape: [num_directions, batch, hidden_dim]
-        embedding = h_last.permute(1, 0, 2).reshape(x.size(0), -1)  # shape: [batch, hidden_dim * num_directions]
-        return embedding
 
 
 def load_data_function(data_loader_name):
