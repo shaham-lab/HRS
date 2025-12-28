@@ -1,5 +1,6 @@
 import gymnasium
 from ..embedder_guesser import *
+from ..multimodal_guesser import MultimodalGuesser
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 class myEnv(gymnasium.Env):
@@ -8,7 +9,7 @@ class myEnv(gymnasium.Env):
                  device, cost_budget,
                  load_pretrained_guesser=True):
 
-        self.guesser = MultimodalGuesser()
+        self.guesser = MultimodalGuesser(flags)
         self.device = device
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.guesser.X, self.guesser.y,
                                                                                 test_size=0.1, random_state=42)

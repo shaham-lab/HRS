@@ -9,7 +9,7 @@ import time
 import json
 import os
 from pathlib import Path
-from ..embedder_guesser import MultimodalGuesser
+from ..multimodal_guesser import MultimodalGuesser
 
 with open(r'config\user_config.json', 'r') as f:
     config = json.load(f)
@@ -273,7 +273,7 @@ def load_networks(i_episode: int, env, state_dim=26, output_dim=14,
     dqn_load_path = os.path.join(FLAGS.save_dir, dqn_filename)
 
     # load guesser
-    guesser = MultimodalGuesser()
+    guesser = MultimodalGuesser(FLAGS)
     guesser_state_dict = torch.load(guesser_load_path)
     guesser.load_state_dict(guesser_state_dict)
     guesser.to(device=device)

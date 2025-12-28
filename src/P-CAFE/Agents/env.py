@@ -1,5 +1,6 @@
 import gymnasium
 from ..embedder_guesser import *
+from ..multimodal_guesser import MultimodalGuesser
 from gymnasium import spaces
 
 
@@ -19,7 +20,7 @@ class myEnv(gymnasium.Env):
             flags: Configuration flags (must contain 'device').
         """
         super(myEnv, self).__init__()
-        self.guesser = MultimodalGuesser()
+        self.guesser = MultimodalGuesser(flags)
 
         self.action_space = spaces.Discrete(self.guesser.tests_number + 1)
         self.observation_space = spaces.Box(
