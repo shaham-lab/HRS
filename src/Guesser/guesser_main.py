@@ -64,6 +64,10 @@ def parse_arguments():
                         type=int,
                         default=embedder_config.get("num_epochs", NUM_EPOCHS),
                         help="number of epochs (can be set in `config\\user_config.json`)")
+    parser.add_argument("--input_rel_path",
+                        type=str,
+                        default=config.get("input_rel_path", "input\\"),
+                        help="relative path to input data directory (can be set in `config\\user_config.json`)")
     parser.add_argument("--val_trials_wo_im",
                         type=int,
                         default=embedder_config.get("val_trials_wo_im", VAL_TRIALS_WO_IM),
