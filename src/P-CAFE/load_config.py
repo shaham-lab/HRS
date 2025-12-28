@@ -63,25 +63,3 @@ def load_hierarchical_config(base_config_path="base_config.json",
         config = deep_update(config, cli_args)
     
     return config
-
-
-def load_config(username):
-    """
-    Legacy function for backward compatibility.
-    Load config with username-specific file.
-    
-    Args:
-        username (str): Username to load config for
-    
-    Returns:
-        dict: Configuration dictionary
-    """
-    with open("base_config.json", "r", encoding="utf-8") as f:
-        base_config = json.load(f)
-
-    user_config_file = f"user_config_{username}.json"
-    if os.path.exists(user_config_file):
-        with open(user_config_file, "r", encoding="utf-8") as f:
-            user_config = json.load(f)
-        base_config = deep_update(base_config, user_config)
-    return base_config
