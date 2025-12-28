@@ -5,7 +5,7 @@ from env_robust import *
 from agent import *
 from PrioritiziedReplayMemory import *
 from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
-import time
+#import time
 import json
 import os
 from pathlib import Path
@@ -259,7 +259,7 @@ def save_networks(i_episode: int, env, agent,
     os.rename(dqn_save_path + '~', dqn_save_path)
 
 
-def load_networks(i_episode: int, env, state_dim=26, output_dim=14,
+def load_networks(i_episode: int, state_dim=26, output_dim=14,
                   val_acc=None) -> None:
     """ A method to load parameters of guesser and dqn """
     if i_episode == 'best':
@@ -291,7 +291,7 @@ def test(env, agent, state_dim, output_dim):
     mask_list = []
     cost_list = []
     print('Loading best networks')
-    env.guesser, agent.dqn = load_networks(i_episode='best', env=env, state_dim=state_dim, output_dim=output_dim)
+    env.guesser, agent.dqn = load_networks(i_episode='best', state_dim=state_dim, output_dim=output_dim)
     y_hat_test = np.zeros(len(env.y_test))
     y_hat_probs = np.zeros(len(env.y_test))
     n_test = len(env.X_test)
@@ -325,7 +325,7 @@ def test(env, agent, state_dim, output_dim):
 
         if guess == -1:
             a = agent.output_dim - 1
-            s2, r, done, info = env.step(a, mask)
+            _, _, _, _ = env.step(a, mask)
             y_hat_test[i] = env.guess
             y_hat_probs[i] = env.prob_classes
 
@@ -338,7 +338,7 @@ def test(env, agent, state_dim, output_dim):
 
     auc_pr = average_precision_score(env.y_test, y_hat_probs)
     print(f"AUC-PR: {auc_pr}")
-    intersect, union = check_intersecion_union(mask_list)
+    intersect, union = check_intersection_union(mask_list)
     C = confusion_matrix(env.y_test, y_hat_test)
 
     print(C)
@@ -352,7 +352,7 @@ def test(env, agent, state_dim, output_dim):
 
 
 
-def check_intersecion_union(mask_list):
+def check_intersection_union(mask_list):
     # Convert the list of tensors to a 2D tensor
     selected_features_tensor = torch.stack(mask_list)
 
@@ -390,7 +390,7 @@ def val(i_episode: int,
         t = 0
         done = False
         sum_cost = 0
-        start_time = time.time()
+        #start_time = time.time()
         while not done and sum_cost < env.cost_budget:
             # select action from policy
             if t == 0:
@@ -413,13 +413,13 @@ def val(i_episode: int,
 
         if guess == -1:
             a = agent.output_dim - 1
-            s2, r, done, info = env.step(a, mask)
+            _, _, _, _ = env.step(a, mask)
             y_hat_val[i] = env.guess
             y_hat_probs[i] = env.prob_classes
 
         cost_list.append(sum_cost)
-        end_time = time.time()
-        execution_time = (end_time - start_time)
+        #end_time = time.time()
+        #execution_time = (end_time - start_time)
         # print(f"Execution time: {execution_time:.6f} seconds")
 
     auc_roc = roc_auc_score(env.y_val, y_hat_probs)
@@ -502,12 +502,11 @@ def run(cost_budget):
 
 def main():
     os.chdir(FLAGS.directory)
-    acc, epochs, intersect, union, steps = run(FLAGS.cost_budget)
+    _, _, _, _, _ = run(FLAGS.cost_budget)
 
 
 
 
 if __name__ == '__main__':
-    os.chdir(FLAGS.directory)
     main()
 

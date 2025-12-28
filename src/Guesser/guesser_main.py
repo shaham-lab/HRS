@@ -66,7 +66,7 @@ def parse_arguments():
                         help="number of epochs (can be set in `config\\user_config.json`)")
     parser.add_argument("--input_rel_path",
                         type=str,
-                        default=config.get("input_rel_path", "input\\"),
+                        default=config.get("input_rel_path", "data\\input\\"),
                         help="relative path to input data directory (can be set in `config\\user_config.json`)")
     parser.add_argument("--val_trials_wo_im",
                         type=int,

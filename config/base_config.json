@@ -1,7 +1,7 @@
 {
   "user_specific_project_path": "${USER_SPECIFIC_VALUE}",
   "code_rel_path": "Integration\\",
-  "input_rel_path": "input\\",
+  "input_rel_path": "data\\input\\time_series\\",
   "output_rel_path": "output\\",
   "input_file_name" : "",
   "__comment__input_file_name": "NEED TO SWITH HERE- UTILS",

@@ -83,16 +83,16 @@ def map_time_series(sample):
     return index_map
 
 
-def load_mimic_time_series(input_rel_path="input\\"):
+def load_mimic_time_series(input_rel_path="data\\input\\time_series\\"):
     # Get the current working directory
     base_dir = os.getcwd()
     # Construct file paths dynamically
-    train_X_path = os.path.join(base_dir, input_rel_path, 'time_series\\train_X.csv')
-    train_Y_path = os.path.join(base_dir, input_rel_path, 'time_series\\train_Y.csv')
-    val_X_path = os.path.join(base_dir, input_rel_path, 'time_series\\val_X.csv')
-    val_Y_path = os.path.join(base_dir, input_rel_path, 'time_series\\val_Y.csv')
-    test_X_path = os.path.join(base_dir, input_rel_path, 'time_series\\test_X.csv')
-    test_Y_path = os.path.join(base_dir, input_rel_path, 'time_series\\test_Y.csv')
+    train_X_path = os.path.join(base_dir, input_rel_path, 'train_X.csv')
+    train_Y_path = os.path.join(base_dir, input_rel_path, 'train_Y.csv')
+    val_X_path = os.path.join(base_dir, input_rel_path, 'val_X.csv')
+    val_Y_path = os.path.join(base_dir, input_rel_path, 'val_Y.csv')
+    test_X_path = os.path.join(base_dir, input_rel_path, 'test_X.csv')
+    test_Y_path = os.path.join(base_dir, input_rel_path, 'test_Y.csv')
 
     # Read the files
     X_train = pd.read_csv(train_X_path)
@@ -132,7 +132,7 @@ def df_to_list(df):
 
 
 
-def load_time_Series(input_rel_path="input\\"):
+def load_time_Series(input_rel_path="data\\input\\"):
     base_dir = os.getcwd()
     path = os.path.join(base_dir, input_rel_path, 'df_data.csv')
     # read csv file from path
@@ -153,7 +153,7 @@ def load_time_Series(input_rel_path="input\\"):
 
 
 
-def load_mimic_text(input_rel_path="input\\"):
+def load_mimic_text(input_rel_path="data\\input\\"):
     base_dir = os.getcwd()
     # Construct file paths dynamically
     path = os.path.join(base_dir, input_rel_path, 'data_with_text.json')
