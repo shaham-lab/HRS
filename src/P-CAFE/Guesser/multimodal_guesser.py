@@ -4,7 +4,9 @@ import torch.nn.functional as F
 import torch
 import torch.nn as nn
 from PIL import Image
-import pcafe_utils
+import sys
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+import utils
 import pandas as pd
 from transformers import AutoModel, AutoTokenizer, \
     BartForConditionalGeneration, BartTokenizer
@@ -55,13 +57,13 @@ def load_data_function(data_loader_name):
     :return: Function pointer to data loader
     """
     data_loaders = {
-        "load_time_Series": pcafe_utils.load_time_Series,
-        "load_mimic_text": pcafe_utils.load_mimic_text,
-        "load_mimic_time_series": pcafe_utils.load_mimic_time_series,
+        "load_time_Series": utils.load_time_Series,
+        "load_mimic_text": utils.load_mimic_text,
+        "load_mimic_time_series": utils.load_mimic_time_series,
     }
 
     # Return the appropriate function based on the provided name
-    return data_loaders.get(data_loader_name, pcafe_utils.load_time_Series)  # Default to load_time_Series
+    return data_loaders.get(data_loader_name, utils.load_time_Series)  # Default to load_time_Series
 
 
 class MultimodalGuesser(nn.Module):

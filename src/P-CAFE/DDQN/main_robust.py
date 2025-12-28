@@ -9,7 +9,7 @@ import time
 import json
 import os
 from pathlib import Path
-from ..multimodal_guesser import MultimodalGuesser
+from ..Guesser.multimodal_guesser import MultimodalGuesser
 
 with open(r'config\user_config.json', 'r') as f:
     config = json.load(f)

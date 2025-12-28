@@ -12,7 +12,7 @@ import os
 # Add P-CAFE directory to path to import modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'P-CAFE'))
 
-from pcafe_utils import (
+from utils import (
     add_noise,
     balance_class,
     balance_class_no_noise,

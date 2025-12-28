@@ -1,6 +1,6 @@
 import gymnasium
-from ..embedder_guesser import *
-from ..multimodal_guesser import MultimodalGuesser
+from ..Guesser.guesser_main import *
+from ..Guesser.multimodal_guesser import MultimodalGuesser
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
 class myEnv(gymnasium.Env):
