@@ -31,6 +31,6 @@ class ImageEmbedder(nn.Module):
         x = self.pool(F.relu(self.conv2(x)))  # Second conv + pooling
         x = x.view(-1, 64 * 7 * 7)  # Flatten the output from (batch_size, 64, 7, 7) to (batch_size, 64*7*7)
         x = F.relu(self.fc1(x))  # Embedding output (128 features)
-        # embedd to 30 features
+        # Embed to 20 features
         x = F.relu(self.fc2(x))
         return x
