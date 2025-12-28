@@ -1,5 +1,5 @@
 """
-Unit tests for pcafe_utils module.
+Unit tests for utils module.
 """
 
 import unittest

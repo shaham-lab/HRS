@@ -29,7 +29,7 @@
   "main_robust":
       {
       "save_dir":"ddqn_robust_models",
-      "save_guesser_dir":"model_robust_guesser",
+      "save_guesser_dir":"model_robust_embedder_guesser",
       "directory":"Integration",
       "__comment__": "REMOVE DIRECTORY CONFIG - code_rel_path",
       "gamma":0.9,

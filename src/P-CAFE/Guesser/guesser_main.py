@@ -8,10 +8,8 @@ from sklearn.model_selection import train_test_split
 import argparse
 import pandas as pd
 from pathlib import Path
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from load_config import load_hierarchical_config
-from multimodal_guesser import MultimodalGuesser
+from ..load_config import load_hierarchical_config
+from .multimodal_guesser import MultimodalGuesser
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
