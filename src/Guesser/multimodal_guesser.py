@@ -47,12 +47,13 @@ def map_features_to_indices(data):
     return index_map, current_index
 
 
-def load_data_function(data_loader_name):
+def load_data_function(data_loader_name, input_rel_path="input\\"):
     """
-    Dynamically loads a data loading function by name.
+    Dynamically loads a data loading function by name and calls it with input_rel_path.
 
     :param data_loader_name: String key for the data loader
-    :return: Function pointer to data loader
+    :param input_rel_path: Relative path to input data directory
+    :return: Tuple of (X, y, tests_number, map_test) from the data loader
     """
     data_loaders = {
         "load_time_Series": utils.load_time_Series,
@@ -60,8 +61,11 @@ def load_data_function(data_loader_name):
         "load_mimic_time_series": utils.load_mimic_time_series,
     }
 
-    # Return the appropriate function based on the provided name
-    return data_loaders.get(data_loader_name, utils.load_time_Series)  # Default to load_time_Series
+    # Get the appropriate function based on the provided name
+    loader_func = data_loaders.get(data_loader_name, utils.load_time_Series)  # Default to load_time_Series
+    
+    # Call the loader function with input_rel_path
+    return loader_func(input_rel_path=input_rel_path)
 
 
 class MultimodalGuesser(nn.Module):
@@ -105,8 +109,7 @@ class MultimodalGuesser(nn.Module):
         super(MultimodalGuesser, self).__init__()
         self.device = DEVICE
         # Load the function based on the argument
-        data_loader_function = load_data_function(FLAGS.data)
-        self.X, self.y, self.tests_number, self.map_test = data_loader_function()
+        self.X, self.y, self.tests_number, self.map_test = load_data_function(FLAGS.data, FLAGS.input_rel_path)
         # load summarization model
         self.summarize_text_model = BartForConditionalGeneration.from_pretrained("facebook/bart-large-cnn").to(
             self.device)
