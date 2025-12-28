@@ -1,5 +1,5 @@
 """
-Common utilities and configuration for P-CAFE.
+Common utilities and configurations
 """
 
 from .load_config import deep_update, load_hierarchical_config
