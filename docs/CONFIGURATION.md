@@ -74,7 +74,7 @@ In this example:
 Simply run the script without any arguments:
 
 ```bash
-python src/embedder_guesser.py
+python src/P-CAFE/Guesser/guesser_main.py
 ```
 
 This will use values from `base_config.json`, overridden by `user_config.json` if it exists.
@@ -84,7 +84,7 @@ This will use values from `base_config.json`, overridden by `user_config.json` i
 You can override any configuration parameter via command-line arguments:
 
 ```bash
-python src/embedder_guesser.py --num_epochs 10000 --batch_size 64 --lr 0.0001
+python src/P-CAFE/Guesser/guesser_main.py --num_epochs 10000 --batch_size 64 --lr 0.0001
 ```
 
 ### Complete Example
@@ -113,7 +113,7 @@ Given these configurations:
 
 **Command:**
 ```bash
-python src/embedder_guesser.py --batch_size 256
+python src/P-CAFE/Guesser/guesser_main.py --batch_size 256
 ```
 
 **Effective Configuration:**
@@ -121,7 +121,7 @@ python src/embedder_guesser.py --batch_size 256
 - `batch_size`: 256 (from command-line)
 - `lr`: 1e-4 (from base_config.json)
 
-## Available Parameters for embedder_guesser
+## Available Parameters for guesser_main
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|

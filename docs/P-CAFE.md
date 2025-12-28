@@ -62,7 +62,7 @@ Navigate to the **`data`** directory for instructions.
     
     Example:
     ```bash
-    python src/embedder_guesser.py --num_epochs 5000 --batch_size 256
+    python src/P-CAFE/Guesser/guesser_main.py --num_epochs 5000 --batch_size 256
     ```
 
 3. Dataset Configuration
@@ -70,15 +70,15 @@ Navigate to the **`data`** directory for instructions.
     Choose your dataset using the `--data` command-line argument:
 
     Supported datasets:
-    - `pcafe_utils.load_time_Series()` – eICU time series data (default)
-    - `pcafe_utils.load_mimic_text()` – MIMIC-III multimodal data (includes clinical text)
-    - `pcafe_utils.load_mimic_time_series()` – MIMIC-III numeric time series
+    - `utils.load_time_Series()` – eICU time series data (default)
+    - `utils.load_mimic_text()` – MIMIC-III multimodal data (includes clinical text)
+    - `utils.load_mimic_time_series()` – MIMIC-III numeric time series
     
     Example:
     ```bash
-    python src/embedder_guesser.py --data pcafe_utils.load_mimic_text()
+    python src/P-CAFE/Guesser/guesser_main.py --data utils.load_mimic_text()
     ```
-    Open `embedder_guesser.py` and choose your dataset by modifying the `--data` argument passed to the program from runtime command
+    Open `guesser_main.py` and choose your dataset by modifying the `--data` argument passed to the program from runtime command
 
     Supported datasets:
     - `load_time_Series` – eICU time series data
@@ -87,7 +87,7 @@ Navigate to the **`data`** directory for instructions.
 
     Define the feature costs by setting `self.cost_list` in the `MultimodalGuesser` class.
 
-4. Running the embedder_guesser Module
+4. Running the guesser_main Module
 
 5. For the DDQN agent run **`main_robust.py in the DDQN folder`**, for other agent run **`main_sb3.py`** in the Agents folder and choose the RL agent.
 
