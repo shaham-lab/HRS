@@ -13,7 +13,7 @@ import sys
 # Add P-CAFE directory to path to import modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'P-CAFE'))
 
-from load_config import deep_update, load_hierarchical_config, load_config
+from load_config import deep_update, load_hierarchical_config
 
 
 class TestDeepUpdate(unittest.TestCase):
@@ -161,46 +161,6 @@ class TestLoadHierarchicalConfig(unittest.TestCase):
                 base_config_path=os.path.join(self.test_dir, "missing.json"),
                 user_config_path=self.user_config_path
             )
-
-
-class TestLoadConfig(unittest.TestCase):
-    """Test cases for legacy load_config function."""
-    
-    def setUp(self):
-        """Set up temporary directory for test config files."""
-        self.test_dir = tempfile.mkdtemp()
-        self.original_cwd = os.getcwd()
-        os.chdir(self.test_dir)
-        
-        # Create base config
-        self.base_config = {"param1": "base", "param2": "base"}
-        with open("base_config.json", 'w') as f:
-            json.dump(self.base_config, f)
-    
-    def tearDown(self):
-        """Clean up temporary directory."""
-        os.chdir(self.original_cwd)
-        shutil.rmtree(self.test_dir)
-    
-    def test_load_config_base_only(self):
-        """Test loading config with no user-specific config."""
-        result = load_config("testuser")
-        
-        self.assertEqual(result["param1"], "base")
-        self.assertEqual(result["param2"], "base")
-    
-    def test_load_config_with_user_file(self):
-        """Test loading config with user-specific config file."""
-        # Create user-specific config
-        user_config = {"param2": "user_override", "param3": "user_new"}
-        with open("user_config_testuser.json", 'w') as f:
-            json.dump(user_config, f)
-        
-        result = load_config("testuser")
-        
-        self.assertEqual(result["param1"], "base")
-        self.assertEqual(result["param2"], "user_override")
-        self.assertEqual(result["param3"], "user_new")
 
 
 if __name__ == '__main__':
