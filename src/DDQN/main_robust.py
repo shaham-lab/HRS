@@ -6,134 +6,12 @@ from agent import *
 from PrioritiziedReplayMemory import *
 from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
 #import time
-import argparse
 import os
-from pathlib import Path
 from ..Guesser.multimodal_guesser import MultimodalGuesser
-from ..common.load_config import load_hierarchical_config
-
-# System defaults
-DEFAULT_SAVE_DIR = 'ddqn_robust_models'
-DEFAULT_SAVE_GUESSER_DIR = 'guesser_multi'
-DEFAULT_GAMMA = 0.9
-DEFAULT_N_UPDATE_TARGET_DQN = 50
-DEFAULT_EP_PER_TRAINEE = 1000
-DEFAULT_BATCH_SIZE = 128
-DEFAULT_HIDDEN_DIM = 64
-DEFAULT_CAPACITY = 1000000
-DEFAULT_MAX_EPISODE = 2000
-DEFAULT_MIN_EPSILON = 0.01
-DEFAULT_INITIAL_EPSILON = 1
-DEFAULT_ANNEAL_STEPS = 1000
-DEFAULT_LR = 1e-4
-DEFAULT_WEIGHT_DECAY = 1e-4
-DEFAULT_LR_DECAY_FACTOR = 0.1
-DEFAULT_VAL_INTERVAL = 100
-DEFAULT_VAL_TRIALS_WO_IM = 5
-DEFAULT_COST_BUDGET = 17
+from ..common.parse_args import parse_arguments
 
 # Set device
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-
-def parse_arguments():
-    """
-    Parse command line arguments with defaults from configuration files.
-    
-    :return: Parsed arguments namespace
-    """
-    # Load hierarchical configuration: base_config.json -> user_config.json -> CLI args
-    config = load_hierarchical_config(
-        base_config_path="config/base_config.json",
-        user_config_path="config/user_config.json"
-    )
-    
-    # Extract main_robust configuration with fallback to root-level config
-    main_robust_config = config.get("main_robust", {})
-    
-    # Get the project path from the JSON configuration
-    project_path = Path(config.get("user_specific_project_path", os.getcwd()))
-    
-    # Define argument parser with defaults from configuration
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--directory",
-                        type=str,
-                        default=str(project_path),
-                        help="Directory for saved models")
-    parser.add_argument("--save_dir",
-                        type=str,
-                        default=main_robust_config.get("save_dir", DEFAULT_SAVE_DIR),
-                        help="Directory for saved models")
-    parser.add_argument("--save_guesser_dir",
-                        type=str,
-                        default=main_robust_config.get("save_guesser_dir", DEFAULT_SAVE_GUESSER_DIR),
-                        help="Directory for saved guesser model")
-    parser.add_argument("--gamma",
-                        type=float,
-                        default=main_robust_config.get("gamma", DEFAULT_GAMMA),
-                        help="Discount rate for Q_target")
-    parser.add_argument("--n_update_target_dqn",
-                        type=int,
-                        default=main_robust_config.get("n_update_target_dqn", DEFAULT_N_UPDATE_TARGET_DQN),
-                        help="Number of episodes between updates of target dqn")
-    parser.add_argument("--ep_per_trainee",
-                        type=int,
-                        default=main_robust_config.get("ep_per_trainee", DEFAULT_EP_PER_TRAINEE),
-                        help="Switch between training dqn and guesser every this # of episodes")
-    parser.add_argument("--batch_size",
-                        type=int,
-                        default=main_robust_config.get("batch_size", DEFAULT_BATCH_SIZE),
-                        help="Mini-batch size")
-    parser.add_argument("--hidden-dim",
-                        type=int,
-                        default=main_robust_config.get("hidden-dim", DEFAULT_HIDDEN_DIM),
-                        help="Hidden dimension")
-    parser.add_argument("--capacity",
-                        type=int,
-                        default=main_robust_config.get("capacity", DEFAULT_CAPACITY),
-                        help="Replay memory capacity")
-    parser.add_argument("--max-episode",
-                        type=int,
-                        default=main_robust_config.get("max-episode", DEFAULT_MAX_EPISODE),
-                        help="e-Greedy target episode (eps will be the lowest at this episode)")
-    parser.add_argument("--min_epsilon",
-                        type=float,
-                        default=main_robust_config.get("min_epsilon", DEFAULT_MIN_EPSILON),
-                        help="Min epsilon")
-    parser.add_argument("--initial_epsilon",
-                        type=float,
-                        default=main_robust_config.get("initial_epsilon", DEFAULT_INITIAL_EPSILON),
-                        help="init epsilon")
-    parser.add_argument("--anneal_steps",
-                        type=float,
-                        default=main_robust_config.get("anneal_steps", DEFAULT_ANNEAL_STEPS),
-                        help="anneal_steps")
-    parser.add_argument("--lr",
-                        type=float,
-                        default=main_robust_config.get("lr", DEFAULT_LR),
-                        help="Learning rate")
-    parser.add_argument("--weight_decay",
-                        type=float,
-                        default=main_robust_config.get("weight_decay", DEFAULT_WEIGHT_DECAY),
-                        help="l_2 weight penalty")
-    parser.add_argument("--lr_decay_factor",
-                        type=float,
-                        default=main_robust_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
-                        help="LR decay factor")
-    parser.add_argument("--val_interval",
-                        type=int,
-                        default=main_robust_config.get("val_interval", DEFAULT_VAL_INTERVAL),
-                        help="Interval for calculating validation reward and saving model")
-    parser.add_argument("--val_trials_wo_im",
-                        type=int,
-                        default=main_robust_config.get("val_trials_wo_im", DEFAULT_VAL_TRIALS_WO_IM),
-                        help="Number of validation trials without improvement")
-    parser.add_argument("--cost_budget",
-                        type=int,
-                        default=main_robust_config.get("cost_budget", DEFAULT_COST_BUDGET),
-                        help="Cost budget for evaluation")
-    
-    return parser.parse_args()
 
 
 def train_helper(agent: Agent,
@@ -308,7 +186,7 @@ def save_networks(i_episode: int, env, agent,
     os.rename(dqn_save_path + '~', dqn_save_path)
 
 
-def load_networks(i_episode: int, save_dir: str, state_dim=26, output_dim=14,
+def load_networks(i_episode: int, save_dir: str, FLAGS, state_dim=26, output_dim=14,
                   hidden_dim=64, val_acc=None) -> None:
     """ A method to load parameters of guesser and dqn """
     if i_episode == 'best':
@@ -321,27 +199,8 @@ def load_networks(i_episode: int, save_dir: str, state_dim=26, output_dim=14,
     guesser_load_path = os.path.join(save_dir, guesser_filename)
     dqn_load_path = os.path.join(save_dir, dqn_filename)
 
-    # load guesser
-    # Note: MultimodalGuesser is created without FLAGS, may need adjustment
-    from types import SimpleNamespace
-    flags_stub = SimpleNamespace(
-        directory=os.getcwd(),
-        hidden_dim1=64,
-        hidden_dim2=32,
-        lr=1e-4,
-        weight_decay=0.001,
-        num_epochs=100,
-        input_rel_path="data/input/",
-        val_trials_wo_im=500,
-        fraction_mask=0,
-        run_validation=100,
-        batch_size=128,
-        text_embed_dim=768,
-        reduced_dim=20,
-        save_dir='guesser_eICU',
-        data='load_time_Series'
-    )
-    guesser = MultimodalGuesser(flags_stub)
+    # load guesser - use FLAGS which now contains all configurations
+    guesser = MultimodalGuesser(FLAGS)
     guesser_state_dict = torch.load(guesser_load_path)
     guesser.load_state_dict(guesser_state_dict)
     guesser.to(device=DEVICE)
@@ -354,12 +213,12 @@ def load_networks(i_episode: int, save_dir: str, state_dim=26, output_dim=14,
     return guesser, dqn
 
 
-def test(env, agent, state_dim, output_dim, save_dir, hidden_dim):
+def test(env, agent, state_dim, output_dim, save_dir, hidden_dim, FLAGS):
     total_steps = 0
     mask_list = []
     cost_list = []
     print('Loading best networks')
-    env.guesser, agent.dqn = load_networks(i_episode='best', save_dir=save_dir,
+    env.guesser, agent.dqn = load_networks(i_episode='best', save_dir=save_dir, FLAGS=FLAGS,
                                            state_dim=state_dim, output_dim=output_dim, hidden_dim=hidden_dim)
     y_hat_test = np.zeros(len(env.y_test))
     y_hat_probs = np.zeros(len(env.y_test))
@@ -518,8 +377,8 @@ def run(FLAGS):
     Returns:
         Tuple of (accuracy, iterations, intersection, union, steps)
     """
-    if os.path.exists(FLAGS.save_dir):
-        shutil.rmtree(FLAGS.save_dir)
+    if os.path.exists(FLAGS.save_dir_ddqn):
+        shutil.rmtree(FLAGS.save_dir_ddqn)
 
     env = myEnv(flags=FLAGS,
                 device=DEVICE,cost_budget=FLAGS.cost_budget)
@@ -560,7 +419,7 @@ def run(FLAGS):
             # compute performance on validation set
             new_best_val_acc = val(i_episode=i,
                                    best_val_acc=best_val_acc, env=env, agent=agent,
-                                   save_dir=FLAGS.save_dir)
+                                   save_dir=FLAGS.save_dir_ddqn)
             val_list.append(new_best_val_acc)
 
             # update best result on validation set and counter
@@ -575,7 +434,7 @@ def run(FLAGS):
         i += 1
 
     acc, intersect, unoin, steps = test(env, agent, state_dim, output_dim,
-                                        FLAGS.save_dir, FLAGS.hidden_dim)
+                                        FLAGS.save_dir_ddqn, FLAGS.hidden_dim, FLAGS)
     # show_sample_paths(6, env, agent)
     return acc, i, intersect, unoin, steps
 

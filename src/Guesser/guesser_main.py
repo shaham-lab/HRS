@@ -5,110 +5,12 @@ import torch.nn.functional as F
 import torch
 from sklearn.metrics import confusion_matrix, roc_auc_score, precision_recall_curve, auc
 from sklearn.model_selection import train_test_split
-import argparse
 import pandas as pd
-from pathlib import Path
-from ..common.load_config import load_hierarchical_config
+from ..common.parse_args import parse_arguments
 from .multimodal_guesser import MultimodalGuesser
 
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-
-#System defaults
-NUM_EPOCHS = 100
-VAL_TRIALS_WO_IM = 500
-
-
-def parse_arguments():
-    """
-    Parse command line arguments with defaults from configuration files.
-    
-    :return: Parsed arguments namespace
-    """
-    # Load hierarchical configuration: base_config.json -> user_config.json -> CLI args
-    # First, load base and user configs
-    config = load_hierarchical_config(
-        base_config_path="config/base_config.json",
-        user_config_path="config/user_config.json"
-    )
-    
-    # Extract embedder_guesser configuration with fallback to root-level config
-    embedder_config = config.get("embedder_guesser", {})
-    
-    # Get the project path from the JSON configuration
-    project_path = Path(config.get("user_specific_project_path", os.getcwd()))
-    
-    # Define argument parser with defaults from configuration
-    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-    parser.add_argument("--directory",
-                        type=str,
-                        default=str(project_path),
-                        help="Directory for saved models")
-    parser.add_argument("--hidden-dim1",
-                        type=int,
-                        default=embedder_config.get("hidden_dim1", 64),
-                        help="Hidden dimension")
-    parser.add_argument("--hidden-dim2",
-                        type=int,
-                        default=embedder_config.get("hidden-dim2", 32),
-                        help="Hidden dimension")
-    parser.add_argument("--lr",
-                        type=float,
-                        default=embedder_config.get("lr", 1e-4),
-                        help="Learning rate")
-    parser.add_argument("--weight_decay",
-                        type=float,
-                        default=embedder_config.get("weight_decay", 0.001),
-                        help="l_2 weight penalty")
-    parser.add_argument("--num_epochs",
-                        type=int,
-                        default=embedder_config.get("num_epochs", NUM_EPOCHS),
-                        help="number of epochs (can be set in `config\\user_config.json`)")
-    parser.add_argument("--input_rel_path",
-                        type=str,
-                        default=config.get("input_rel_path", "data\\input\\"),
-                        help="relative path to input data directory (can be set in `config\\user_config.json`)")
-    parser.add_argument("--val_trials_wo_im",
-                        type=int,
-                        default=embedder_config.get("val_trials_wo_im", VAL_TRIALS_WO_IM),
-                        help="Number of validation trials without improvement")
-    parser.add_argument("--fraction_mask",
-                        type=float,
-                        default=embedder_config.get("fraction_mask", 0),
-                        help="fraction mask")
-    parser.add_argument("--run_validation",
-                        type=int,
-                        default=embedder_config.get("run_validation", 100),
-                        help="after how many epochs to run validation")
-    parser.add_argument("--batch_size",
-                        type=int,
-                        default=embedder_config.get("batch_size", 128),
-                        help="batch size")
-    parser.add_argument("--text_embed_dim",
-                        type=int,
-                        default=embedder_config.get("text_embed_dim", 768),
-                        help="Text embedding dimension")
-    parser.add_argument("--reduced_dim",
-                        type=int,
-                        default=embedder_config.get("reduced_dim", 20),
-                        help="Reduced dimension for text embedding")
-    parser.add_argument("--save_dir",
-                        type=str,
-                        default='guesser_eICU',
-                        help="save path")
-    parser.add_argument(
-        "--data",
-        type=str,
-        default=embedder_config.get("data","load_time_Series"),
-        help=(
-            "Dataset loader function to use. Options:\n"
-            "  load_time_Series        - eICU time series data\n"
-            "  load_mimic_text         - MIMIC-III multi-modal (includes text)\n"
-            "  load_mimic_time_series  - MIMIC-III numeric time series data"
-        )
-    )
-    
-    return parser.parse_args()
 
 
 def create_mask(model, FLAGS) -> np.array:
