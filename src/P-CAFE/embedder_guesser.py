@@ -19,11 +19,15 @@ from lstm_encoder import LSTMEncoder
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
+#System defaults
+NUM_EPOCHS = 100
+VAL_TRIALS_WO_IM = 500
+
 # Load hierarchical configuration: base_config.json -> user_config.json -> CLI args
 # First, load base and user configs
 config = load_hierarchical_config(
-    base_config_path="base_config.json",
-    user_config_path="user_config.json"
+    base_config_path="config/base_config.json",
+    user_config_path="config/user_config.json"
 )
 
 # Extract embedder_guesser configuration with fallback to root-level config
@@ -56,11 +60,11 @@ parser.add_argument("--weight_decay",
                     help="l_2 weight penalty")
 parser.add_argument("--num_epochs",
                     type=int,
-                    default=embedder_config.get("num_epochs", 100000),
-                    help="number of epochs")
+                    default=embedder_config.get("num_epochs", NUM_EPOCHS),
+                    help="number of epochs (can be set in `config\\user_config.json`)")
 parser.add_argument("--val_trials_wo_im",
                     type=int,
-                    default=embedder_config.get("val_trials_wo_im", 500),
+                    default=embedder_config.get("val_trials_wo_im", VAL_TRIALS_WO_IM),
                     help="Number of validation trials without improvement")
 parser.add_argument("--fraction_mask",
                     type=float,
@@ -89,7 +93,7 @@ parser.add_argument("--save_dir",
 parser.add_argument(
     "--data",
     type=str,
-    default="pcafe_utils.load_time_Series()",
+    default=embedder_config.get("data","pcafe_utils.load_time_Series()"),
     help=(
         "Dataset loader function to use. Options:\n"
         "  load_time_Series        - eICU time series data\n"

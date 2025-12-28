@@ -138,7 +138,7 @@ python src/embedder_guesser.py --batch_size 256
 | `--text_embed_dim` | int | 768 | Text embedding dimension |
 | `--reduced_dim` | int | 20 | Reduced dimension for text embedding |
 | `--save_dir` | str | 'guesser_eICU' | Directory to save models |
-| `--data` | str | 'pcafe_utils.load_time_Series()' | Dataset loader function |
+| `--data` | str | 'load_time_Series' | Dataset loader function |
 
 ## Programmatic Usage
 
