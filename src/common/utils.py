@@ -87,12 +87,12 @@ def load_mimic_time_series():
     # Get the current working directory
     base_dir = os.getcwd()
     # Construct file paths dynamically
-    train_X_path = os.path.join(base_dir, 'data\\input\\data_time_series\\train_X.csv')
-    train_Y_path = os.path.join(base_dir, 'data\\input\\data_time_series\\train_Y.csv')
-    val_X_path = os.path.join(base_dir, 'data\\input\\data_time_series\\val_X.csv')
-    val_Y_path = os.path.join(base_dir, 'data\\input\\data_time_series\\val_Y.csv')
-    test_X_path = os.path.join(base_dir, 'data\\input\\data_time_series\\test_X.csv')
-    test_Y_path = os.path.join(base_dir, 'data\\input\\data_time_series\\test_Y.csv')
+    train_X_path = os.path.join(base_dir, 'data\\input\\time_series\\train_X.csv')
+    train_Y_path = os.path.join(base_dir, 'data\\input\\time_series\\train_Y.csv')
+    val_X_path = os.path.join(base_dir, 'data\\input\\time_series\\val_X.csv')
+    val_Y_path = os.path.join(base_dir, 'data\\input\\time_series\\val_Y.csv')
+    test_X_path = os.path.join(base_dir, 'data\\input\\time_series\\test_X.csv')
+    test_Y_path = os.path.join(base_dir, 'data\\input\\time_series\\test_Y.csv')
 
     # Read the files
     X_train = pd.read_csv(train_X_path)
