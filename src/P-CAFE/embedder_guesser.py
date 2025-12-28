@@ -3,15 +3,13 @@ import random
 import numpy as np
 import torch.nn.functional as F
 import torch
-import torch.nn as nn
-from PIL import Image
 from sklearn.metrics import confusion_matrix, roc_auc_score, precision_recall_curve, auc
 from sklearn.model_selection import train_test_split
 import argparse
 import pandas as pd
 from pathlib import Path
 from load_config import load_hierarchical_config
-from multimodal_guesser import MultimodalGuesser, map_features_to_indices
+from multimodal_guesser import MultimodalGuesser
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
@@ -96,7 +94,7 @@ def parse_arguments():
     parser.add_argument(
         "--data",
         type=str,
-        default=embedder_config.get("data","pcafe_utils.load_time_Series()"),
+        default=embedder_config.get("data","load_time_Series"),
         help=(
             "Dataset loader function to use. Options:\n"
             "  load_time_Series        - eICU time series data\n"
@@ -518,6 +516,7 @@ def main():
     :return:
     '''
     FLAGS = parse_arguments()
+    os.chdir(FLAGS.directory)
     model = MultimodalGuesser(FLAGS)
     model.to(model.device)
     X_train, X_test, y_train, y_test = train_test_split(model.X,
@@ -537,6 +536,4 @@ def main():
 
 
 if __name__ == "__main__":
-    FLAGS = parse_arguments()
-    os.chdir(FLAGS.directory)
     main()

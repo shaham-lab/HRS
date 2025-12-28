@@ -1,10 +1,3 @@
-# -*- coding: utf-8 -*-
-"""
-Created on Tue Dec  3 10:38:42 2024
-
-@author: mirac
-"""
-
 import json
 import os
 
