@@ -2,6 +2,10 @@ import gymnasium
 from ..Guesser.multimodal_guesser import MultimodalGuesser
 import torch.nn.functional as F
 from sklearn.model_selection import train_test_split
+import os
+import torch
+import numpy as np
+
 class myEnv(gymnasium.Env):
     def __init__(self,
                  flags,

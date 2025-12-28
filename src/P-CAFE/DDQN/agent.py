@@ -72,8 +72,10 @@ class Agent(object):
         """Returns an action
         Args:
             states (np.ndarray): 2-D tensor of shape (n, input_dim)
+            env
             eps (float): 𝜺-grget_actioneedy for exploration
             mask (np.ndarray) zeroes out q values for questions that were already asked, so they will not be chosen again
+            mode
         Returns:
             int: action index
         """

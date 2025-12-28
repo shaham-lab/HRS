@@ -9,7 +9,8 @@ import argparse
 import pandas as pd
 from pathlib import Path
 from ..load_config import load_hierarchical_config
-from .multimodal_guesser import MultimodalGuesser
+from multimodal_guesser import MultimodalGuesser
+
 
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 

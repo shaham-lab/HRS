@@ -1,6 +1,10 @@
 import gymnasium
 from ..Guesser.multimodal_guesser import MultimodalGuesser
 from gymnasium import spaces
+import numpy as np
+import os
+from sklearn.model_selection import train_test_split
+import torch
 
 
 class myEnv(gymnasium.Env):
