@@ -287,46 +287,6 @@ def load_networks(i_episode: int, env, state_dim=26, output_dim=14,
     return guesser, dqn
 
 
-def save_plot_acuuracy_epoch(accuracy_list):
-    '''
-    Save plot of accuracy per epoch
-    :param accuracy_list: list of accuracies per epoch
-    '''
-    plt.plot(accuracy_list)
-    plt.title('Accuracy per validation epoch')
-    plt.ylabel('Accuracy')
-    plt.xlabel('validation epoch')
-    plt.savefig('accuracy_per_validation_epoch.png')
-    plt.show()
-
-
-def save_plot_reward_epoch(reward_list):
-    '''
-    Save plot of accuracy per epoch
-    :param accuracy_list: list of accuracies per epoch
-    '''
-    plt.plot(reward_list)
-    plt.title('reward per epoch')
-    plt.ylabel('reward')
-    plt.xlabel('epoch')
-    plt.savefig('reward_per_epoch.png')
-    plt.show()
-
-
-def save_plot_step_epoch(steps):
-    '''
-    Save plot of accuracy per epoch
-    :param accuracy_list: list of accuracies per epoch
-    '''
-    print(np.mean(steps))
-    plt.plot(steps)
-    plt.title('reward per epoch')
-    plt.ylabel('reward')
-    plt.xlabel('epoch')
-    plt.savefig('steps_per_epoch.png')
-    plt.show()
-
-
 def test(env, agent, state_dim, output_dim):
     total_steps = 0
     mask_list = []

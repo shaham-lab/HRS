@@ -368,25 +368,6 @@ class MultimodalGuesser(nn.Module):
         else:
             return False
 
-    def text_to_vec(self, text):
-        """
-        Converts input text into a reduced-dimensional embedding vector.
-
-        Parameters
-        ----------
-        text : str
-            The input text to be embedded.
-
-        Returns
-        -------
-        torch.Tensor
-            A ReLU-activated reduced-dimensional embedding vector.
-        """
-        summary = self.summarize_text(text)
-        doc = self.nlp(summary)
-        vec = doc.vector
-        return F.relu(self.text_reducer(torch.tensor(vec).to(self.device)))
-
     def forward(self, input, mask=None):
         """
          Forward pass of the model. Handles both time-series and flat feature inputs.
