@@ -6,106 +6,137 @@ from agent import *
 from PrioritiziedReplayMemory import *
 from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
 #import time
-import json
+import argparse
 import os
 from pathlib import Path
 from ..Guesser.multimodal_guesser import MultimodalGuesser
+from ..common.load_config import load_hierarchical_config
 
-with open(r'config\user_config.json', 'r') as f:
-    config = json.load(f)
+# System defaults
+DEFAULT_SAVE_DIR = 'ddqn_robust_models'
+DEFAULT_SAVE_GUESSER_DIR = 'guesser_multi'
+DEFAULT_GAMMA = 0.9
+DEFAULT_N_UPDATE_TARGET_DQN = 50
+DEFAULT_EP_PER_TRAINEE = 1000
+DEFAULT_BATCH_SIZE = 128
+DEFAULT_HIDDEN_DIM = 64
+DEFAULT_CAPACITY = 1000000
+DEFAULT_MAX_EPISODE = 2000
+DEFAULT_MIN_EPSILON = 0.01
+DEFAULT_INITIAL_EPSILON = 1
+DEFAULT_ANNEAL_STEPS = 1000
+DEFAULT_LR = 1e-4
+DEFAULT_WEIGHT_DECAY = 1e-4
+DEFAULT_LR_DECAY_FACTOR = 0.1
+DEFAULT_VAL_INTERVAL = 100
+DEFAULT_VAL_TRIALS_WO_IM = 5
+DEFAULT_COST_BUDGET = 17
 
-# Get the project path from the JSON
-project_path = Path(config["user_specific_project_path"])
 
-parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("--directory",
-                    type=str,
-                    default=project_path,
-                    help="Directory for saved models")
-parser.add_argument("--save_dir",
-                    type=str,
-                    default='ddqn_robust_models',
-                    help="Directory for saved models")
-parser.add_argument("--save_guesser_dir",
-                    type=str,
-                    default='guesser_multi',
-                    help="Directory for saved guesser model")
-parser.add_argument("--gamma",
-                    type=float,
-                    default=0.9,
-                    help="Discount rate for Q_target")
-parser.add_argument("--n_update_target_dqn",
-                    type=int,
-                    default=50,
-                    help="Number of episodes between updates of target dqn")
-parser.add_argument("--ep_per_trainee",
-                    type=int,
-                    default=1000,
-                    help="Switch between training dqn and guesser every this # of episodes")
-parser.add_argument("--batch_size",
-                    type=int,
-                    default=128,
-                    help="Mini-batch size")
-parser.add_argument("--hidden-dim",
-                    type=int,
-                    default=64,
-                    help="Hidden dimension")
-parser.add_argument("--capacity",
-                    type=int,
-                    default=1000000,
-                    help="Replay memory capacity")
-parser.add_argument("--max-episode",
-                    type=int,
-                    default=2000,
-                    help="e-Greedy target episode (eps will be the lowest at this episode)")
-parser.add_argument("--min_epsilon",
-                    type=float,
-                    default=0.01,
-                    help="Min epsilon")
-parser.add_argument("--initial_epsilon",
-                    type=float,
-                    default=1,
-                    help="init epsilon")
-parser.add_argument("--anneal_steps",
-                    type=float,
-                    default=1000,
-                    help="anneal_steps")
-parser.add_argument("--lr",
-                    type=float,
-                    default=1e-4,
-                    help="Learning rate")
-parser.add_argument("--weight_decay",
-                    type=float,
-                    default=1e-4,
-                    help="l_2 weight penalty")
-parser.add_argument("--lr_decay_factor",
-                    type=float,
-                    default=0.1,
-                    help="LR decay factor")
-
-#change these parameters
-parser.add_argument("--val_interval",
-                    type=int,
-                    default=100,
-                    help="Interval for calculating validation reward and saving model")
-parser.add_argument("--val_trials_wo_im",
-                    type=int,
-                    default=5,
-                    help="Number of validation trials without improvement")
-parser.add_argument("--cost_budget",
-                    type=int,
-                    default=17,
-                    help="Number of validation trials without improvement")
-
-FLAGS = parser.parse_args(args=[])
-
-# set device
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+def parse_arguments():
+    """
+    Parse command line arguments with defaults from configuration files.
+    
+    :return: Parsed arguments namespace
+    """
+    # Load hierarchical configuration: base_config.json -> user_config.json -> CLI args
+    config = load_hierarchical_config(
+        base_config_path="config/base_config.json",
+        user_config_path="config/user_config.json"
+    )
+    
+    # Extract main_robust configuration with fallback to root-level config
+    main_robust_config = config.get("main_robust", {})
+    
+    # Get the project path from the JSON configuration
+    project_path = Path(config.get("user_specific_project_path", os.getcwd()))
+    
+    # Define argument parser with defaults from configuration
+    parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
+    parser.add_argument("--directory",
+                        type=str,
+                        default=str(project_path),
+                        help="Directory for saved models")
+    parser.add_argument("--save_dir",
+                        type=str,
+                        default=main_robust_config.get("save_dir", DEFAULT_SAVE_DIR),
+                        help="Directory for saved models")
+    parser.add_argument("--save_guesser_dir",
+                        type=str,
+                        default=main_robust_config.get("save_guesser_dir", DEFAULT_SAVE_GUESSER_DIR),
+                        help="Directory for saved guesser model")
+    parser.add_argument("--gamma",
+                        type=float,
+                        default=main_robust_config.get("gamma", DEFAULT_GAMMA),
+                        help="Discount rate for Q_target")
+    parser.add_argument("--n_update_target_dqn",
+                        type=int,
+                        default=main_robust_config.get("n_update_target_dqn", DEFAULT_N_UPDATE_TARGET_DQN),
+                        help="Number of episodes between updates of target dqn")
+    parser.add_argument("--ep_per_trainee",
+                        type=int,
+                        default=main_robust_config.get("ep_per_trainee", DEFAULT_EP_PER_TRAINEE),
+                        help="Switch between training dqn and guesser every this # of episodes")
+    parser.add_argument("--batch_size",
+                        type=int,
+                        default=main_robust_config.get("batch_size", DEFAULT_BATCH_SIZE),
+                        help="Mini-batch size")
+    parser.add_argument("--hidden-dim",
+                        type=int,
+                        default=main_robust_config.get("hidden-dim", DEFAULT_HIDDEN_DIM),
+                        help="Hidden dimension")
+    parser.add_argument("--capacity",
+                        type=int,
+                        default=main_robust_config.get("capacity", DEFAULT_CAPACITY),
+                        help="Replay memory capacity")
+    parser.add_argument("--max-episode",
+                        type=int,
+                        default=main_robust_config.get("max-episode", DEFAULT_MAX_EPISODE),
+                        help="e-Greedy target episode (eps will be the lowest at this episode)")
+    parser.add_argument("--min_epsilon",
+                        type=float,
+                        default=main_robust_config.get("min_epsilon", DEFAULT_MIN_EPSILON),
+                        help="Min epsilon")
+    parser.add_argument("--initial_epsilon",
+                        type=float,
+                        default=main_robust_config.get("initial_epsilon", DEFAULT_INITIAL_EPSILON),
+                        help="init epsilon")
+    parser.add_argument("--anneal_steps",
+                        type=float,
+                        default=main_robust_config.get("anneal_steps", DEFAULT_ANNEAL_STEPS),
+                        help="anneal_steps")
+    parser.add_argument("--lr",
+                        type=float,
+                        default=main_robust_config.get("lr", DEFAULT_LR),
+                        help="Learning rate")
+    parser.add_argument("--weight_decay",
+                        type=float,
+                        default=main_robust_config.get("weight_decay", DEFAULT_WEIGHT_DECAY),
+                        help="l_2 weight penalty")
+    parser.add_argument("--lr_decay_factor",
+                        type=float,
+                        default=main_robust_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
+                        help="LR decay factor")
+    parser.add_argument("--val_interval",
+                        type=int,
+                        default=main_robust_config.get("val_interval", DEFAULT_VAL_INTERVAL),
+                        help="Interval for calculating validation reward and saving model")
+    parser.add_argument("--val_trials_wo_im",
+                        type=int,
+                        default=main_robust_config.get("val_trials_wo_im", DEFAULT_VAL_TRIALS_WO_IM),
+                        help="Number of validation trials without improvement")
+    parser.add_argument("--cost_budget",
+                        type=int,
+                        default=main_robust_config.get("cost_budget", DEFAULT_COST_BUDGET),
+                        help="Cost budget for evaluation")
+    
+    return parser.parse_args()
 
 
 def train_helper(agent: Agent,
                  minibatch: List[Transition],
-                 gamma: float) -> float:
+                 gamma: float,
+                 device) -> float:
     """Prepare minibatch and train them
     Args:
         agent (Agent): Agent has `train(Q_pred, Q_true)` method
@@ -131,6 +162,20 @@ def train_helper(agent: Agent,
 
 
 def calculate_td_error(state, action, reward, next_state, done, agent, gamma):
+    """Calculate temporal difference error for prioritized experience replay.
+    
+    Args:
+        state: Current state
+        action: Action taken
+        reward: Reward received
+        next_state: Next state
+        done: Whether episode is done
+        agent: Agent instance
+        gamma: Discount factor
+        
+    Returns:
+        float: TD error value
+    """
     # Current Q-value estimate
     current_q_value = agent.get_Q(state).squeeze()[action]
     if done:
@@ -149,6 +194,8 @@ def play_episode(env,
                  agent: Agent,priorityRM: PrioritizedReplayMemory,
                  eps: float,
                  batch_size: int,
+                 gamma: float,
+                 device,
                  train_guesser=True,
                  train_dqn=True, mode='training') -> int:
     """Play an epsiode and train
@@ -175,7 +222,7 @@ def play_episode(env,
         next_state, r, done, info = env.step(a, mask)
         mask[a] = 0
         total_reward += r
-        td = calculate_td_error(s, a, r, next_state, done, agent, FLAGS.gamma)
+        td = calculate_td_error(s, a, r, next_state, done, agent, gamma)
         priorityRM.push(s, a, r, next_state, done, td)
         if len(priorityRM) > batch_size:
             if train_dqn:
@@ -183,10 +230,10 @@ def play_episode(env,
                 td_errors = []
                 for transition, weight in zip(minibatch, weights):
                     state, action, reward, next_state, done = transition
-                    td_error = calculate_td_error(state, action, reward, next_state, done, agent, FLAGS.gamma)
+                    td_error = calculate_td_error(state, action, reward, next_state, done, agent, gamma)
                     td_errors.append(td_error)
                 priorityRM.update_priorities(indices, td_errors)
-                train_helper(agent, minibatch, FLAGS.gamma)
+                train_helper(agent, minibatch, gamma, device)
                 agent.update_learning_rate()
 
         t += 1
@@ -229,10 +276,12 @@ def epsilon_annealing(initial_epsilon, min_epsilon, anneal_steps, current_step):
 
 
 def save_networks(i_episode: int, env, agent,
+                  save_dir: str,
+                  device,
                   val_acc=None) -> None:
     """ A method to save parameters of guesser and dqn """
-    if not os.path.exists(FLAGS.save_dir):
-        os.makedirs(FLAGS.save_dir)
+    if not os.path.exists(save_dir):
+        os.makedirs(save_dir)
 
     if i_episode == 'best':
         guesser_filename = 'best_guesser.pth'
@@ -241,8 +290,8 @@ def save_networks(i_episode: int, env, agent,
         guesser_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'guesser', val_acc)
         dqn_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'dqn', val_acc)
 
-    guesser_save_path = os.path.join(FLAGS.save_dir, guesser_filename)
-    dqn_save_path = os.path.join(FLAGS.save_dir, dqn_filename)
+    guesser_save_path = os.path.join(save_dir, guesser_filename)
+    dqn_save_path = os.path.join(save_dir, dqn_filename)
 
     # save guesser
     if os.path.exists(guesser_save_path):
@@ -259,8 +308,8 @@ def save_networks(i_episode: int, env, agent,
     os.rename(dqn_save_path + '~', dqn_save_path)
 
 
-def load_networks(i_episode: int, state_dim=26, output_dim=14,
-                  val_acc=None) -> None:
+def load_networks(i_episode: int, save_dir: str, device, state_dim=26, output_dim=14,
+                  hidden_dim=64, val_acc=None) -> None:
     """ A method to load parameters of guesser and dqn """
     if i_episode == 'best':
         guesser_filename = 'best_guesser.pth'
@@ -269,29 +318,49 @@ def load_networks(i_episode: int, state_dim=26, output_dim=14,
         guesser_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'guesser', val_acc)
         dqn_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'dqn', val_acc)
 
-    guesser_load_path = os.path.join(FLAGS.save_dir, guesser_filename)
-    dqn_load_path = os.path.join(FLAGS.save_dir, dqn_filename)
+    guesser_load_path = os.path.join(save_dir, guesser_filename)
+    dqn_load_path = os.path.join(save_dir, dqn_filename)
 
     # load guesser
-    guesser = MultimodalGuesser(FLAGS)
+    # Note: MultimodalGuesser is created without FLAGS, may need adjustment
+    from types import SimpleNamespace
+    flags_stub = SimpleNamespace(
+        directory=os.getcwd(),
+        hidden_dim1=64,
+        hidden_dim2=32,
+        lr=1e-4,
+        weight_decay=0.001,
+        num_epochs=100,
+        input_rel_path="data/input/",
+        val_trials_wo_im=500,
+        fraction_mask=0,
+        run_validation=100,
+        batch_size=128,
+        text_embed_dim=768,
+        reduced_dim=20,
+        save_dir='guesser_eICU',
+        data='load_time_Series'
+    )
+    guesser = MultimodalGuesser(flags_stub)
     guesser_state_dict = torch.load(guesser_load_path)
     guesser.load_state_dict(guesser_state_dict)
     guesser.to(device=device)
 
     # load sqn
-    dqn = DQN(state_dim, output_dim, FLAGS.hidden_dim)
+    dqn = DQN(state_dim, output_dim, hidden_dim)
     dqn_state_dict = torch.load(dqn_load_path)
     dqn.load_state_dict(dqn_state_dict)
     dqn.to(device=device)
     return guesser, dqn
 
 
-def test(env, agent, state_dim, output_dim):
+def test(env, agent, state_dim, output_dim, save_dir, hidden_dim, device):
     total_steps = 0
     mask_list = []
     cost_list = []
     print('Loading best networks')
-    env.guesser, agent.dqn = load_networks(i_episode='best', state_dim=state_dim, output_dim=output_dim)
+    env.guesser, agent.dqn = load_networks(i_episode='best', save_dir=save_dir, device=device,
+                                           state_dim=state_dim, output_dim=output_dim, hidden_dim=hidden_dim)
     y_hat_test = np.zeros(len(env.y_test))
     y_hat_probs = np.zeros(len(env.y_test))
     n_test = len(env.X_test)
@@ -374,7 +443,7 @@ def check_intersection_union(mask_list):
 
 
 def val(i_episode: int,
-        best_val_acc: float, env, agent) -> float:
+        best_val_acc: float, env, agent, save_dir: str, device) -> float:
     """ Compute performance on validation set and save current models """
 
     print('Running validation')
@@ -435,18 +504,28 @@ def val(i_episode: int,
     print('Average cost: {:1.3f}'.format(avg_cost))
     if acc >= best_val_acc:
         print('New best acc acheievd, saving best model')
-        save_networks(i_episode, env, agent, acc)
-        save_networks(i_episode='best', env=env, agent=agent)
+        save_networks(i_episode, env, agent, save_dir, device, acc)
+        save_networks(i_episode='best', env=env, agent=agent, save_dir=save_dir, device=device)
     return acc
 
 
-def run(cost_budget):
-
+def run(FLAGS):
+    """Run the training and evaluation process.
+    
+    Args:
+        FLAGS: Parsed command line arguments containing all configuration
+        
+    Returns:
+        Tuple of (accuracy, iterations, intersection, union, steps)
+    """
+    # set device
+    device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    
     if os.path.exists(FLAGS.save_dir):
         shutil.rmtree(FLAGS.save_dir)
 
     env = myEnv(flags=FLAGS,
-                device=device,cost_budget=cost_budget)
+                device=device,cost_budget=FLAGS.cost_budget)
     input_dim, output_dim = get_env_dim(env)
     state_dim= env.guesser.features_total
     agent = Agent(state_dim,
@@ -476,13 +555,16 @@ def run(cost_budget):
                                  priorityRP,
                                  eps,
                                  FLAGS.batch_size,
+                                 FLAGS.gamma,
+                                 device,
                                  train_dqn=train_dqn,
                                  train_guesser=train_guesser, mode='training')
         rewards_list.append(reward)
         if i % FLAGS.val_interval == 0 and i > 50:
             # compute performance on validation set
             new_best_val_acc = val(i_episode=i,
-                                   best_val_acc=best_val_acc, env=env, agent=agent)
+                                   best_val_acc=best_val_acc, env=env, agent=agent,
+                                   save_dir=FLAGS.save_dir, device=device)
             val_list.append(new_best_val_acc)
 
             # update best result on validation set and counter
@@ -496,13 +578,16 @@ def run(cost_budget):
             agent.update_target_dqn()
         i += 1
 
-    acc, intersect, unoin, steps = test(env, agent, state_dim, output_dim)
+    acc, intersect, unoin, steps = test(env, agent, state_dim, output_dim,
+                                        FLAGS.save_dir, FLAGS.hidden_dim, device)
     # show_sample_paths(6, env, agent)
     return acc, i, intersect, unoin, steps
 
 def main():
+    """Main entry point for the application."""
+    FLAGS = parse_arguments()
     os.chdir(FLAGS.directory)
-    _, _, _, _, _ = run(FLAGS.cost_budget)
+    _, _, _, _, _ = run(FLAGS)
 
 
 
