@@ -26,13 +26,8 @@ class myEnv(gymnasium.Env):
         self.num_classes = self.guesser.num_classes
         # Load pre-trained guesser network, if needed
         if load_pretrained_guesser:
-            save_dir = os.path.join(os.getcwd(), flags.save_guesser_dir)
-            guesser_filename = 'best_guesser.pth'
-            guesser_load_path = os.path.join(save_dir, guesser_filename)
-            if os.path.exists(guesser_load_path):
-                print('Loading pre-trained guesser')
-                guesser_state_dict = torch.load(guesser_load_path)
-                self.guesser.load_state_dict(guesser_state_dict)
+            print('Loading pre-trained guesser')
+            self.guesser.load_model()
 
     def reset(self,
               mode='training',

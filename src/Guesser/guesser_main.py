@@ -268,32 +268,6 @@ def train_model(model: MultimodalGuesser, FLAGS: Namespace,
     plot_running_loss(loss_list)
 
 
-def save_model(model: MultimodalGuesser):
-    """
-    Saves the model's state dictionary to disk.
-
-    Parameters
-    ----------
-    model : object
-        The model to save.
-
-    Returns
-    -------
-    None
-    """
-    path = model.path_to_save
-    if not os.path.exists(path):
-        os.makedirs(path)
-    guesser_filename = 'best_guesser.pth'
-    guesser_save_path = os.path.join(path, guesser_filename)
-    # save guesser
-    if os.path.exists(guesser_save_path):
-        os.remove(guesser_save_path)
-    torch.save(model.cpu().state_dict(), guesser_save_path + '~')
-    os.rename(guesser_save_path + '~', guesser_save_path)
-    model.to(DEVICE)
-
-
 def val(model: MultimodalGuesser, X_val, y_val, best_val_auc=0):
     """
     Evaluates the model on validation data and returns updated AUC.
@@ -357,7 +331,7 @@ def val(model: MultimodalGuesser, X_val, y_val, best_val_auc=0):
     print(f'Validation AUC-PRC: {auc_pc:.2f}')
 
     if auc_roc >= best_val_auc:
-        save_model(model)
+        model.save_model()
         best_val_auc = auc_roc
 
     return accuracy
@@ -371,10 +345,7 @@ def test(model, X_test, y_test):
     :param y_test:
     :return:
     """
-    guesser_filename = 'best_guesser.pth'
-    guesser_load_path = os.path.join(model.path_to_save, guesser_filename)
-    guesser_state_dict = torch.load(guesser_load_path)
-    model.load_state_dict(guesser_state_dict)
+    model.load_model()
     model.eval()
 
     correct = 0

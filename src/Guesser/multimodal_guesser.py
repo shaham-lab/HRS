@@ -103,6 +103,7 @@ class MultimodalGuesser(nn.Module):
         criterion (nn.Module): CrossEntropy loss.
         optimizer (torch.optim): Adam optimizer.
         path_to_save (str): Path to save model checkpoints.
+        guesser_model_file_name (str): Filename for saved guesser model.
     """
 
     def __init__(self, FLAGS):
@@ -155,6 +156,7 @@ class MultimodalGuesser(nn.Module):
                                           weight_decay=FLAGS.weight_decay,
                                           lr=FLAGS.lr)
         self.path_to_save = os.path.join(os.getcwd(), FLAGS.save_dir)
+        self.guesser_model_file_name = FLAGS.guesser_model_file_name
         self.layer1 = self.layer1.to(self.device)
         self.layer2 = self.layer2.to(self.device)
         self.layer3 = self.layer3.to(self.device)
@@ -354,3 +356,87 @@ class MultimodalGuesser(nn.Module):
             probs = F.softmax(logits, dim=-1)
 
         return probs
+
+    def save_model(self):
+        """
+        Saves the model's state dictionary to disk.
+
+        Returns
+        -------
+        None
+        """
+        path = self.path_to_save
+        if not os.path.exists(path):
+            os.makedirs(path)
+        guesser_save_path = os.path.join(path, self.guesser_model_file_name)
+        # save guesser
+        if os.path.exists(guesser_save_path):
+            os.remove(guesser_save_path)
+        torch.save(self.cpu().state_dict(), guesser_save_path + '~')
+        os.rename(guesser_save_path + '~', guesser_save_path)
+        self.to(self.device)
+
+    def load_model(self):
+        """
+        Loads the model's state dictionary from disk.
+
+        Returns
+        -------
+        None
+        """
+        guesser_load_path = os.path.join(self.path_to_save, self.guesser_model_file_name)
+        if os.path.exists(guesser_load_path):
+            guesser_state_dict = torch.load(guesser_load_path, map_location=self.device, weights_only=True)
+            self.load_state_dict(guesser_state_dict)
+            self.to(self.device)
+
+    def save_temp_guesser(self, episode, accuracy):
+        """
+        Saves the model's state dictionary to disk with a temporary filename
+        that includes episode number and accuracy.
+
+        Parameters
+        ----------
+        episode : int
+            Episode number
+        accuracy : float
+            Validation accuracy
+
+        Returns
+        -------
+        None
+        """
+        path = self.path_to_save
+        if not os.path.exists(path):
+            os.makedirs(path)
+        temp_filename = '{}_{}_{:1.3f}.pth'.format(episode, 'guesser', accuracy)
+        guesser_save_path = os.path.join(path, temp_filename)
+        # save guesser
+        if os.path.exists(guesser_save_path):
+            os.remove(guesser_save_path)
+        torch.save(self.cpu().state_dict(), guesser_save_path + '~')
+        os.rename(guesser_save_path + '~', guesser_save_path)
+        self.to(self.device)
+
+    def load_temp_model(self, episode, accuracy):
+        """
+        Loads the model's state dictionary from disk using a temporary filename
+        that includes episode number and accuracy.
+
+        Parameters
+        ----------
+        episode : int
+            Episode number
+        accuracy : float
+            Validation accuracy
+
+        Returns
+        -------
+        None
+        """
+        temp_filename = '{}_{}_{:1.3f}.pth'.format(episode, 'guesser', accuracy)
+        guesser_load_path = os.path.join(self.path_to_save, temp_filename)
+        if os.path.exists(guesser_load_path):
+            guesser_state_dict = torch.load(guesser_load_path, map_location=self.device, weights_only=True)
+            self.load_state_dict(guesser_state_dict)
+            self.to(self.device)
