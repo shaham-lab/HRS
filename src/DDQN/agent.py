@@ -17,7 +17,10 @@ class Agent(object):
     def __init__(self,
                  input_dim: int,
                  output_dim: int,
-                 hidden_dim: int, lr: float, weight_decay: float, FLAGS) -> None:
+                 hidden_dim: int, 
+                 lr: float, 
+                 weight_decay: float, 
+                 FLAGS) -> None:
         """Agent class that choose action and train
         Args:
             input_dim (int): input dimension
@@ -31,7 +34,12 @@ class Agent(object):
         self.target_dqn = DQN(input_dim, output_dim, hidden_dim)
         self.input_dim = input_dim
         self.output_dim = output_dim
-        self.FLAGS = FLAGS
+        
+        # Extract and store only needed parameters from FLAGS
+        self.decay_step_size = FLAGS.decay_step_size
+        self.lr_decay_factor = FLAGS.lr_decay_factor
+        self.min_lr = FLAGS.min_lr
+        
         self.loss_fn = torch.nn.SmoothL1Loss()
         self.optim = torch.optim.Adam(self.dqn.parameters(),
                                       lr=lr,
@@ -39,7 +47,7 @@ class Agent(object):
         self.scheduler = lr_scheduler.LambdaLR(
             self.optim,
             lr_lambda=lambda i_episode: lambda_rule(
-                i_episode, FLAGS.decay_step_size, FLAGS.lr_decay_factor
+                i_episode, self.decay_step_size, self.lr_decay_factor
             )
         )
 
@@ -147,5 +155,5 @@ class Agent(object):
         """ Learning rate updater """
         self.scheduler.step()
         lr = self.optim.param_groups[0]['lr']
-        if lr < self.FLAGS.min_lr:
-            self.optim.param_groups[0]['lr'] = self.FLAGS.min_lr
+        if lr < self.min_lr:
+            self.optim.param_groups[0]['lr'] = self.min_lr

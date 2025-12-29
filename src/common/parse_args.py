@@ -265,6 +265,14 @@ def parse_agent_args(parser, config):
                         type=int,
                         default=agent_config.get("decay_step_size", DEFAULT_DECAY_STEP_SIZE),
                         help="LR decay step size")
+    
+    # Note: lr_decay_factor is already added in parse_main_robust_args, skip if exists
+    if not any(action.dest == 'lr_decay_factor' for action in parser._actions):
+        parser.add_argument("--lr_decay_factor",
+                            type=float,
+                            default=agent_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
+                            help="LR decay factor")
+    
     parser.add_argument("--min_lr",
                         type=float,
                         default=agent_config.get("min_lr", DEFAULT_MIN_LR),

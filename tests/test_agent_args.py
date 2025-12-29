@@ -77,6 +77,20 @@ class TestAgentArgsStructure(unittest.TestCase):
         parse_agent_content = parse_agent_match.group(0)
         self.assertIn('--min_lr', parse_agent_content,
                      "parse_agent_args doesn't add --min_lr argument")
+    
+    def test_parse_agent_args_handles_lr_decay_factor(self):
+        """Test that parse_agent_args handles lr_decay_factor argument."""
+        parse_agent_match = re.search(
+            r'def parse_agent_args\(.*?\):.*?(?=\ndef |\Z)',
+            self.content,
+            re.DOTALL
+        )
+        self.assertIsNotNone(parse_agent_match, "Could not find parse_agent_args function")
+        
+        parse_agent_content = parse_agent_match.group(0)
+        # Check that lr_decay_factor is mentioned (either added or checked for)
+        self.assertIn('lr_decay_factor', parse_agent_content,
+                     "parse_agent_args should handle lr_decay_factor argument")
 
 
 class TestAgentStructure(unittest.TestCase):
@@ -139,6 +153,32 @@ class TestAgentStructure(unittest.TestCase):
         init_signature = init_match.group(0)
         self.assertIn('FLAGS', init_signature,
                      "Agent.__init__ should accept FLAGS parameter")
+    
+    def test_agent_extracts_parameters_from_flags(self):
+        """Test that Agent extracts and stores individual parameters from FLAGS."""
+        # Check that decay_step_size, lr_decay_factor, and min_lr are extracted
+        self.assertIn('self.decay_step_size = FLAGS.decay_step_size', self.content,
+                     "Agent should extract decay_step_size from FLAGS")
+        self.assertIn('self.lr_decay_factor = FLAGS.lr_decay_factor', self.content,
+                     "Agent should extract lr_decay_factor from FLAGS")
+        self.assertIn('self.min_lr = FLAGS.min_lr', self.content,
+                     "Agent should extract min_lr from FLAGS")
+        
+        # Check that FLAGS is not stored as a member
+        self.assertNotIn('self.FLAGS = FLAGS', self.content,
+                        "Agent should not store FLAGS as a member variable")
+    
+    def test_agent_uses_member_variables(self):
+        """Test that Agent uses member variables instead of FLAGS in methods."""
+        # Check that update_learning_rate uses self.min_lr
+        self.assertIn('self.min_lr', self.content,
+                     "Agent should use self.min_lr instead of self.FLAGS.min_lr")
+        
+        # Check scheduler uses self.decay_step_size and self.lr_decay_factor
+        self.assertIn('self.decay_step_size', self.content,
+                     "Agent should use self.decay_step_size")
+        self.assertIn('self.lr_decay_factor', self.content,
+                     "Agent should use self.lr_decay_factor")
 
 
 class TestMainRobustAgentCall(unittest.TestCase):
