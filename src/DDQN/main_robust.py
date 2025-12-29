@@ -1,9 +1,9 @@
 import shutil
 import torch.nn
 from typing import List, Tuple
-from env_robust import *
-from agent import *
-from PrioritiziedReplayMemory import *
+from .env_robust import *
+from .agent import *
+from .PrioritiziedReplayMemory import *
 from sklearn.metrics import roc_auc_score, average_precision_score, confusion_matrix
 #import time
 import os
@@ -187,7 +187,7 @@ def save_networks(i_episode: int, env, agent,
 
 
 def load_networks(i_episode: int, save_dir: str, FLAGS, state_dim=26, output_dim=14,
-                  hidden_dim=64, val_acc=None) -> None:
+                  hidden_dim=64, val_acc=None) :
     """ A method to load parameters of guesser and dqn """
     if i_episode == 'best':
         guesser_filename = 'best_guesser.pth'
@@ -441,7 +441,7 @@ def run(FLAGS):
 def main():
     """Main entry point for the application."""
     FLAGS = parse_arguments()
-    os.chdir(FLAGS.directory)
+    #os.chdir(FLAGS.directory)
     _, _, _, _, _ = run(FLAGS)
 
 

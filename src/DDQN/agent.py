@@ -2,7 +2,7 @@ import argparse
 import torch
 import torch.nn
 from torch.optim import lr_scheduler
-from dqn import DQN
+from .dqn import DQN
 import numpy as np
 
 parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)

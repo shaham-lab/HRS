@@ -15,3 +15,4 @@ env/
 chromadb_data/
 /ddqn_robust_models/
 /models/
+/config/user_config.json

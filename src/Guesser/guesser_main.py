@@ -1,11 +1,14 @@
 import os
 import random
+from argparse import Namespace
+
 import numpy as np
 import torch.nn.functional as F
 import torch
 from sklearn.metrics import confusion_matrix, roc_auc_score, precision_recall_curve, auc
 from sklearn.model_selection import train_test_split
 import pandas as pd
+
 from ..common.parse_args import parse_arguments
 from .multimodal_guesser import MultimodalGuesser
 
@@ -13,7 +16,7 @@ from .multimodal_guesser import MultimodalGuesser
 DEVICE = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
 
 
-def create_mask(model, FLAGS) -> np.array:
+def create_mask(model: MultimodalGuesser, fraction_mask) -> np.ndarray:
     """
     Creates a random binary mask over features for input masking during training.
 
@@ -21,8 +24,7 @@ def create_mask(model, FLAGS) -> np.array:
     ----------
     model : object
         The model instance containing feature mapping.
-    FLAGS : object
-        Parsed command line arguments.
+    fraction_mask :
 
     Returns
     -------
@@ -32,7 +34,7 @@ def create_mask(model, FLAGS) -> np.array:
     mapping = model.map_feature
     binary_mask = np.zeros(model.features_total)
     for key, value in mapping.items():
-        if np.random.rand() < FLAGS.fraction_mask:
+        if np.random.rand() < fraction_mask:
             # mask all the keys entries in binary mask
             for i in value:
                 binary_mask[i] = 0
@@ -42,7 +44,7 @@ def create_mask(model, FLAGS) -> np.array:
     return binary_mask
 
 
-def create_adversarial_input(sample, label, pretrained_model):
+def create_adversarial_input(sample, label, pretrained_model: MultimodalGuesser):
     """
     Generates an adversarial mask by identifying the most influential feature
     for a given sample and zeroing it out.
@@ -183,7 +185,7 @@ def compute_probabilities(j, total_episodes):
     return prob_mask
 
 
-def train_model(model, FLAGS,
+def train_model(model: MultimodalGuesser, FLAGS: Namespace,
                 nepochs, X_train, y_train, X_val, y_val):
     """
     Trains the model using random or adversarial feature masking.
@@ -227,15 +229,11 @@ def train_model(model, FLAGS,
         # Process each sample in the batch
         for i in random_indices:
             input = X_train[i]
-            #if isinstance(input, np.ndarray):
-            #    print(f"DEBUG train:aa sample {i} input.shape={input.shape}")
-            #else:
-            #    print(f"DEBUG train:bb sample {i} input.shape={getattr(input, 'shape', None)}")
             label = torch.tensor([y_train[i]], dtype=torch.long).to(model.device)  # Convert label to tensor
             prob_mask = compute_probabilities(j, nepochs)
             # Decide the action based on the computed probabilities
             if random.random() < prob_mask:
-                mask = create_mask(model, FLAGS)
+                mask = create_mask(model, FLAGS.fraction_mask)
             else:
                 mask = create_adversarial_input(input, label, model)
 
@@ -270,7 +268,7 @@ def train_model(model, FLAGS,
     plot_running_loss(loss_list)
 
 
-def save_model(model):
+def save_model(model: MultimodalGuesser):
     """
     Saves the model's state dictionary to disk.
 
@@ -296,7 +294,7 @@ def save_model(model):
     model.to(DEVICE)
 
 
-def val(model, X_val, y_val, best_val_auc=0):
+def val(model: MultimodalGuesser, X_val, y_val, best_val_auc=0):
     """
     Evaluates the model on validation data and returns updated AUC.
 
@@ -324,13 +322,9 @@ def val(model, X_val, y_val, best_val_auc=0):
 
     with torch.no_grad():
         for i in range(len(X_val)):
-            input = X_val[i]
-            #if isinstance(input, np.ndarray):
-            #    print(f"DEBUG val:aa sample {i} input.shape={input.shape}")
-            #else:
-            #    print(f"DEBUG val:bb sample {i} input.shape={getattr(input, 'shape', None)}")
+            sample = X_val[i]
             label = torch.tensor(y_val[i], dtype=torch.long).to(model.device)
-            output = model(input)
+            output = model(sample)
 
             _, predicted = torch.max(output.data, 1)
             if predicted == label:
@@ -360,7 +354,7 @@ def val(model, X_val, y_val, best_val_auc=0):
     # AUC-PR
     precision, recall, _ = precision_recall_curve(y_true, y_scores)
     auc_pc = auc(recall, precision)
-    print(f'Validation AUC-PC: {auc_pc:.2f}')
+    print(f'Validation AUC-PRC: {auc_pc:.2f}')
 
     if auc_roc >= best_val_auc:
         save_model(model)
@@ -387,19 +381,13 @@ def test(model, X_test, y_test):
     y_true = []
     y_pred = []
     y_scores = []  # For probability scores for AUC
+    X_test = X_test.to_numpy() #convert from pandas dataframe to numpy row vector
 
     with torch.no_grad():
         for i in range(len(X_test)):
-            input = X_test[i]
-
-            # print shapes just before the call
-            if isinstance(input, np.ndarray):
-                print(f"DEBUG test:aa sample {i} input.shape={input.shape}")
-            else:
-                print(f"DEBUG test:bb sample {i} input.shape={getattr(input, 'shape', None)}")
-
+            sample = X_test[i]
             label = torch.tensor(y_test[i], dtype=torch.long).to(model.device)
-            output = model(input)
+            output = model(sample)
 
             _, predicted = torch.max(output.data, 1)
             if predicted == label:
@@ -429,7 +417,7 @@ def test(model, X_test, y_test):
     # AUC-PC (Precision-Recall AUC)
     precision, recall, _ = precision_recall_curve(y_true, y_scores)
     auc_pc = auc(recall, precision)
-    print(f'AUC-PC: {auc_pc:.2f}')
+    print(f'AUC-PRC: {auc_pc:.2f}')
 
 
 def main():
@@ -450,6 +438,10 @@ def main():
                                                       y_train,
                                                       test_size=0.1,
                                                       random_state=24)
+
+    # Print dimensions / lengths for train, val, test splits
+    #for name, arr in [("X_train", X_train), ("X_val", X_val), ("X_test", X_test)]:
+        #print(f"{name} shape: {arr.shape}")
 
     train_model(model, FLAGS, FLAGS.num_epochs,
                 X_train, y_train, X_val, y_val)
