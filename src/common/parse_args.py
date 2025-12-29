@@ -19,6 +19,7 @@ DEFAULT_FRACTION_MASK = 0
 DEFAULT_RUN_VALIDATION = 100
 
 # System defaults for main_robust/DDQN
+DEFAULT_SAVE_DIR = 'ddqn_robust_models'
 DEFAULT_DDQN_SAVE_DIR = 'models\\ddqn_robust_models\\'
 DEFAULT_GUESSER_SAVE_DIR = 'models\\guesser\\'
 DEFAULT_GAMMA = 0.9
