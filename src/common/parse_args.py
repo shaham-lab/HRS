@@ -19,7 +19,6 @@ DEFAULT_FRACTION_MASK = 0
 DEFAULT_RUN_VALIDATION = 100
 
 # System defaults for main_robust/DDQN
-DEFAULT_SAVE_DIR = 'ddqn_robust_models'
 DEFAULT_DDQN_SAVE_DIR = 'models\\ddqn_robust_models\\'
 DEFAULT_GUESSER_SAVE_DIR = 'models\\guesser\\'
 DEFAULT_GAMMA = 0.9
@@ -151,11 +150,6 @@ def parse_main_robust_args(parser, config):
     project_path = Path(config.get("user_specific_project_path", os.getcwd()))
     
     # Add main_robust specific arguments
-    parser.add_argument("--directory",
-                        type=str,
-                        default=str(project_path),
-                        help="Directory for saved models")
-
     # Note: save_dir might conflict with embedder_guesser's save_dir
     # Since both use the same parameter name, we need to handle this carefully
     # The embedder_guesser already set save_dir, so we'll use save_dir_ddqn for main_robust

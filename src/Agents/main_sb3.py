@@ -5,9 +5,7 @@ import numpy as np
 import os
 from pathlib import Path
 from sklearn.metrics import confusion_matrix
-import sys
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
-from common.parse_args import parse_arguments
+from ..common.parse_args import parse_arguments
 
 # Hardcoded device detection
 DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
@@ -130,7 +128,6 @@ def test(env, model, agent) :
 def main():
     global FLAGS
     FLAGS = parse_arguments()
-    os.chdir(FLAGS.directory)
     model, env = PPO_agent()
     test(env, model, 'PPO')
     model, env = DQN_agent()
