@@ -14,13 +14,15 @@ class myEnv(gymnasium.Env):
     on a patient before making a prediction, balancing cost vs. classification accuracy.
     """
     def __init__(self,
-                 flags
+                 flags,
+                 device
                  ):
         """
         Initialize the environment.
 
         Args:
-            flags: Configuration flags (must contain 'device').
+            flags: Configuration flags.
+            device: Torch device (e.g., 'cuda:0' or 'cpu').
         """
         super(myEnv, self).__init__()
         self.guesser = MultimodalGuesser(flags)
@@ -33,7 +35,7 @@ class myEnv(gymnasium.Env):
             dtype=np.float32
         )
 
-        self.device = flags.device
+        self.device = device
         self.X_train, self.X_test, self.y_train, self.y_test = train_test_split(self.guesser.X, self.guesser.y,
                                                                                 test_size=0.05, random_state=42)
         self.cost_list = self.guesser.cost_list

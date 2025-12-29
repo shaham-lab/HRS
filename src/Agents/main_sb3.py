@@ -2,110 +2,28 @@ from env import *
 from stable_baselines3 import PPO, TD3, DQN, A2C
 import torch
 import numpy as np
-import json
-import argparse
 import os
 from pathlib import Path
 from sklearn.metrics import confusion_matrix
+from ..common.parse_args import parse_arguments
 
-with open(r'C:\Users\kashann\PycharmProjects\PCAFE-MIMIC\Integration\user_config_naama.json', 'r') as f:
-    config = json.load(f)
-
-# Get the project path from the JSON
-project_path = Path(config["user_specific_project_path"])
-device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
-
-parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("--directory",
-                    type=str,
-                    default=project_path,
-                    help="Directory for saved models")
-parser.add_argument("--save_dir",
-                    type=str,
-                    default='ddqn_robust_models',
-                    help="Directory for saved models")
-parser.add_argument("--gamma",
-                    type=float,
-                    default=0.9,
-                    help="Discount rate for Q_target")
-parser.add_argument("--n_update_target_dqn",
-                    type=int,
-                    default=50,
-                    help="Number of episodes between updates of target dqn")
-parser.add_argument("--ep_per_trainee",
-                    type=int,
-                    default=1000,
-                    help="Switch between training dqn and guesser every this # of episodes")
-parser.add_argument("--batch_size",
-                    type=int,
-                    default=128,
-                    help="Mini-batch size")
-parser.add_argument("--hidden-dim",
-                    type=int,
-                    default=64,
-                    help="Hidden dimension")
-parser.add_argument("--capacity",
-                    type=int,
-                    default=1000000,
-                    help="Replay memory capacity")
-parser.add_argument("--max-episode",
-                    type=int,
-                    default=2000,
-                    help="e-Greedy target episode (eps will be the lowest at this episode)")
-parser.add_argument("--min_epsilon",
-                    type=float,
-                    default=0.01,
-                    help="Min epsilon")
-parser.add_argument("--initial_epsilon",
-                    type=float,
-                    default=1,
-                    help="init epsilon")
-parser.add_argument("--anneal_steps",
-                    type=float,
-                    default=1000,
-                    help="anneal_steps")
-parser.add_argument("--lr",
-                    type=float,
-                    default=1e-4,
-                    help="Learning rate")
-parser.add_argument("--weight_decay",
-                    type=float,
-                    default=1e-4,
-                    help="l_2 weight penalty")
-parser.add_argument("--lr_decay_factor",
-                    type=float,
-                    default=0.1,
-                    help="LR decay factor")
-
-# change these parameters
-parser.add_argument("--val_interval",
-                    type=int,
-                    default=100,
-                    help="Interval for calculating validation reward and saving model")
-parser.add_argument("--val_trials_wo_im",
-                    type=int,
-                    default=5,
-                    help="Number of validation trials without improvement")
-parser.add_argument("--device",
-                    type=str,
-                    default=device,
-                    help="Device for training")
-
-
-FLAGS = parser.parse_args(args=[])
+# Hardcoded device detection
+DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
 # ======== AGENT DEFINITIONS ========
 
 
-def PPO_agent():
+def PPO_agent(flags):
     """
     Create and train a PPO agent in the custom environment.
+    Args:
+        flags: Configuration flags
     Returns:
         model: Trained PPO model
         env: The training environment
     """
-    env = myEnv(flags=FLAGS)
+    env = myEnv(flags=flags, device=DEVICE)
     model = PPO("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
@@ -115,42 +33,48 @@ def PPO_agent():
 
 
 # Define agent for DQN
-def DQN_agent():
+def DQN_agent(flags):
     """
     Create and train a DQN agent in the custom environment.
+    Args:
+        flags: Configuration flags
     Returns:
         model: Trained DQN model
         env: The training environment
     """
-    env = myEnv(flags=FLAGS)
+    env = myEnv(flags=flags, device=DEVICE)
     model = DQN("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
 
 
 # Define agent for A2C
-def A2C_agent():
+def A2C_agent(flags):
     """
     Create and train an A2C agent in the custom environment.
+    Args:
+        flags: Configuration flags
     Returns:
         model: Trained A2C model
         env: The training environment
     """
-    env = myEnv(flags=FLAGS)
+    env = myEnv(flags=flags, device=DEVICE)
     model = A2C("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
 
 
 # Define agent for TD3
-def TD3_agent():
+def TD3_agent(flags):
     """
     Create and train a TD3 agent in the custom environment.
+    Args:
+        flags: Configuration flags
     Returns:
         model: Trained TD3 model
         env: The training environment
     """
-    env = myEnv(flags=FLAGS)
+    env = myEnv(flags=flags, device=DEVICE)
     model = TD3("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
@@ -210,14 +134,14 @@ def test(env, model, agent) :
 
 
 def main():
-    os.chdir(FLAGS.directory)
-    model, env = PPO_agent()
+    FLAGS = parse_arguments()
+    model, env = PPO_agent(FLAGS)
     test(env, model, 'PPO')
-    model, env = DQN_agent()
+    model, env = DQN_agent(FLAGS)
     test(env, model, 'DQN')
-    model, env = A2C_agent()
+    model, env = A2C_agent(FLAGS)
     test(env, model, 'A2C')
-    model, env = TD3_agent()
+    model, env = TD3_agent(FLAGS)
     test(env, model, 'TD3')
 
 

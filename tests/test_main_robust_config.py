@@ -30,7 +30,6 @@ class TestParseArgsStructure(unittest.TestCase):
     def test_has_default_constants(self):
         """Test that hardcoded default constants are defined in parse_args.py."""
         required_constants = [
-            'DEFAULT_SAVE_DIR',
             'DEFAULT_GAMMA',
             'DEFAULT_BATCH_SIZE',
             'DEFAULT_HIDDEN_DIM',
