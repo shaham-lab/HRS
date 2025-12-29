@@ -26,10 +26,8 @@ class myEnv(gymnasium.Env):
         self.num_classes = self.guesser.num_classes
         # Load pre-trained guesser network, if needed
         if load_pretrained_guesser:
-            guesser_load_path = os.path.join(os.getcwd(), flags.save_guesser_dir, self.guesser.guesser_model_file_name)
-            if os.path.exists(guesser_load_path):
-                print('Loading pre-trained guesser')
-                self.guesser.load_model()
+            print('Loading pre-trained guesser')
+            self.guesser.load_model()
 
     def reset(self,
               mode='training',

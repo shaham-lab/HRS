@@ -346,6 +346,7 @@ def test(model, X_test, y_test):
     :return:
     """
     model.load_model()
+    model.eval()
 
     correct = 0
     y_true = []
