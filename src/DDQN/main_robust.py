@@ -383,7 +383,7 @@ def run(FLAGS):
     state_dim= env.guesser.features_total
     agent = Agent(state_dim,
                   output_dim,
-                  FLAGS.hidden_dim, FLAGS.lr, FLAGS.weight_decay)
+                  FLAGS)
 
     agent.dqn.to(device=DEVICE)
     env.guesser.to(device=DEVICE)

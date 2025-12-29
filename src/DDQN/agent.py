@@ -1,54 +1,54 @@
-import argparse
 import torch
 import torch.nn
 from torch.optim import lr_scheduler
 from .dqn import DQN
 import numpy as np
 
-parser = argparse.ArgumentParser(formatter_class=argparse.ArgumentDefaultsHelpFormatter)
-parser.add_argument("--decay_step_size",
-                    type=int,
-                    default=50000,
-                    help="LR decay step size")
-parser.add_argument("--lr_decay_factor",
-                    type=float,
-                    default=0.1,
-                    help="LR decay factor")
-parser.add_argument("--min_lr",
-                    type=float,
-                    default=1e-5,
-                    help="Minimal learning rate")
-FLAGS = parser.parse_args(args=[])
 device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 
 
-def lambda_rule(i_episode) -> float:
+def lambda_rule(i_episode, decay_step_size, lr_decay_factor) -> float:
     """ stepwise learning rate calculator """
-    exponent = int(np.floor((i_episode + 1) / FLAGS.decay_step_size))
-    return np.power(FLAGS.lr_decay_factor, exponent)
+    exponent = int(np.floor((i_episode + 1) / decay_step_size))
+    return np.power(lr_decay_factor, exponent)
 
 
 class Agent(object):
     def __init__(self,
                  input_dim: int,
                  output_dim: int,
-                 hidden_dim: int, lr, weight_decay) -> None:
+                 FLAGS) -> None:
         """Agent class that choose action and train
         Args:
             input_dim (int): input dimension
             output_dim (int): output dimension
-            hidden_dim (int): hidden dimension
+            FLAGS: Configuration flags containing hidden_dim, lr, weight_decay, decay_step_size, lr_decay_factor, and min_lr
         """
+        # Extract parameters from FLAGS
+        # Local variables for initialization
+        hidden_dim = FLAGS.hidden_dim
+        lr = FLAGS.lr
+        weight_decay = FLAGS.weight_decay
+        # Instance variables for ongoing use in scheduler
+        self.decay_step_size = FLAGS.decay_step_size
+        self.lr_decay_factor = FLAGS.lr_decay_factor
+        self.min_lr = FLAGS.min_lr
+        
         self.dqn = DQN(input_dim, output_dim, hidden_dim)
         self.target_dqn = DQN(input_dim, output_dim, hidden_dim)
         self.input_dim = input_dim
         self.output_dim = output_dim
+        
         self.loss_fn = torch.nn.SmoothL1Loss()
         self.optim = torch.optim.Adam(self.dqn.parameters(),
                                       lr=lr,
                                       weight_decay=weight_decay)
-        self.scheduler = lr_scheduler.LambdaLR(self.optim,
-                                               lr_lambda=lambda_rule)
+        self.scheduler = lr_scheduler.LambdaLR(
+            self.optim,
+            lr_lambda=lambda i_episode: lambda_rule(
+                i_episode, self.decay_step_size, self.lr_decay_factor
+            )
+        )
 
         self.update_target_dqn()
 
@@ -154,5 +154,5 @@ class Agent(object):
         """ Learning rate updater """
         self.scheduler.step()
         lr = self.optim.param_groups[0]['lr']
-        if lr < FLAGS.min_lr:
-            self.optim.param_groups[0]['lr'] = FLAGS.min_lr
+        if lr < self.min_lr:
+            self.optim.param_groups[0]['lr'] = self.min_lr

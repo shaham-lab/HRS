@@ -38,6 +38,10 @@ DEFAULT_VAL_INTERVAL = 100
 DEFAULT_VAL_TRIALS_WO_IM = 5
 DEFAULT_COST_BUDGET = 17
 
+# System defaults for DDQN agent
+DEFAULT_DECAY_STEP_SIZE = 50000
+DEFAULT_MIN_LR = 1e-5
+
 
 def parse_embedder_guesser_args(parser, config):
     """
@@ -217,10 +221,7 @@ def parse_main_robust_args(parser, config):
                             default=main_robust_config.get("weight_decay", DEFAULT_WEIGHT_DECAY),
                             help="l_2 weight penalty")
     
-    parser.add_argument("--lr_decay_factor",
-                        type=float,
-                        default=main_robust_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
-                        help="LR decay factor")
+    # Note: lr_decay_factor is handled in parse_agent_args since it's used by the Agent
     parser.add_argument("--val_interval",
                         type=int,
                         default=main_robust_config.get("val_interval", DEFAULT_VAL_INTERVAL),
@@ -242,10 +243,43 @@ def parse_main_robust_args(parser, config):
     return parser
 
 
+def parse_agent_args(parser, config):
+    """
+    Add DDQN agent arguments to the parser.
+    
+    Args:
+        parser: argparse.ArgumentParser instance
+        config: Configuration dictionary from hierarchical config loading
+        
+    Returns:
+        Updated parser with agent arguments
+    """
+    # Extract agent configuration with fallback to root-level config
+    agent_config = config.get("agent", {})
+    
+    # Add agent specific arguments for learning rate scheduling
+    parser.add_argument("--decay_step_size",
+                        type=int,
+                        default=agent_config.get("decay_step_size", DEFAULT_DECAY_STEP_SIZE),
+                        help="LR decay step size")
+    
+    parser.add_argument("--lr_decay_factor",
+                        type=float,
+                        default=agent_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
+                        help="LR decay factor")
+    
+    parser.add_argument("--min_lr",
+                        type=float,
+                        default=agent_config.get("min_lr", DEFAULT_MIN_LR),
+                        help="Minimal learning rate")
+    
+    return parser
+
+
 def parse_arguments():
     """
     Parse command line arguments with defaults from configuration files.
-    This function combines arguments from both embedder_guesser and main_robust.
+    This function combines arguments from embedder_guesser, main_robust, and agent.
     
     :return: Parsed arguments namespace containing all configuration options
     """
@@ -263,5 +297,8 @@ def parse_arguments():
     
     # Add main_robust arguments
     parser = parse_main_robust_args(parser, config)
+    
+    # Add agent arguments
+    parser = parse_agent_args(parser, config)
     
     return parser.parse_args()
