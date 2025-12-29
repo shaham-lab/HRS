@@ -109,6 +109,10 @@ def parse_embedder_guesser_args(parser, config):
                         type=str,
                         default=embedder_config.get("save_dir", DEFAULT_GUESSER_SAVE_DIR),
                         help="Directory for Guesser saved models")
+    parser.add_argument("--guesser_model_file_name",
+                        type=str,
+                        default=embedder_config.get("guesser_model_file_name", "best_guesser.pth"),
+                        help="Filename for saved guesser model")
     parser.add_argument(
         "--data",
         type=str,
