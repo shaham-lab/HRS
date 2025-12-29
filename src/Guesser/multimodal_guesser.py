@@ -385,6 +385,6 @@ class MultimodalGuesser(nn.Module):
         None
         """
         guesser_load_path = os.path.join(self.path_to_save, self.guesser_model_file_name)
-        guesser_state_dict = torch.load(guesser_load_path)
+        guesser_state_dict = torch.load(guesser_load_path, map_location=self.device, weights_only=True)
         self.load_state_dict(guesser_state_dict)
         self.eval()
