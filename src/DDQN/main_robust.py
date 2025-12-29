@@ -162,21 +162,15 @@ def save_networks(i_episode: int, env, agent,
         os.makedirs(save_dir)
 
     if i_episode == 'best':
-        guesser_filename = 'best_guesser.pth'
         dqn_filename = 'best_dqn.pth'
+        # Use save_model for best guesser
+        env.guesser.save_model()
     else:
-        guesser_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'guesser', val_acc)
         dqn_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'dqn', val_acc)
+        # Use save_temp_guesser for temporary guesser
+        env.guesser.save_temp_guesser(i_episode, val_acc)
 
-    guesser_save_path = os.path.join(save_dir, guesser_filename)
     dqn_save_path = os.path.join(save_dir, dqn_filename)
-
-    # save guesser
-    if os.path.exists(guesser_save_path):
-        os.remove(guesser_save_path)
-    torch.save(env.guesser.cpu().state_dict(), guesser_save_path + '~')
-    env.guesser.to(device=DEVICE)
-    os.rename(guesser_save_path + '~', guesser_save_path)
 
     # save dqn
     if os.path.exists(dqn_save_path):
@@ -190,19 +184,20 @@ def load_networks(i_episode: int, save_dir: str, FLAGS, state_dim=26, output_dim
                   hidden_dim=64, val_acc=None) :
     """ A method to load parameters of guesser and dqn """
     if i_episode == 'best':
-        guesser_filename = 'best_guesser.pth'
         dqn_filename = 'best_dqn.pth'
     else:
-        guesser_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'guesser', val_acc)
         dqn_filename = '{}_{}_{:1.3f}.pth'.format(i_episode, 'dqn', val_acc)
 
-    guesser_load_path = os.path.join(save_dir, guesser_filename)
     dqn_load_path = os.path.join(save_dir, dqn_filename)
 
     # load guesser - use FLAGS which now contains all configurations
     guesser = MultimodalGuesser(FLAGS)
-    guesser_state_dict = torch.load(guesser_load_path)
-    guesser.load_state_dict(guesser_state_dict)
+    if i_episode == 'best':
+        # Use load_model for best guesser
+        guesser.load_model()
+    else:
+        # Use load_temp_model for temporary guesser
+        guesser.load_temp_model(i_episode, val_acc)
     guesser.to(device=DEVICE)
 
     # load sqn
