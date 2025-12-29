@@ -5,6 +5,7 @@ Provides hierarchical configuration loading for all components.
 
 import argparse
 import os
+import torch
 from pathlib import Path
 from .load_config import load_hierarchical_config
 
@@ -151,7 +152,6 @@ def parse_main_robust_args(parser, config):
     project_path = Path(config.get("user_specific_project_path", os.getcwd()))
     
     # Add main_robust specific arguments
-    import torch
     device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
     
     parser.add_argument("--directory",
