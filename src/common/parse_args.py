@@ -221,10 +221,7 @@ def parse_main_robust_args(parser, config):
                             default=main_robust_config.get("weight_decay", DEFAULT_WEIGHT_DECAY),
                             help="l_2 weight penalty")
     
-    parser.add_argument("--lr_decay_factor",
-                        type=float,
-                        default=main_robust_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
-                        help="LR decay factor")
+    # Note: lr_decay_factor is handled in parse_agent_args since it's used by the Agent
     parser.add_argument("--val_interval",
                         type=int,
                         default=main_robust_config.get("val_interval", DEFAULT_VAL_INTERVAL),
@@ -266,12 +263,10 @@ def parse_agent_args(parser, config):
                         default=agent_config.get("decay_step_size", DEFAULT_DECAY_STEP_SIZE),
                         help="LR decay step size")
     
-    # Note: lr_decay_factor is already added in parse_main_robust_args, skip if exists
-    if not any(action.dest == 'lr_decay_factor' for action in parser._actions):
-        parser.add_argument("--lr_decay_factor",
-                            type=float,
-                            default=agent_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
-                            help="LR decay factor")
+    parser.add_argument("--lr_decay_factor",
+                        type=float,
+                        default=agent_config.get("lr_decay_factor", DEFAULT_LR_DECAY_FACTOR),
+                        help="LR decay factor")
     
     parser.add_argument("--min_lr",
                         type=float,
