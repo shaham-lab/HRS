@@ -24,10 +24,12 @@ class Agent(object):
             output_dim (int): output dimension
             FLAGS: Configuration flags containing hidden_dim, lr, weight_decay, decay_step_size, lr_decay_factor, and min_lr
         """
-        # Extract and store only needed parameters from FLAGS
+        # Extract parameters from FLAGS
+        # Local variables for initialization
         hidden_dim = FLAGS.hidden_dim
         lr = FLAGS.lr
         weight_decay = FLAGS.weight_decay
+        # Instance variables for ongoing use in scheduler
         self.decay_step_size = FLAGS.decay_step_size
         self.lr_decay_factor = FLAGS.lr_decay_factor
         self.min_lr = FLAGS.min_lr
