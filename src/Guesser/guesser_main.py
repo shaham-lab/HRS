@@ -345,10 +345,7 @@ def test(model, X_test, y_test):
     :param y_test:
     :return:
     """
-    guesser_load_path = os.path.join(model.path_to_save, model.guesser_model_file_name)
-    guesser_state_dict = torch.load(guesser_load_path)
-    model.load_state_dict(guesser_state_dict)
-    model.eval()
+    model.load_model()
 
     correct = 0
     y_true = []

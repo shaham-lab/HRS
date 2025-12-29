@@ -375,3 +375,16 @@ class MultimodalGuesser(nn.Module):
         torch.save(self.cpu().state_dict(), guesser_save_path + '~')
         os.rename(guesser_save_path + '~', guesser_save_path)
         self.to(self.device)
+
+    def load_model(self):
+        """
+        Loads the model's state dictionary from disk.
+
+        Returns
+        -------
+        None
+        """
+        guesser_load_path = os.path.join(self.path_to_save, self.guesser_model_file_name)
+        guesser_state_dict = torch.load(guesser_load_path)
+        self.load_state_dict(guesser_state_dict)
+        self.eval()
