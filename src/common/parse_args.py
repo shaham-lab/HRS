@@ -5,7 +5,6 @@ Provides hierarchical configuration loading for all components.
 
 import argparse
 import os
-import torch
 from pathlib import Path
 from .load_config import load_hierarchical_config
 
