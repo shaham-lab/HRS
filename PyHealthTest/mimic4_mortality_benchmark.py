@@ -93,7 +93,7 @@ def main():
             device=device,
         )
         
-        print(f"Trainer initialized (device: {trainer.device})")
+        print(f"Trainer initialized (device: {device})")
         
         # Train the model
         print("\nTraining model...")
