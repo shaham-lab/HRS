@@ -1,5 +1,5 @@
 """
-PyHealthTest - MIMIC-IV Mortality Prediction Benchmark
+MyTestProj - MIMIC-IV Mortality Prediction Benchmark
 
 This package contains benchmark implementations for healthcare predictive modeling
 using the PyHealth library with MIMIC-IV data.
