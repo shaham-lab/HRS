@@ -1,4 +1,4 @@
-# PyHealthTest - MIMIC-IV Mortality Prediction Benchmark
+# MyTestProj - MIMIC-IV Mortality Prediction Benchmark
 
 This folder contains a benchmark implementation for mortality prediction using MIMIC-IV data with the PyHealth library.
 
@@ -48,7 +48,7 @@ The script expects the following tables:
 To see the expected workflow and structure without actual MIMIC-IV data:
 
 ```bash
-cd PyHealthTest
+cd MyTestProj
 python demo_workflow.py
 ```
 
@@ -59,7 +59,7 @@ This will display the complete workflow with code snippets and expected outputs.
 Once you have set up the MIMIC-IV data:
 
 ```bash
-cd PyHealthTest
+cd MyTestProj
 python mimic4_mortality_benchmark.py
 ```
 
