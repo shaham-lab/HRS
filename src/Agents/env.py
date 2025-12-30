@@ -7,7 +7,7 @@ from sklearn.model_selection import train_test_split
 import torch
 
 
-class myEnv(gymnasium.Env):
+class MyEnv(gymnasium.Env):
     """
     Custom Gymnasium environment for feature acquisition and classification.
     Interacts with a MultimodalGuesser model to decide which costly tests to run
@@ -24,7 +24,7 @@ class myEnv(gymnasium.Env):
             flags: Configuration flags.
             device: Torch device (e.g., 'cuda:0' or 'cpu').
         """
-        super(myEnv, self).__init__()
+        super(MyEnv, self).__init__()
         self.guesser = MultimodalGuesser(flags)
 
         self.action_space = spaces.Discrete(self.guesser.tests_number + 1)

@@ -5,7 +5,7 @@ from sklearn.model_selection import train_test_split
 import torch
 import numpy as np
 
-class myEnv(gymnasium.Env):
+class MyEnv(gymnasium.Env):
     def __init__(self,
                  flags,
                  device, cost_budget,

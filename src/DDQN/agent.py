@@ -17,22 +17,22 @@ class Agent(object):
     def __init__(self,
                  input_dim: int,
                  output_dim: int,
-                 FLAGS) -> None:
+                 flags) -> None:
         """Agent class that choose action and train
         Args:
             input_dim (int): input dimension
             output_dim (int): output dimension
-            FLAGS: Configuration flags containing hidden_dim, lr, weight_decay, decay_step_size, lr_decay_factor, and min_lr
+            flags: Configuration flags containing hidden_dim, lr, weight_decay, decay_step_size, lr_decay_factor, and min_lr
         """
         # Extract parameters from FLAGS
         # Local variables for initialization
-        hidden_dim = FLAGS.hidden_dim
-        lr = FLAGS.lr
-        weight_decay = FLAGS.weight_decay
+        hidden_dim = flags.hidden_dim
+        lr = flags.lr
+        weight_decay = flags.weight_decay
         # Instance variables for ongoing use in scheduler
-        self.decay_step_size = FLAGS.decay_step_size
-        self.lr_decay_factor = FLAGS.lr_decay_factor
-        self.min_lr = FLAGS.min_lr
+        self.decay_step_size = flags.decay_step_size
+        self.lr_decay_factor = flags.lr_decay_factor
+        self.min_lr = flags.min_lr
         
         self.dqn = DQN(input_dim, output_dim, hidden_dim)
         self.target_dqn = DQN(input_dim, output_dim, hidden_dim)
@@ -85,7 +85,7 @@ class Agent(object):
 
         else:
             self.dqn.train(mode=False)
-            scores = self.get_Q(states)
+            scores = self.get_q(states)
             _, argmax = torch.max(scores.data * mask, 1)
             return int(argmax.item())
 
@@ -133,10 +133,10 @@ class Agent(object):
         self.target_dqn.train(mode=False)
         return self.target_dqn(states)
 
-    def train(self, Q_pred: torch.FloatTensor, Q_true: torch.FloatTensor) -> float:
+    def train(self, q_pred: torch.FloatTensor, Q_true: torch.FloatTensor) -> float:
         """Computes `loss` and backpropagation
         Args:
-            Q_pred (torch.FloatTensor): Predicted value by the network,
+            q_pred (torch.FloatTensor): Predicted value by the network,
                 2-D Tensor of shape(n, output_dim)
             Q_true (torch.FloatTensor): Target value obtained from the game,
                 2-D Tensor of shape(n, output_dim)
@@ -145,7 +145,7 @@ class Agent(object):
         """
         self.dqn.train(mode=True)
         self.optim.zero_grad()
-        loss = self.loss_fn(Q_pred, Q_true)
+        loss = self.loss_fn(q_pred, Q_true)
         loss.backward()
         self.optim.step()
         return loss

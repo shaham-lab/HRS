@@ -32,13 +32,13 @@ def train_helper(agent: Agent,
     done = np.array([x.done for x in minibatch])
     states = np.swapaxes(states, 0, 1)
     next_states = np.swapaxes(next_states, 0, 1)
-    Q_predict = agent.get_Q(states)
-    Q_target = Q_predict.clone().cpu().data.numpy()
+    q_predict = agent.get_Q(states)
+    q_target = q_predict.clone().cpu().data.numpy()
     max_actions = np.argmax(agent.get_Q(next_states).cpu().data.numpy(), axis=1)
-    Q_target[np.arange(len(Q_target)), actions] = rewards + gamma * agent.get_target_Q(next_states)[
-        np.arange(len(Q_target)), max_actions].data.numpy() * ~done
-    Q_target = agent._to_variable(Q_target).to(device=DEVICE)
-    return agent.train(Q_predict, Q_target)
+    q_target[np.arange(len(q_target)), actions] = rewards + gamma * agent.get_target_Q(next_states)[
+        np.arange(len(q_target)), max_actions].data.numpy() * ~done
+    q_target = agent._to_variable(q_target).to(device=DEVICE)
+    return agent.train(q_predict, q_target)
 
 
 def calculate_td_error(state, action, reward, next_state, done, agent, gamma):
@@ -377,8 +377,8 @@ def run(FLAGS):
     if os.path.exists(FLAGS.save_dir_ddqn):
         shutil.rmtree(FLAGS.save_dir_ddqn)
 
-    env = myEnv(flags=FLAGS,
-                device=DEVICE,cost_budget=FLAGS.cost_budget)
+    env = MyEnv(flags=FLAGS,
+                device=DEVICE, cost_budget=FLAGS.cost_budget)
     input_dim, output_dim = get_env_dim(env)
     state_dim= env.guesser.features_total
     agent = Agent(state_dim,
@@ -437,9 +437,9 @@ def run(FLAGS):
 
 def main():
     """Main entry point for the application."""
-    FLAGS = parse_arguments()
+    flags = parse_arguments()
     #os.chdir(FLAGS.directory)
-    _, _, _, _, _ = run(FLAGS)
+    _, _, _, _, _ = run(flags)
 
 
 

@@ -12,7 +12,7 @@ DEVICE = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
 # ======== AGENT DEFINITIONS ========
 
 
-def PPO_agent(flags):
+def ppo_agent(flags):
     """
     Create and train a PPO agent in the custom environment.
     Args:
@@ -21,7 +21,7 @@ def PPO_agent(flags):
         model: Trained PPO model
         env: The training environment
     """
-    env = myEnv(flags=flags, device=DEVICE)
+    env = MyEnv(flags=flags, device=DEVICE)
     model = PPO("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
@@ -31,7 +31,7 @@ def PPO_agent(flags):
 
 
 # Define agent for DQN
-def DQN_agent(flags):
+def dqn_agent(flags):
     """
     Create and train a DQN agent in the custom environment.
     Args:
@@ -40,14 +40,14 @@ def DQN_agent(flags):
         model: Trained DQN model
         env: The training environment
     """
-    env = myEnv(flags=flags, device=DEVICE)
+    env = MyEnv(flags=flags, device=DEVICE)
     model = DQN("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
 
 
 # Define agent for A2C
-def A2C_agent(flags):
+def a2c_agent(flags):
     """
     Create and train an A2C agent in the custom environment.
     Args:
@@ -56,14 +56,14 @@ def A2C_agent(flags):
         model: Trained A2C model
         env: The training environment
     """
-    env = myEnv(flags=flags, device=DEVICE)
+    env = MyEnv(flags=flags, device=DEVICE)
     model = A2C("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
 
 
 # Define agent for TD3
-def TD3_agent(flags):
+def td3_agent(flags):
     """
     Create and train a TD3 agent in the custom environment.
     Args:
@@ -72,7 +72,7 @@ def TD3_agent(flags):
         model: Trained TD3 model
         env: The training environment
     """
-    env = myEnv(flags=flags, device=DEVICE)
+    env = MyEnv(flags=flags, device=DEVICE)
     model = TD3("MlpPolicy", env, verbose=1)
     model.learn(total_timesteps=100000)
     return model, env
@@ -132,14 +132,14 @@ def test(env, model, agent) :
 
 
 def main():
-    FLAGS = parse_arguments()
-    model, env = PPO_agent(FLAGS)
+    flags = parse_arguments()
+    model, env = ppo_agent(flags)
     test(env, model, 'PPO')
-    model, env = DQN_agent(FLAGS)
+    model, env = dqn_agent(flags)
     test(env, model, 'DQN')
-    model, env = A2C_agent(FLAGS)
+    model, env = a2c_agent(flags)
     test(env, model, 'A2C')
-    model, env = TD3_agent(FLAGS)
+    model, env = td3_agent(flags)
     test(env, model, 'TD3')
 
 
