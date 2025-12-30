@@ -27,5 +27,6 @@ dependencies:
     - stable-baselines3==2.8.0a2
     - torchvision==0.24.1
     - transformers==4.57.3
+    - pyhealth
 
 
