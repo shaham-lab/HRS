@@ -13,8 +13,15 @@ def read_articles(filename):
     articles = []
     headlines = []
     
-    with open(filename, 'r') as file:
-        content = file.read()
+    try:
+        with open(filename, 'r') as file:
+            content = file.read()
+    except FileNotFoundError:
+        print(f"Error: File '{filename}' not found.")
+        return articles, headlines
+    except Exception as e:
+        print(f"Error reading file '{filename}': {e}")
+        return articles, headlines
         
     # Split content by double newlines to separate articles
     article_blocks = content.strip().split('\n\n')
