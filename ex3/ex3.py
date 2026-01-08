@@ -1,3 +1,25 @@
+import argparse
+
+
+def parse_arguments():
+    """
+    Parse command line arguments.
+    
+    Returns:
+        Namespace: Parsed arguments containing the filename
+    """
+    parser = argparse.ArgumentParser(
+        description='Read articles from a text file and display them.',
+        formatter_class=argparse.ArgumentDefaultsHelpFormatter
+    )
+    parser.add_argument(
+        'filename',
+        type=str,
+        help='Path to the file containing articles'
+    )
+    return parser.parse_args()
+
+
 def read_articles(filename):
     """
     Read articles from a file and return two arrays:
@@ -19,24 +41,35 @@ def read_articles(filename):
     except FileNotFoundError:
         print(f"Error: File '{filename}' not found.")
         return articles, headlines
-    except Exception as e:
-        print(f"Error reading file '{filename}': {e}")
-        return articles, headlines
         
-    # Split content by double newlines to separate articles
-    article_blocks = content.strip().split('\n\n')
+    # Split content by empty lines (one or more newlines)
+    lines = content.split('\n')
+    current_block = []
     
-    for block in article_blocks:
-        if block.strip():
-            lines = block.strip().split('\n')
-            # First line should contain the headline
-            if lines and lines[0].startswith('Headline:'):
-                headline = lines[0].replace('Headline:', '').strip()
-                # The rest is the article content
-                article = '\n'.join(lines[1:]).strip()
-                
-                headlines.append(headline)
-                articles.append(article)
+    for line in lines:
+        # If line is empty (after stripping), it's a separator
+        if not line.strip():
+            # Process the current block if it has content
+            if current_block:
+                # First line should contain the headline
+                if current_block[0].startswith('Headline:'):
+                    headline = current_block[0].replace('Headline:', '').strip()
+                    # The rest is the article content
+                    article = '\n'.join(current_block[1:]).strip()
+                    
+                    headlines.append(headline)
+                    articles.append(article)
+                current_block = []
+        else:
+            current_block.append(line)
+    
+    # Don't forget the last block if file doesn't end with empty line
+    if current_block:
+        if current_block[0].startswith('Headline:'):
+            headline = current_block[0].replace('Headline:', '').strip()
+            article = '\n'.join(current_block[1:]).strip()
+            headlines.append(headline)
+            articles.append(article)
     
     return articles, headlines
 
@@ -45,10 +78,11 @@ def main():
     """
     Main function that reads articles and displays them.
     """
-    filename = 'develop.txt'
+    # Parse command line arguments
+    args = parse_arguments()
     
     # Call the function to read articles and get both arrays
-    articles, headlines = read_articles(filename)
+    articles, headlines = read_articles(args.filename)
     
     # Display the results
     print(f"Total articles read: {len(articles)}")
