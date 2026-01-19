@@ -101,7 +101,7 @@ class Agent(object):
 
         else:
             self.dqn.train(mode=False)
-            scores = self.get_Q(states)
+            scores = self.get_q(states)
             _, argmax = torch.max(scores.data * mask, 1)
 
             if argmax.item() == self.output_dim-1:
@@ -110,7 +110,7 @@ class Agent(object):
                 _, argmax = torch.max(scores.data * mask, 1)
             return int(argmax.item())
 
-    def get_Q(self, states: np.ndarray) -> torch.FloatTensor:
+    def get_q(self, states: np.ndarray) -> torch.FloatTensor:
         """Returns `Q-value`
         Args:
             states (np.ndarray): 2-D Tensor of shape (n, input_dim)

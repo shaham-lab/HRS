@@ -32,9 +32,9 @@ def train_helper(agent: Agent,
     done = np.array([x.done for x in minibatch])
     states = np.swapaxes(states, 0, 1)
     next_states = np.swapaxes(next_states, 0, 1)
-    q_predict = agent.get_Q(states)
+    q_predict = agent.get_q(states)
     q_target = q_predict.clone().cpu().data.numpy()
-    max_actions = np.argmax(agent.get_Q(next_states).cpu().data.numpy(), axis=1)
+    max_actions = np.argmax(agent.get_q(next_states).cpu().data.numpy(), axis=1)
     q_target[np.arange(len(q_target)), actions] = rewards + gamma * agent.get_target_Q(next_states)[
         np.arange(len(q_target)), max_actions].data.numpy() * ~done
     q_target = agent._to_variable(q_target).to(device=DEVICE)
@@ -57,7 +57,7 @@ def calculate_td_error(state, action, reward, next_state, done, agent, gamma):
         float: TD error value
     """
     # Current Q-value estimate
-    current_q_value = agent.get_Q(state).squeeze()[action]
+    current_q_value = agent.get_q(state).squeeze()[action]
     if done:
         target_q_value = reward
     else:

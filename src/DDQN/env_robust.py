@@ -89,9 +89,9 @@ class MyEnv(gymnasium.Env):
         if torch.cuda.is_available():
             guesser_input = guesser_input.cuda()
         self.guesser.train(mode=False)
-        self.probs = self.guesser(guesser_input).squeeze()
-        self.guess = torch.argmax(self.probs).item()
-        self.correct_prob = self.probs[int(self.y_train[self.patient])].item()
+        self.probs = self.guesser(guesser_input).squeeze() #get guessser output for the 2 classes
+        self.guess = torch.argmax(self.probs).item() #who is the bigger probability - class 0 or class 1 ? keep the guess
+        self.correct_prob = self.probs[int(self.y_train[self.patient])].item() # get the real class from training data and then get the probability for this class
         return self.correct_prob
 
     def prob_guesser_for_positive(self, state):
