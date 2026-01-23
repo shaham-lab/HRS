@@ -83,7 +83,7 @@ def map_time_series(sample):
     return index_map
 
 
-def load_mimic_time_series(input_rel_path="data\\input\\time_series\\"):
+def load_mimic_compacted_time_series(input_rel_path="data\\input\\compacted_time_series\\"):
     # Get the current working directory
     base_dir = os.getcwd()
     # Construct file paths dynamically

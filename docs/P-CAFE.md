@@ -72,7 +72,7 @@ Navigate to the **`data`** directory for instructions.
     Supported datasets:
     - `utils.load_time_Series()` – eICU time series data (default)
     - `utils.load_mimic_text()` – MIMIC-III multimodal data (includes clinical text)
-    - `utils.load_mimic_time_series()` – MIMIC-III numeric time series
+    - `utils.load_mimic_compacted_time_series()` – MIMIC-III numeric time series
     
     Example:
     ```bash
@@ -83,7 +83,7 @@ Navigate to the **`data`** directory for instructions.
     Supported datasets:
     - `load_time_Series` – eICU time series data
     - `load_mimic_text` – MIMIC-III multimodal data (includes clinical text)
-    - `load_mimic_time_series` – MIMIC-III numeric time series
+    - `load_mimic_compaced_time_series` – MIMIC-III numeric time series
 
     Define the feature costs by setting `self.cost_list` in the `MultimodalGuesser` class.
 

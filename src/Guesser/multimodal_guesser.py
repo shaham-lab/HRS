@@ -58,7 +58,7 @@ def load_data_function(data_loader_name, input_rel_path="input\\"):
     data_loaders = {
         "load_time_Series": utils.load_time_Series,
         "load_mimic_text": utils.load_mimic_text,
-        "load_mimic_time_series": utils.load_mimic_time_series,
+        "load_mimic_compacted_time_series": utils.load_mimic_compacted_time_series,
     }
 
     # Get the appropriate function based on the provided name
