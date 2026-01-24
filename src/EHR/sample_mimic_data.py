@@ -20,7 +20,8 @@ import pandas as pd
 from pathlib import Path
 
 # Configuration
-SOURCE_DIR = "C:\\Users\\Eli\\Data\\physionet.org\\files\\mimiciv\\3.1\\Unzipped"  # Directory containing MIMIC-IV CSV files
+#SOURCE_DIR = "C:\\Users\\Eli\\Data\\physionet.org\\files\\mimiciv\\3.1\\Unzipped"  # Directory containing MIMIC-IV CSV files
+SOURCE_DIR = "C:\\Users\\Eli\\Data\\physionet.org\\files\\mimic-iv-note\\2.2\\Unzipped"  # Directory containing MIMIC-IV CSV files
 OUTPUT_DIR = "../../data/mimic4/samples"  # Directory for sampled output files
 SAMPLE_SIZE = 2000  # Number of rows to sample from each file
 
