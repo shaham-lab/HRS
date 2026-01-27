@@ -19,6 +19,7 @@ dependencies:
   - pillow
   - regex
   - ipywidgets
+  - tqdm
   - pip
   - pip:
     - openai==2.9.0
