@@ -19,6 +19,7 @@ dependencies:
   - pillow
   - regex
   - ipywidgets
+  - ipykernel
   - tqdm
   - pip
   - pip:
