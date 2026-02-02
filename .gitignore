@@ -16,3 +16,8 @@ chromadb_data/
 /ddqn_robust_models/
 /models/
 /config/user_config.json
+.vscode/settings.json
+data/output/demographic_features.parquet
+data/output/discharge_50_embeddings.parquet
+data/output/radiology_50_embeddings.parquet
+data/output/discharge_notes_embeddings.parquet
