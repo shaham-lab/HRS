@@ -26,4 +26,3 @@ This project builds predictive models for two binary clinical outcomes:
 
 > **Note on data leakage prevention:**
 > - **F2** (Diagnosis History) and **F3** (Discharge Summary History) use only data from **prior admissions** to prevent target leakage into the current visit.
-> - **F4** (Triage Data), **F5** (Chief Complaint), and **F24** (Radiology Note) are restricted to the **first 24–48 hours** of the current admission to avoid using information that would not yet be available at prediction time.
