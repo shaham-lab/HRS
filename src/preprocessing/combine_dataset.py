@@ -77,7 +77,7 @@ def run(config: dict) -> None:
     # Merge selected feature parquets
     # ------------------------------------------------------------------ #
     for filename in _FEATURES_TO_INCLUDE:
-        path = os.path.join(features_dir, filename)
+        path = str(os.path.join(features_dir, filename))
         if not os.path.exists(path):
             logger.warning("Feature file not found, skipping: %s", path)
             continue
@@ -93,7 +93,7 @@ def run(config: dict) -> None:
             f for f in os.listdir(embeddings_dir) if f.endswith(".parquet")
         )
         for filename in embedding_files:
-            path: str = os.path.join(embeddings_dir, filename)
+            path = str(os.path.join(embeddings_dir, filename))
             logger.info("Merging embedding file: %s", filename)
             emb_df = pd.read_parquet(path)
             base = base.merge(emb_df, on=["subject_id", "hadm_id"], how="left")
@@ -115,9 +115,9 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Save final dataset next to the classifications directory
     # ------------------------------------------------------------------ #
-    output_path = os.path.join(
+    output_path = str(os.path.join(
         os.path.dirname(classifications_dir), "final_cdss_dataset.parquet"
-    )
+    ))
     base.to_parquet(output_path, index=False)
     logger.info(
         "Saved final CDSS dataset to %s  (shape=%s)", output_path, base.shape
