@@ -12,6 +12,7 @@ Expected config keys:
 
 import logging
 import os
+from typing import cast
 
 import pandas as pd
 
@@ -31,9 +32,9 @@ def _clean_note(text: str) -> str:
 
 def _load_csv(path_gz: str, path_csv: str, **kwargs) -> pd.DataFrame:
     if os.path.exists(path_gz):
-        return pd.read_csv(path_gz, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
     if os.path.exists(path_csv):
-        return pd.read_csv(path_csv, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
     raise FileNotFoundError(
         f"Neither {path_gz} nor {path_csv} found."
     )
@@ -125,7 +126,7 @@ def run(config: dict) -> None:
     discharge_text = (
         prior.sort_values("note_admittime")
         .groupby(["subject_id", "hadm_id"])["text"]
-        .apply(lambda notes: "\n\n---\n\n".join(n for n in notes if n))
+        .apply(lambda note_texts: "\n\n---\n\n".join(n for n in note_texts if n))
         .reset_index()
         .rename(columns={"text": "discharge_history_text"})
     )
