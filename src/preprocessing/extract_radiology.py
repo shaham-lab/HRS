@@ -53,7 +53,6 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Load radiology notes
     # ------------------------------------------------------------------ #
-    found = False
     for directory in [note_dir, hosp_dir]:
         gz = os.path.join(directory, "radiology.csv.gz")
         csv = os.path.join(directory, "radiology.csv")
@@ -64,10 +63,8 @@ def run(config: dict) -> None:
                 parse_dates=["charttime"],
                 dtype={"subject_id": int, "hadm_id": float},
             )
-            found = True
             break
-
-    if not found:
+    else:
         raise FileNotFoundError(
             f"Radiology notes file not found under {note_dir} or {hosp_dir}. "
             "Expected radiology.csv[.gz]."
