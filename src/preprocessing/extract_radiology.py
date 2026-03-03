@@ -13,7 +13,7 @@ import os
 
 import pandas as pd
 
-from utils import _load_csv
+from preprocessing_utils import _load_csv
 
 logger = logging.getLogger(__name__)
 
