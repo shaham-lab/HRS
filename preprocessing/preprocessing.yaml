@@ -1,0 +1,21 @@
+# Preprocessing pipeline configuration for CDSS-ML
+# All paths are relative to the repository root unless absolute
+
+# Path to the raw MIMIC-IV data directory
+MIMIC_DATA_DIR: "data/mimic-iv"
+
+# Train / Dev / Test split percentages (must sum to 1.0)
+SPLIT_TRAIN: 0.70
+SPLIT_DEV: 0.15
+SPLIT_TEST: 0.15
+
+# HuggingFace BERT model settings
+BERT_MODEL_NAME: "emilyalsentzer/Bio_ClinicalBERT"
+BERT_MAX_LENGTH: 512
+BERT_BATCH_SIZE: 32
+BERT_DEVICE: "cuda"
+
+# Output directory roots (relative to repository root)
+FEATURES_DIR: "input/features"
+EMBEDDINGS_DIR: "input/embeddings"
+CLASSIFICATIONS_DIR: "input/classifications"
