@@ -44,9 +44,9 @@ def run(config: dict) -> None:
         if key not in config:
             raise KeyError(f"Missing required config key: '{key}'")
 
-    features_dir = config["FEATURES_DIR"]
-    embeddings_dir = config["EMBEDDINGS_DIR"]
-    classifications_dir = config["CLASSIFICATIONS_DIR"]
+    features_dir = str(config["FEATURES_DIR"])
+    embeddings_dir = str(config["EMBEDDINGS_DIR"])
+    classifications_dir = str(config["CLASSIFICATIONS_DIR"])
 
     # ------------------------------------------------------------------ #
     # Start from splits (defines the admission universe)
