@@ -12,6 +12,7 @@ Expected config keys:
 
 import logging
 import os
+from typing import cast
 
 import pandas as pd
 
@@ -20,9 +21,9 @@ logger = logging.getLogger(__name__)
 
 def _load_csv(path_gz: str, path_csv: str, **kwargs) -> pd.DataFrame:
     if os.path.exists(path_gz):
-        return pd.read_csv(path_gz, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
     if os.path.exists(path_csv):
-        return pd.read_csv(path_csv, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
     raise FileNotFoundError(
         f"Neither {path_gz} nor {path_csv} found."
     )
