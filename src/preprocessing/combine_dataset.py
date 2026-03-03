@@ -93,7 +93,7 @@ def run(config: dict) -> None:
             f for f in os.listdir(embeddings_dir) if f.endswith(".parquet")
         )
         for filename in embedding_files:
-            path = os.path.join(embeddings_dir, filename)
+            path: str = os.path.join(embeddings_dir, filename)
             logger.info("Merging embedding file: %s", filename)
             emb_df = pd.read_parquet(path)
             base = base.merge(emb_df, on=["subject_id", "hadm_id"], how="left")

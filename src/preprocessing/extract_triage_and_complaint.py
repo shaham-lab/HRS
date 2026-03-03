@@ -12,6 +12,7 @@ Expected config keys:
 
 import logging
 import os
+from typing import cast
 
 import pandas as pd
 
@@ -31,9 +32,9 @@ _CHIEF_COMPLAINT_ITEMID = 223112
 
 def _load_csv(path_gz: str, path_csv: str, **kwargs) -> pd.DataFrame:
     if os.path.exists(path_gz):
-        return pd.read_csv(path_gz, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
     if os.path.exists(path_csv):
-        return pd.read_csv(path_csv, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
     raise FileNotFoundError(
         f"Neither {path_gz} nor {path_csv} found."
     )
@@ -149,7 +150,7 @@ def run(config: dict) -> None:
             complaint_out = triage[["subject_id", "hadm_id"]].copy()
             complaint_out["chief_complaint_text"] = ""
         else:
-            chunks = []
+            chunks: list[pd.DataFrame] = []
             for chunk in pd.read_csv(
                 chart_gz if os.path.exists(chart_gz) else chart_csv,
                 usecols=["subject_id", "hadm_id", "itemid", "value"],

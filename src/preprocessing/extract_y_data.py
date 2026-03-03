@@ -12,6 +12,7 @@ Expected config keys:
 
 import logging
 import os
+from typing import cast
 
 import pandas as pd
 
@@ -22,9 +23,9 @@ _READMISSION_WINDOW_DAYS = 30
 
 def _load_csv(path_gz: str, path_csv: str, **kwargs) -> pd.DataFrame:
     if os.path.exists(path_gz):
-        return pd.read_csv(path_gz, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
     if os.path.exists(path_csv):
-        return pd.read_csv(path_csv, **kwargs)
+        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
     raise FileNotFoundError(
         f"Neither {path_gz} nor {path_csv} found."
     )
@@ -82,7 +83,8 @@ def run(config: dict) -> None:
 
     # Within 30-day window
     window = pd.Timedelta(days=_READMISSION_WINDOW_DAYS)
-    cross = cross[cross["next_admittime"] - cross["dischtime"] <= window]
+    time_since_discharge: pd.Series = cross["next_admittime"] - cross["dischtime"]
+    cross = cross[time_since_discharge <= window]
 
     readmitted_hadm_ids = cross["hadm_id"].unique()
 

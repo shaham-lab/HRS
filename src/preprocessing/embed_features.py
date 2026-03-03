@@ -163,8 +163,8 @@ def run(config: dict) -> None:
 
     device = _get_device(device_str)
     logger.info("Loading BERT model '%s' on device '%s'…", model_name, device)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = AutoModel.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)  # type: ignore[misc]
+    model = AutoModel.from_pretrained(model_name)  # type: ignore[misc]
     model.to(device)
 
     os.makedirs(embeddings_dir, exist_ok=True)
