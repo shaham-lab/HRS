@@ -12,24 +12,15 @@ Expected config keys:
 
 import logging
 import os
-from typing import cast
 
 import pandas as pd
+
+from utils import _load_csv
 
 logger = logging.getLogger(__name__)
 
 # Rows to read per chunk from labevents
 _CHUNK_SIZE = 500_000
-
-
-def _load_csv(path_gz: str, path_csv: str, **kwargs) -> pd.DataFrame:
-    if os.path.exists(path_gz):
-        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
-    if os.path.exists(path_csv):
-        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
-    raise FileNotFoundError(
-        f"Neither {path_gz} nor {path_csv} found."
-    )
 
 
 def run(config: dict) -> None:

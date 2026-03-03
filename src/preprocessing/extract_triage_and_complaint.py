@@ -12,9 +12,10 @@ Expected config keys:
 
 import logging
 import os
-from typing import cast
 
 import pandas as pd
+
+from utils import _load_csv
 
 logger = logging.getLogger(__name__)
 
@@ -28,16 +29,6 @@ _TRIAGE_TEMPLATE = (
 
 # Chief complaint item ID in chartevents (MIMIC-IV ED)
 _CHIEF_COMPLAINT_ITEMID = 223112
-
-
-def _load_csv(path_gz: str, path_csv: str, **kwargs) -> pd.DataFrame:
-    if os.path.exists(path_gz):
-        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
-    if os.path.exists(path_csv):
-        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
-    raise FileNotFoundError(
-        f"Neither {path_gz} nor {path_csv} found."
-    )
 
 
 def _fmt(val) -> str:
