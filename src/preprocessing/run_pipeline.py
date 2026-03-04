@@ -161,7 +161,17 @@ def main() -> None:
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Force rerun of all selected modules even if sources are unchanged.",
+        help="Force rerun of ALL selected modules even if sources are unchanged.",
+    )
+    parser.add_argument(
+        "--force-module",
+        dest="force_modules",
+        nargs="+",
+        metavar="MODULE",
+        help=(
+            "Force rerun of specific modules by name even if sources are unchanged. "
+            "Example: --force-module extract_demographics extract_labs"
+        ),
     )
 
     args = parser.parse_args()
@@ -170,7 +180,6 @@ def main() -> None:
     # Load configuration
     # ------------------------------------------------------------------ #
     config = _load_config(args.config)
-    config["FORCE_RERUN"] = args.force
     logger.info("Loaded configuration from %s", args.config)
 
     # ------------------------------------------------------------------ #
@@ -209,6 +218,7 @@ def main() -> None:
     # Execute modules in order
     # ------------------------------------------------------------------ #
     for module_name in modules_to_run:
+        config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
         _run_module(module_name, config)
 
     logger.info("Pipeline finished. Modules run: %s", modules_to_run)
