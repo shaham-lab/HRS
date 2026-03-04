@@ -148,8 +148,8 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
     omr_weight.loc[lbs_mask, "result_value"] = (
         omr_weight.loc[lbs_mask, "result_value"] * 0.453592
     )
-    # Keep only plausible weights: >= 20 kg (≈ 50 lbs before conversion)
-    omr_weight = omr_weight[omr_weight["result_value"] >= 20]
+    # Keep only plausible weights: > 0 kg
+    omr_weight = omr_weight[omr_weight["result_value"] > 0]
 
     omr_bmi["result_value"] = pd.to_numeric(omr_bmi["result_value"], errors="coerce").astype(float)
 
@@ -227,7 +227,7 @@ def _extract_chart_vitals(
         if not w_chunk.empty:
             lbs_mask = w_chunk["itemid"] == 226531
             w_chunk.loc[lbs_mask, "valuenum"] = w_chunk.loc[lbs_mask, "valuenum"] * 0.453592
-            w_chunk = w_chunk[(w_chunk["valuenum"] >= 20) & (w_chunk["valuenum"] <= 400)]
+            w_chunk = w_chunk[w_chunk["valuenum"] > 0]
             weight_chunks.append(w_chunk)
 
     adm = admissions[["subject_id", "hadm_id"]].copy()
