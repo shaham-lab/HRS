@@ -40,6 +40,8 @@ _CHART_WEIGHT_ITEMS: list[tuple[int, str]] = [
     (226531, "lbs"),  # Admission Weight (lbs.) → convert to kg (* 0.453592)
     (226846, "kg"),   # Feeding Weight          → lowest priority
 ]
+_CHART_WEIGHT_ITEMIDS: list[int] = [i for i, _ in _CHART_WEIGHT_ITEMS]
+_CHART_WEIGHT_UNIT: dict[int, str] = {i: u for i, u in _CHART_WEIGHT_ITEMS}
 
 # Age bins boundaries (left-closed)
 _AGE_BINS = [18, 30, 45, 65, 75, 200]
@@ -179,29 +181,58 @@ def _extract_chart_vitals(
     mimic_dir: str, admissions: pd.DataFrame
 ) -> pd.DataFrame:
     # Fix 2: Use new itemid collections (no BMI from chartevents)
-    all_item_ids = list(_CHART_HEIGHT_ITEMS.keys()) + [
-        item_id for item_id, _ in _CHART_WEIGHT_ITEMS
-    ]
-    chart = _load_chartevents(mimic_dir, all_item_ids)
-    if chart.empty:
+    all_item_ids = list(_CHART_HEIGHT_ITEMS.keys()) + _CHART_WEIGHT_ITEMIDS
+    weight_priority = {item_id: rank for rank, (item_id, _) in enumerate(_CHART_WEIGHT_ITEMS)}
+
+    path = os.path.join(mimic_dir, "icu", "chartevents.csv.gz")
+    if not os.path.exists(path):
+        path = os.path.join(mimic_dir, "icu", "chartevents.csv")
+    if not os.path.exists(path):
+        logger.warning("chartevents table not found – no fallback for vitals")
         result = admissions[["subject_id", "hadm_id"]].copy()
         result["chart_height_cm"] = np.nan
         result["chart_weight_kg"] = np.nan
         return result
 
-    chart["hadm_id"] = chart["hadm_id"].astype("Int64")
+    logger.info("Loading chartevents (may be large)…")
+    height_chunks: list = []
+    weight_chunks: list = []
+
+    # Fix 2 CRITICAL: apply unit conversion and range filtering within each chunk
+    for chunk in pd.read_csv(
+        path,
+        usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
+        dtype={"subject_id": int, "hadm_id": float, "itemid": int},
+        parse_dates=["charttime"],
+        chunksize=500_000,
+    ):
+        chunk = chunk[chunk["itemid"].isin(all_item_ids)].copy()
+        if chunk.empty:
+            continue
+
+        # Height rows: convert inches→cm, filter implausible values
+        h_chunk = chunk[chunk["itemid"].isin(list(_CHART_HEIGHT_ITEMS.keys()))].copy()
+        if not h_chunk.empty:
+            inch_mask = h_chunk["itemid"] == 226707
+            h_chunk.loc[inch_mask, "valuenum"] = h_chunk.loc[inch_mask, "valuenum"] * 2.54
+            h_chunk = h_chunk[(h_chunk["valuenum"] >= 50) & (h_chunk["valuenum"] <= 250)]
+            height_chunks.append(h_chunk)
+
+        # Weight rows: convert lbs→kg, filter implausible values
+        w_chunk = chunk[chunk["itemid"].isin(_CHART_WEIGHT_ITEMIDS)].copy()
+        if not w_chunk.empty:
+            lbs_mask = w_chunk["itemid"] == 226531
+            w_chunk.loc[lbs_mask, "valuenum"] = w_chunk.loc[lbs_mask, "valuenum"] * 0.453592
+            w_chunk = w_chunk[(w_chunk["valuenum"] >= 20) & (w_chunk["valuenum"] <= 400)]
+            weight_chunks.append(w_chunk)
+
     adm = admissions[["subject_id", "hadm_id"]].copy()
 
-    # Fix 2: Normalise height to cm
-    height_ids = list(_CHART_HEIGHT_ITEMS.keys())
-    h_sub = chart[chart["itemid"].isin(height_ids)].copy()
-    if not h_sub.empty:
-        inch_mask = h_sub["itemid"] == 226707
-        h_sub.loc[inch_mask, "valuenum"] = h_sub.loc[inch_mask, "valuenum"] * 2.54
-        # Filter implausible values
-        h_sub = h_sub[(h_sub["valuenum"] >= 50) & (h_sub["valuenum"] <= 250)]
+    if height_chunks:
+        h_all = pd.concat(height_chunks, ignore_index=True)
+        h_all["hadm_id"] = h_all["hadm_id"].astype("Int64")
         first_h = (
-            h_sub.sort_values("charttime")
+            h_all.sort_values("charttime")
             .groupby(["subject_id", "hadm_id"])["valuenum"]
             .first()
             .reset_index()
@@ -211,18 +242,12 @@ def _extract_chart_vitals(
     else:
         chart_height = adm.copy().assign(chart_height_cm=np.nan)
 
-    # Fix 2: Normalise weight to kg, respect priority order
-    weight_priority = {item_id: rank for rank, (item_id, _) in enumerate(_CHART_WEIGHT_ITEMS)}
-    weight_ids = list(weight_priority.keys())
-    w_sub = chart[chart["itemid"].isin(weight_ids)].copy()
-    if not w_sub.empty:
-        lbs_mask = w_sub["itemid"] == 226531
-        w_sub.loc[lbs_mask, "valuenum"] = w_sub.loc[lbs_mask, "valuenum"] * 0.453592
-        # Filter implausible values
-        w_sub = w_sub[(w_sub["valuenum"] >= 20) & (w_sub["valuenum"] <= 400)]
-        w_sub["priority"] = w_sub["itemid"].map(weight_priority)
+    if weight_chunks:
+        w_all = pd.concat(weight_chunks, ignore_index=True)
+        w_all["hadm_id"] = w_all["hadm_id"].astype("Int64")
+        w_all["priority"] = w_all["itemid"].map(weight_priority)
         first_w = (
-            w_sub.sort_values(["priority", "charttime"])
+            w_all.sort_values(["priority", "charttime"])
             .groupby(["subject_id", "hadm_id"])["valuenum"]
             .first()
             .reset_index()
