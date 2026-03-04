@@ -47,7 +47,7 @@ preprocessing/
 | `BERT_DEVICE`        | Compute device (`cuda` or `cpu`)                      | `cuda`                                |
 | `FEATURES_DIR`       | Output directory for raw feature parquets             | `input/features`                      |
 | `EMBEDDINGS_DIR`     | Output directory for embedding parquets               | `input/embeddings`                    |
-| `CLASSIFICATIONS_DIR` | Output directory for labels and splits                | `input/classifications`               |
+| `CLASSIFICATIONS_DIR`| Output directory for labels and splits                | `input/classifications`               |
 
 > **No hardcoded paths, split ratios, or model names appear in any Python script.** All values are read exclusively from `preprocessing.yaml` at runtime, passed in via `run_pipeline.py`.
 
