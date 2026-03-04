@@ -1,8 +1,8 @@
 # Preprocessing pipeline configuration for CDSS-ML
-# All paths are relative to the repository root unless absolute
+# All paths are relative to the repository root, absolute, or may use ~ for the home directory
 
 # Path to the raw MIMIC-IV data directory
-MIMIC_DATA_DIR: "data/mimic-iv"
+MIMIC_DATA_DIR: "~/data/physionet.org/files/mimiciv/3.1"
 
 # Train / Dev / Test split percentages (must sum to 1.0)
 SPLIT_TRAIN: 0.70

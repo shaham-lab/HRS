@@ -156,6 +156,8 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     config = _load_config(args.config)
     logger.info("Loaded configuration from %s", args.config)
+    if "MIMIC_DATA_DIR" in config:
+        config["MIMIC_DATA_DIR"] = os.path.expanduser(config["MIMIC_DATA_DIR"])
 
     # ------------------------------------------------------------------ #
     # Determine which modules to run
