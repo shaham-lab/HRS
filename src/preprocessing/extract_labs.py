@@ -143,7 +143,7 @@ def run(config: dict) -> None:
         )
     ):
         # 1. Filter out rows with no hadm_id (~70% of labevents are outpatient)
-        chunk = chunk.dropna(subset=["hadm_id"])
+        chunk = chunk.dropna(subset=["hadm_id"]).copy()
         chunk["hadm_id"] = chunk["hadm_id"].astype(int)
 
         # 2. Filter out rows where both value and valuenum are null
