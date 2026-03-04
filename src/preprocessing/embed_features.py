@@ -143,12 +143,12 @@ def run(config: dict) -> None:
         if key not in config:
             raise KeyError(f"Missing required config key: '{key}'")
 
-    features_dir = config["FEATURES_DIR"]
-    embeddings_dir = config["EMBEDDINGS_DIR"]
-    model_name = config["BERT_MODEL_NAME"]
+    features_dir = str(config["FEATURES_DIR"])
+    embeddings_dir = str(config["EMBEDDINGS_DIR"])
+    model_name = str(config["BERT_MODEL_NAME"])
     max_length = int(config["BERT_MAX_LENGTH"])
     batch_size = int(config["BERT_BATCH_SIZE"])
-    device_str = config["BERT_DEVICE"]
+    device_str = str(config["BERT_DEVICE"])
 
     # ------------------------------------------------------------------ #
     # Load model and tokenizer
@@ -194,7 +194,7 @@ def run(config: dict) -> None:
                 f"Available columns: {list(df.columns)}"
             )
 
-        texts = df[text_col].tolist()
+        texts: list[str] = [str(t) for t in df[text_col].tolist()]
         embeddings = _embed_texts(
             texts, tokenizer, model, device, max_length, batch_size
         )
