@@ -9,6 +9,11 @@ MIMIC_DATA_DIR: "~/data/physionet.org/files/mimiciv/3.1"
 # If omitted the pipeline falls back to MIMIC_DATA_DIR/note then MIMIC_DATA_DIR/hosp.
 MIMIC_NOTE_DIR: "~/data/physionet.org/files/mimic-iv-note/2.2"
 
+# Path to the MIMIC-IV ED module (mimic-iv-ed).
+# The triage table is stored here under an ed/ subdirectory.
+# If omitted the pipeline falls back to MIMIC_DATA_DIR/ed then MIMIC_DATA_DIR/hosp.
+MIMIC_ED_DIR: "~/data/physionet.org/files/mimic-iv-ed/2.2"
+
 # Train / Dev / Test split percentages (must sum to 1.0)
 SPLIT_TRAIN: 0.70
 SPLIT_DEV: 0.15

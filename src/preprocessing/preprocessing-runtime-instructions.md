@@ -61,7 +61,7 @@ paths configured in `preprocessing.yaml` (see [Section 3](#3-configuration-prepr
 | `discharge` | `extract_discharge_history` |
 | `radiology` | `extract_radiology` |
 
-**`ed/` subdirectory** (under `MIMIC_DATA_DIR`):
+**`ed/` subdirectory** (under `MIMIC_ED_DIR`, i.e. the `mimic-iv-ed` module):
 
 | Table | Used by |
 |-------|---------|
@@ -127,8 +127,9 @@ from this file.
 
 | Key | Type | Description | Example |
 |-----|------|-------------|---------|
-| `MIMIC_DATA_DIR` | `str` | Root of the MIMIC-IV data download (contains `hosp/`, `icu/`, `ed/`). Supports `~` expansion. | `"~/data/physionet.org/files/mimiciv/3.1"` |
+| `MIMIC_DATA_DIR` | `str` | Root of the MIMIC-IV data download (contains `hosp/`, `icu/`). Supports `~` expansion. | `"~/data/physionet.org/files/mimiciv/3.1"` |
 | `MIMIC_NOTE_DIR` | `str` | Root of the `mimic-iv-note` module (contains `note/`). Falls back to `MIMIC_DATA_DIR/note` if omitted. Supports `~` expansion. | `"~/data/physionet.org/files/mimic-iv-note/2.2"` |
+| `MIMIC_ED_DIR` | `str` | Root of the `mimic-iv-ed` module (contains `ed/`). The triage table is looked up here first; falls back to `MIMIC_DATA_DIR/ed/` then `MIMIC_DATA_DIR/hosp/` if omitted. Supports `~` expansion. | `"~/data/physionet.org/files/mimic-iv-ed/2.2"` |
 | `SPLIT_TRAIN` | `float` | Fraction of patients for training. Must sum to 1.0 with `SPLIT_DEV` and `SPLIT_TEST`. | `0.70` |
 | `SPLIT_DEV` | `float` | Fraction of patients for dev/validation. | `0.15` |
 | `SPLIT_TEST` | `float` | Fraction of patients for testing. | `0.15` |

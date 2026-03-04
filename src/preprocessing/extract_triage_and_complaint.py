@@ -7,6 +7,9 @@ Produces two separate output files:
 
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
+    MIMIC_ED_DIR    – (optional) root of the mimic-iv-ed module; the triage
+                      table is expected at MIMIC_ED_DIR/ed/triage.csv.gz.
+                      Falls back to MIMIC_DATA_DIR/ed/ then MIMIC_DATA_DIR/hosp/.
     FEATURES_DIR    – output directory for feature parquets
 """
 
@@ -48,25 +51,35 @@ def run(config: dict) -> None:
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
 
-    # Possible locations for ED triage table
-    ed_dir = os.path.join(mimic_dir, "ed")
+    # Resolve triage search directories.
+    # Priority: MIMIC_ED_DIR/ed/ → MIMIC_DATA_DIR/ed/ → MIMIC_DATA_DIR/hosp/
+    ed_dirs = []
+    if config.get("MIMIC_ED_DIR"):
+        ed_dirs.append(os.path.join(config["MIMIC_ED_DIR"], "ed"))
+    ed_dirs.append(os.path.join(mimic_dir, "ed"))
     hosp_dir = os.path.join(mimic_dir, "hosp")
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
     # ------------------------------------------------------------------ #
     # Hash-based skip check
     # ------------------------------------------------------------------ #
+    # Resolve which triage file will actually be used
+    triage_path_resolved = None
+    for directory in ed_dirs + [hosp_dir]:
+        gz = os.path.join(directory, "triage.csv.gz")
+        csv_p = os.path.join(directory, "triage.csv")
+        if os.path.exists(gz):
+            triage_path_resolved = gz
+            break
+        if os.path.exists(csv_p):
+            triage_path_resolved = csv_p
+            break
+
     source_paths = [p for p in [
-        _gz_or_csv(mimic_dir, "ed", "triage"),
+        triage_path_resolved,
         _gz_or_csv(mimic_dir, "hosp", "admissions"),
-    ] if os.path.exists(p)]
-    # If ed/ triage not found, fall back to hosp/ triage
-    if not os.path.exists(_gz_or_csv(mimic_dir, "ed", "triage")):
-        hosp_triage = _gz_or_csv(mimic_dir, "hosp", "triage")
-        if os.path.exists(hosp_triage) and hosp_triage not in source_paths:
-            source_paths = [hosp_triage] + [
-                p for p in source_paths if "triage" not in p
-            ]
+    ] if p is not None and os.path.exists(p)]
+
     output_paths = [
         os.path.join(features_dir, "triage_features.parquet"),
         os.path.join(features_dir, "chief_complaint_features.parquet"),
@@ -80,7 +93,7 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Load triage table
     # ------------------------------------------------------------------ #
-    for directory in [ed_dir, hosp_dir]:
+    for directory in ed_dirs + [hosp_dir]:
         gz = os.path.join(directory, "triage.csv.gz")
         csv = os.path.join(directory, "triage.csv")
         if os.path.exists(gz) or os.path.exists(csv):
@@ -88,10 +101,11 @@ def run(config: dict) -> None:
                 gz, csv,
                 dtype={"subject_id": int, "hadm_id": float},
             )
+            logger.info("Loaded triage from %s", gz if os.path.exists(gz) else csv)
             break
     else:
         raise FileNotFoundError(
-            f"triage table not found under {ed_dir} or {hosp_dir}"
+            f"triage table not found under any of: {ed_dirs + [hosp_dir]}"
         )
 
     triage["hadm_id"] = triage["hadm_id"].astype("Int64")

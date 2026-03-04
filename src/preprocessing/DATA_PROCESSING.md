@@ -52,7 +52,7 @@ Every `hadm_id` inherits the split label of its `subject_id`.
 | `chartevents` | `icu/` | `extract_demographics` | `subject_id`, `hadm_id`, `itemid`, `charttime`, `value`, `valuenum` |
 | `discharge` | `note/` (mimic-iv-note) | `extract_discharge_history` | `subject_id`, `hadm_id`, `charttime`, `text` |
 | `radiology` | `note/` (mimic-iv-note) | `extract_radiology` | `subject_id`, `hadm_id`, `charttime`, `text` |
-| `triage` | `ed/` | `extract_triage_and_complaint` | `subject_id`, `hadm_id`, `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`, `pain`, `acuity`, `chiefcomplaint` |
+| `triage` | `ed/` (mimic-iv-ed) | `extract_triage_and_complaint` | `subject_id`, `hadm_id`, `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`, `pain`, `acuity`, `chiefcomplaint` |
 
 ---
 
@@ -180,7 +180,7 @@ derivation.
 
 **Output column:** `triage_text` — a single string per admission.
 
-- **Source:** `ed/triage`.
+- **Source:** `ed/triage` (mimic-iv-ed module, resolved via `MIMIC_ED_DIR/ed/` first).
 - **Transformation:** Structured triage fields are rendered as a natural-language
   sentence using the template:
 
