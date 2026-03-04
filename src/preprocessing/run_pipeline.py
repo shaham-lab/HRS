@@ -60,7 +60,11 @@ def _import_module(name: str):
             f"Module file not found: {module_file}"
         )
     spec = importlib.util.spec_from_file_location(name, module_file)
+    if spec is None:
+        raise ImportError(f"Cannot create module spec for: {module_file}")
     module = importlib.util.module_from_spec(spec)
+    if spec.loader is None:
+        raise ImportError(f"Module spec has no loader for: {module_file}")
     spec.loader.exec_module(module)
     return module
 
