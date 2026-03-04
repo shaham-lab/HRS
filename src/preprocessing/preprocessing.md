@@ -37,7 +37,7 @@ preprocessing/
 
 | Key                  | Description                                           | Example value                         |
 |----------------------|-------------------------------------------------------|---------------------------------------|
-| `MIMIC_DATA_DIR`     | Path to raw MIMIC-IV CSV/parquet files                | `data/mimic-iv`                       |
+| `MIMIC_DATA_DIR`     | Path to raw MIMIC-IV CSV/parquet files                | `~/data/physionet.org/files/mimiciv/3.1` |
 | `SPLIT_TRAIN`        | Fraction of patients assigned to train set            | `0.70`                                |
 | `SPLIT_DEV`          | Fraction of patients assigned to dev set              | `0.15`                                |
 | `SPLIT_TEST`         | Fraction of patients assigned to test set             | `0.15`                                |

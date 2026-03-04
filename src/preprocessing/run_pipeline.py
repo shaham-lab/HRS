@@ -28,6 +28,9 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
 
 
+_PATH_KEYS = {"MIMIC_DATA_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR"}
+
+
 def _load_config(config_path: str) -> dict:
     if not os.path.exists(config_path):
         raise FileNotFoundError(
@@ -39,6 +42,9 @@ def _load_config(config_path: str) -> dict:
         raise ValueError(
             f"Configuration file {config_path} must contain a YAML mapping."
         )
+    for key in _PATH_KEYS:
+        if key in cfg and isinstance(cfg[key], str):
+            cfg[key] = os.path.expanduser(cfg[key])
     return cfg
 
 
