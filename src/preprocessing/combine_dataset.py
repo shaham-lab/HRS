@@ -3,7 +3,7 @@ combine_dataset.py – Merge all features into the final CDSS dataset.
 
 Reads:
   • input/embeddings/   – all embedding parquets
-  • input/features/     – demographics_features.parquet, labs_features.parquet
+  • input/features/     – demographics_features.parquet
   • input/classifications/ – y_labels.parquet, data_splits.parquet
 
 Performs a left join on (subject_id, hadm_id), starting from the admissions
@@ -23,10 +23,13 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Feature parquets from features/ that are included in the final dataset
+# Feature parquets from features/ that are included in the final flat dataset.
+# NOTE: labs_features.parquet is intentionally excluded — lab events are stored
+# in long format (one row per event) and are joined dynamically at training time
+# when the MDP agent selects a subset of tests. Including them here would require
+# pivoting to wide format which reintroduces sparsity and loses temporal structure.
 _FEATURES_TO_INCLUDE = [
     "demographics_features.parquet",
-    "labs_features.parquet",
 ]
 
 # All embedding parquets (discovered dynamically from embeddings_dir)

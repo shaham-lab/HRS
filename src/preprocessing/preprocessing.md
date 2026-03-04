@@ -104,11 +104,23 @@ preprocessing/
 
 ---
 
-### 6. `extract_labs.py` – Lab results (current admission)
+### 6. `extract_labs.py` – Lab events (current admission, long format)
 
-* **Sources**: `labevents`, `d_labitems`.
-* **Logic**: Reads data in chunks for memory efficiency. Groups lab items by clinical domain (`d_labitems.category`). Computes mean, min, max, and last value per domain per admission.
-* **Output**: `input/features/labs_features.parquet`.
+* **Sources**: `labevents`, `d_labitems`, `admissions`.
+* **Logic**:
+  * Reads `labevents` in chunks of 500,000 rows for memory efficiency.
+  * Filters out rows with no `hadm_id` (~70% of lab events in MIMIC-IV are outpatient and not linked to an admission).
+  * Filters out rows where both `value` and `valuenum` are null.
+  * Joins `label`, `fluid`, `category` from `d_labitems`. Strips whitespace and removes artifact rows (`fluid` in `["I", "Q", "fluid"]`).
+  * Filters to events within the current admission window (`admittime` ≤ `charttime` ≤ `dischtime`).
+  * Converts each lab event to a chronological natural-language text line:
+    `[HH:MM] {label} ({fluid}/{category}): {value} {unit} (ref: lower-upper) [ABNORMAL] [STAT]`
+    Reference range, abnormal flag, and STAT priority are omitted when not present.
+  * Sorts events chronologically within each admission.
+  * **No aggregation, no pivoting, no wide format.**
+  * Lab embedding is intentionally deferred to training/inference time. The MDP agent selects a subset of `itemid`s, their text lines are concatenated in chronological order, and passed to the language model for encoding.
+* **Output**: `input/features/labs_features.parquet` — long format, one row per lab event. Columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line`.
+* **Note**: `labs_features.parquet` is excluded from `final_cdss_dataset.parquet` and joined dynamically at training time.
 
 ---
 
@@ -145,7 +157,7 @@ preprocessing/
 
 ### 10. `combine_dataset.py` – Final dataset assembly
 
-* **Logic**: Left-joins all embedding parquets, demographics, labs, and classifications on (`subject_id`, `hadm_id`). Excludes raw text parquets. Ensures the `split` column is present.
+* **Logic**: Left-joins all embedding parquets, demographics, and classifications on (`subject_id`, `hadm_id`). Excludes raw text parquets and `labs_features.parquet` (which is in long format and joined dynamically at training time). Ensures the `split` column is present.
 * **Output**: `final_cdss_dataset.parquet`.
 
 ---

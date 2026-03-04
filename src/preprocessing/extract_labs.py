@@ -1,9 +1,12 @@
 """
-extract_labs.py – Lab events for each admission.
+extract_labs.py – Lab events (current admission, long format).
 
-Reads labevents in chunks for memory efficiency.
-Aggregates lab results by clinical domain (d_labitems.category),
-computing mean, min, max and last value per domain per admission.
+Outputs one row per lab event per admission, formatted as a chronological
+natural-language text line. No aggregation, no pivoting, no wide format.
+
+Lab embedding is intentionally deferred to training/inference time. The MDP
+agent selects a subset of itemids, their text lines are concatenated in
+chronological order, and passed to the language model for encoding.
 
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
@@ -23,8 +26,38 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 500_000
 
 
+def _build_lab_text_line(row) -> str:
+    """Convert a single lab event row to a chronological text line."""
+    # Value: prefer numeric formatted to 2dp, fall back to text value
+    if pd.notna(row["valuenum"]):
+        value_str = f"{row['valuenum']:.2f}"
+    else:
+        value_str = str(row["value"]).strip()
+
+    # Unit
+    uom = f" {row['valueuom']}" if pd.notna(row["valueuom"]) else ""
+
+    # Reference range — only include when both bounds are present
+    ref_str = ""
+    if pd.notna(row["ref_range_lower"]) and pd.notna(row["ref_range_upper"]):
+        ref_str = f" (ref: {row['ref_range_lower']}-{row['ref_range_upper']})"
+
+    # Abnormal flag — only include when flagged
+    flag_str = " [ABNORMAL]" if str(row["flag"]).strip().lower() == "abnormal" else ""
+
+    # Priority — only include when STAT
+    priority_str = " [STAT]" if str(row["priority"]).strip().upper() == "STAT" else ""
+
+    time_str = pd.to_datetime(row["charttime"]).strftime("%H:%M")
+
+    return (
+        f"[{time_str}] {row['label']} ({row['fluid']}/{row['category']}): "
+        f"{value_str}{uom}{ref_str}{flag_str}{priority_str}"
+    )
+
+
 def run(config: dict) -> None:
-    """Extract and aggregate lab features per admission."""
+    """Extract lab events as long-format chronological text lines per admission."""
     required_keys = ["MIMIC_DATA_DIR", "FEATURES_DIR"]
     for key in required_keys:
         if key not in config:
@@ -35,18 +68,26 @@ def run(config: dict) -> None:
     hosp_dir = os.path.join(mimic_dir, "hosp")
 
     # ------------------------------------------------------------------ #
-    # Load d_labitems for domain mapping
+    # Load d_labitems for label, fluid, category mapping
     # ------------------------------------------------------------------ #
     logger.info("Loading d_labitems…")
     d_labitems = _load_csv(
         os.path.join(hosp_dir, "d_labitems.csv.gz"),
         os.path.join(hosp_dir, "d_labitems.csv"),
-        usecols=["itemid", "category"],
+        usecols=["itemid", "label", "fluid", "category"],
     )
-    item_to_category = d_labitems.set_index("itemid")["category"].to_dict()
+    # Clean d_labitems: strip whitespace, remove artifact rows
+    d_labitems["fluid"]    = d_labitems["fluid"].str.strip()
+    d_labitems["category"] = d_labitems["category"].str.strip()
+    d_labitems = d_labitems[~d_labitems["fluid"].isin(["I", "Q", "fluid"])]
+
+    d_labitems_indexed = d_labitems.set_index("itemid")
+    item_to_label    = d_labitems_indexed["label"].to_dict()
+    item_to_fluid    = d_labitems_indexed["fluid"].to_dict()
+    item_to_category = d_labitems_indexed["category"].to_dict()
 
     # ------------------------------------------------------------------ #
-    # Load admissions to know valid admission windows
+    # Load admissions for window filtering
     # ------------------------------------------------------------------ #
     logger.info("Loading admissions…")
     admissions = _load_csv(
@@ -58,7 +99,7 @@ def run(config: dict) -> None:
     )
 
     # ------------------------------------------------------------------ #
-    # Stream labevents in chunks
+    # Stream labevents in chunks, applying per-chunk filters
     # ------------------------------------------------------------------ #
     lab_gz = os.path.join(hosp_dir, "labevents.csv.gz")
     lab_csv = os.path.join(hosp_dir, "labevents.csv")
@@ -75,66 +116,82 @@ def run(config: dict) -> None:
     for i, chunk in enumerate(
         pd.read_csv(
             lab_path,
-            usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
+            usecols=[
+                "subject_id", "hadm_id", "itemid", "charttime",
+                "value", "valuenum", "valueuom",
+                "ref_range_lower", "ref_range_upper", "flag", "priority",
+            ],
             dtype={"subject_id": int, "hadm_id": float, "itemid": int},
             parse_dates=["charttime"],
             chunksize=_CHUNK_SIZE,
         )
     ):
-        chunk = chunk.dropna(subset=["hadm_id", "valuenum"])
+        # 1. Filter out rows with no hadm_id (~70% of labevents are outpatient)
+        chunk = chunk.dropna(subset=["hadm_id"])
         chunk["hadm_id"] = chunk["hadm_id"].astype(int)
-        chunk["category"] = chunk["itemid"].map(item_to_category).fillna("Other")
-        all_chunks.append(chunk[["subject_id", "hadm_id", "category", "valuenum",
-                                  "charttime"]])
+
+        # 2. Filter out rows where both value and valuenum are null
+        chunk = chunk[chunk["value"].notna() | chunk["valuenum"].notna()]
+
+        # 3. Join label, fluid, category from d_labitems
+        chunk["label"]    = chunk["itemid"].map(item_to_label)
+        chunk["fluid"]    = chunk["itemid"].map(item_to_fluid)
+        chunk["category"] = chunk["itemid"].map(item_to_category)
+
+        # 4. Drop rows where itemid is not in d_labitems (unmapped items)
+        chunk = chunk.dropna(subset=["label"])
+
+        if not chunk.empty:
+            all_chunks.append(chunk)
+
         if (i + 1) % 10 == 0:
             logger.info("  Processed %d chunks…", i + 1)
 
     if not all_chunks:
         logger.warning("No lab events found – saving empty labs feature file")
-        empty = admissions[["subject_id", "hadm_id"]].copy()
+        empty = pd.DataFrame(columns=[
+            "subject_id", "hadm_id", "charttime",
+            "itemid", "label", "fluid", "category", "lab_text_line",
+        ])
         os.makedirs(features_dir, exist_ok=True)
         empty.to_parquet(os.path.join(features_dir, "labs_features.parquet"),
                          index=False)
         return
 
     labs = pd.concat(all_chunks, ignore_index=True)
-    logger.info("Total lab rows after filtering: %d", len(labs))
 
     # ------------------------------------------------------------------ #
-    # Aggregate per (hadm_id, category)
+    # Apply admission window filter after concatenating all chunks
     # ------------------------------------------------------------------ #
-    logger.info("Aggregating lab results by admission and domain…")
-    labs_sorted = labs.sort_values("charttime")
-
-    agg = (
-        labs_sorted.groupby(["subject_id", "hadm_id", "category"])["valuenum"]
-        .agg(
-            mean="mean",
-            min="min",
-            max="max",
-            last="last",
-        )
-        .reset_index()
+    labs = labs.merge(
+        admissions[["subject_id", "hadm_id", "admittime", "dischtime"]],
+        on=["subject_id", "hadm_id"],
+        how="inner",
     )
-
-    # Pivot to wide format: columns = category_mean, category_min, …
-    agg_wide = agg.pivot_table(
-        index=["subject_id", "hadm_id"],
-        columns="category",
-        values=["mean", "min", "max", "last"],
-    )
-    # Flatten multi-level column names
-    agg_wide.columns = [
-        f"{cat}_{stat}" for stat, cat in agg_wide.columns
+    labs = labs[
+        (labs["charttime"] >= labs["admittime"]) &
+        (labs["charttime"] <= labs["dischtime"])
     ]
-    agg_wide = agg_wide.reset_index()
 
     # ------------------------------------------------------------------ #
-    # Left-join onto admissions to preserve all admissions
+    # Build chronological text line per event
     # ------------------------------------------------------------------ #
-    out_df = admissions[["subject_id", "hadm_id"]].merge(
-        agg_wide, on=["subject_id", "hadm_id"], how="left"
-    )
+    logger.info("Building lab text lines…")
+    labs["lab_text_line"] = labs.apply(_build_lab_text_line, axis=1)
+
+    # ------------------------------------------------------------------ #
+    # Sort chronologically within each admission
+    # ------------------------------------------------------------------ #
+    labs = labs.sort_values(["subject_id", "hadm_id", "charttime"])
+
+    # ------------------------------------------------------------------ #
+    # Output — long format, one row per lab event
+    # ------------------------------------------------------------------ #
+    out_df = labs[[
+        "subject_id", "hadm_id", "charttime",
+        "itemid", "label", "fluid", "category",
+        "lab_text_line",
+    ]].reset_index(drop=True)
 
     # ------------------------------------------------------------------ #
     # Save output
@@ -142,4 +199,8 @@ def run(config: dict) -> None:
     os.makedirs(features_dir, exist_ok=True)
     output_path = os.path.join(features_dir, "labs_features.parquet")
     out_df.to_parquet(output_path, index=False)
-    logger.info("Saved labs features to %s  (shape=%s)", output_path, out_df.shape)
+    n_admissions = out_df["hadm_id"].nunique()
+    logger.info(
+        "Saved labs features to %s  (%d rows, %d unique admissions)",
+        output_path, len(out_df), n_admissions,
+    )
