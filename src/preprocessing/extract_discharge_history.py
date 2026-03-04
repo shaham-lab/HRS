@@ -13,8 +13,6 @@ Expected config keys:
 import logging
 import os
 
-import pandas as pd
-
 from preprocessing_utils import _load_csv
 
 logger = logging.getLogger(__name__)
