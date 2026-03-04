@@ -5,10 +5,22 @@ Produces two separate output files:
   • triage_features.parquet        – natural-language triage template
   • chief_complaint_features.parquet – raw chief complaint text
 
+The MIMIC-IV-ED triage table contains stay_id (ED stay identifier) but not
+hadm_id. hadm_id is resolved in two steps:
+
+  1. Primary linkage: join triage → edstays on stay_id. ED visits that
+     resulted in a hospital admission will have hadm_id populated directly.
+
+  2. Fallback linkage: for triage rows still missing hadm_id after the
+     stay_id join, the closest hospital admission with admittime >= ED
+     intime for the same subject_id is used as an approximate link.
+
+  ED visits with no resolvable hadm_id (non-admitted visits) are excluded.
+
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
-    MIMIC_ED_DIR    – (optional) root of the mimic-iv-ed module; the triage
-                      table is expected at MIMIC_ED_DIR/ed/triage.csv.gz.
+    MIMIC_ED_DIR    – (optional) root of the mimic-iv-ed module; triage and
+                      edstays are expected at MIMIC_ED_DIR/ed/.
                       Falls back to MIMIC_DATA_DIR/ed/ then MIMIC_DATA_DIR/hosp/.
     FEATURES_DIR    – output directory for feature parquets
 """
@@ -51,7 +63,7 @@ def run(config: dict) -> None:
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
 
-    # Resolve triage search directories.
+    # Resolve triage/edstays search directories.
     # Priority: MIMIC_ED_DIR/ed/ → MIMIC_DATA_DIR/ed/ → MIMIC_DATA_DIR/hosp/
     ed_dirs = []
     if config.get("MIMIC_ED_DIR"):
@@ -63,20 +75,23 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Hash-based skip check
     # ------------------------------------------------------------------ #
-    # Resolve which triage file will actually be used
-    triage_path_resolved = None
-    for directory in ed_dirs + [hosp_dir]:
-        gz = os.path.join(directory, "triage.csv.gz")
-        csv_p = os.path.join(directory, "triage.csv")
-        if os.path.exists(gz):
-            triage_path_resolved = gz
-            break
-        if os.path.exists(csv_p):
-            triage_path_resolved = csv_p
-            break
+    # Resolve which triage / edstays file will actually be used
+    def _resolve_ed_table(table_name: str) -> str | None:
+        for directory in ed_dirs + [hosp_dir]:
+            gz = os.path.join(directory, f"{table_name}.csv.gz")
+            csv_p = os.path.join(directory, f"{table_name}.csv")
+            if os.path.exists(gz):
+                return gz
+            if os.path.exists(csv_p):
+                return csv_p
+        return None
+
+    triage_path_resolved = _resolve_ed_table("triage")
+    edstays_path_resolved = _resolve_ed_table("edstays")
 
     source_paths = [p for p in [
         triage_path_resolved,
+        edstays_path_resolved,
         _gz_or_csv(mimic_dir, "hosp", "admissions"),
     ] if p is not None and os.path.exists(p)]
 
@@ -99,7 +114,7 @@ def run(config: dict) -> None:
         if os.path.exists(gz) or os.path.exists(csv):
             triage = _load_csv(
                 gz, csv,
-                dtype={"subject_id": int, "hadm_id": float},
+                dtype={"subject_id": int},
             )
             logger.info("Loaded triage from %s", gz if os.path.exists(gz) else csv)
             break
@@ -108,10 +123,104 @@ def run(config: dict) -> None:
             f"triage table not found under any of: {ed_dirs + [hosp_dir]}"
         )
 
-    triage["hadm_id"] = triage["hadm_id"].astype("Int64")
+    logger.info("Triage raw shape: %d rows", len(triage))
+
+    # ------------------------------------------------------------------ #
+    # hadm_id resolution via edstays bridge table
+    # ------------------------------------------------------------------ #
+    # The MIMIC-IV-ED triage table contains stay_id, not hadm_id.
+    # We resolve hadm_id in two steps:
+    #   1. Primary: join triage → edstays on stay_id
+    #   2. Fallback: closest admission with admittime >= ED intime
+
+    if "hadm_id" not in triage.columns:
+        # Pure MIMIC-IV-ED format: only stay_id, no hadm_id column
+        triage["hadm_id"] = float("nan")
+
+    # --- Step 1: Primary linkage via edstays ---
+    if "stay_id" in triage.columns:
+        for directory in ed_dirs + [hosp_dir]:
+            gz = os.path.join(directory, "edstays.csv.gz")
+            csv = os.path.join(directory, "edstays.csv")
+            if os.path.exists(gz) or os.path.exists(csv):
+                edstays = _load_csv(
+                    gz, csv,
+                    usecols=["subject_id", "stay_id", "hadm_id", "intime"],
+                    dtype={"subject_id": int, "stay_id": int},
+                    parse_dates=["intime"],
+                )
+                edstays["hadm_id"] = pd.to_numeric(edstays["hadm_id"], errors="coerce")
+                logger.info(
+                    "Loaded edstays: %d rows, %d with hadm_id",
+                    len(edstays), edstays["hadm_id"].notna().sum(),
+                )
+                break
+        else:
+            logger.warning(
+                "edstays table not found — hadm_id resolution via stay_id will be skipped."
+            )
+            edstays = None
+
+        if edstays is not None:
+            triage = triage.merge(
+                edstays[["stay_id", "hadm_id", "intime"]],
+                on="stay_id",
+                how="left",
+                suffixes=("_triage", ""),
+            )
+            # Prefer the hadm_id from edstays; fall back to any existing value
+            if "hadm_id_triage" in triage.columns:
+                triage["hadm_id"] = triage["hadm_id"].combine_first(
+                    triage["hadm_id_triage"]
+                )
+                triage = triage.drop(columns=["hadm_id_triage"])
+            logger.info(
+                "After stay_id join: %d / %d rows have hadm_id",
+                triage["hadm_id"].notna().sum(), len(triage),
+            )
+
+    # --- Step 2: Fallback linkage via intime + subject_id ---
+    if "intime" in triage.columns:
+        null_mask = triage["hadm_id"].isna() & triage["intime"].notna()
+    else:
+        null_mask = pd.Series(False, index=triage.index)
+
+    if null_mask.any():
+        n_had_hadm_before = int(triage["hadm_id"].notna().sum())
+        admissions = _load_csv(
+            os.path.join(hosp_dir, "admissions.csv.gz"),
+            os.path.join(hosp_dir, "admissions.csv"),
+            usecols=["subject_id", "hadm_id", "admittime"],
+            parse_dates=["admittime"],
+            dtype={"subject_id": int, "hadm_id": int},
+        )
+        unlinked = triage[null_mask][["subject_id", "intime"]].copy()
+        candidates = unlinked.merge(admissions, on="subject_id", how="left")
+        candidates = candidates[candidates["admittime"] >= candidates["intime"]]
+        closest = (
+            candidates.sort_values("admittime")
+            .groupby(["subject_id", "intime"])["hadm_id"]
+            .first()
+            .reset_index()
+            .rename(columns={"hadm_id": "hadm_id_fallback"})
+        )
+        triage = triage.merge(closest, on=["subject_id", "intime"], how="left")
+        triage["hadm_id"] = triage["hadm_id"].combine_first(triage["hadm_id_fallback"])
+        triage = triage.drop(columns=["hadm_id_fallback"])
+        n_resolved = int(triage["hadm_id"].notna().sum()) - n_had_hadm_before
+        logger.info(
+            "Fallback linkage resolved %d additional triage rows via intime+subject_id.",
+            n_resolved,
+        )
+
+    # --- Drop rows with no resolvable hadm_id ---
+    n_before = len(triage)
     triage = triage.dropna(subset=["hadm_id"])
     triage["hadm_id"] = triage["hadm_id"].astype(int)
-    logger.info("Loaded triage table with %d rows", len(triage))
+    logger.info(
+        "Triage: %d rows retained after hadm_id resolution (%d dropped — non-admitted ED visits).",
+        len(triage), n_before - len(triage),
+    )
 
     # ------------------------------------------------------------------ #
     # Build triage text via template

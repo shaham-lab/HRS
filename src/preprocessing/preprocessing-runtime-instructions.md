@@ -66,6 +66,7 @@ paths configured in `preprocessing.yaml` (see [Section 3](#3-configuration-prepr
 | Table | Used by |
 |-------|---------|
 | `triage` | `extract_triage_and_complaint` |
+| `edstays` | `extract_triage_and_complaint` (bridge table to resolve `stay_id → hadm_id`) |
 
 All tables are expected as **`.csv.gz`** (gzip-compressed CSV). Uncompressed
 **`.csv`** is supported as a fallback where `.csv.gz` is absent.

@@ -52,7 +52,8 @@ Every `hadm_id` inherits the split label of its `subject_id`.
 | `chartevents` | `icu/` | `extract_demographics` | `subject_id`, `hadm_id`, `itemid`, `charttime`, `value`, `valuenum` |
 | `discharge` | `note/` (mimic-iv-note) | `extract_discharge_history` | `subject_id`, `hadm_id`, `charttime`, `text` |
 | `radiology` | `note/` (mimic-iv-note) | `extract_radiology` | `subject_id`, `hadm_id`, `charttime`, `text` |
-| `triage` | `ed/` (mimic-iv-ed) | `extract_triage_and_complaint` | `subject_id`, `hadm_id`, `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`, `pain`, `acuity`, `chiefcomplaint` |
+| `triage` | `ed/` (mimic-iv-ed) | `extract_triage_and_complaint` | `subject_id`, `stay_id`, `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`, `pain`, `acuity`, `chiefcomplaint` |
+| `edstays` | `ed/` (mimic-iv-ed) | `extract_triage_and_complaint` | `subject_id`, `stay_id`, `hadm_id`, `intime` |
 
 ---
 
@@ -180,7 +181,13 @@ derivation.
 
 **Output column:** `triage_text` — a single string per admission.
 
-- **Source:** `ed/triage` (mimic-iv-ed module, resolved via `MIMIC_ED_DIR/ed/` first).
+- **Source:** `ed/triage` joined to `ed/edstays` on `stay_id` to resolve `hadm_id`
+  (mimic-iv-ed module, resolved via `MIMIC_ED_DIR/ed/` first).
+  - **Primary linkage:** `stay_id → hadm_id` directly from `edstays`.
+  - **Fallback linkage:** for ED visits with null `hadm_id` in `edstays`, the
+    closest hospital admission with `admittime ≥ intime` for the same `subject_id`
+    is used as an approximate link.
+  - ED visits with no resolvable `hadm_id` (non-admitted visits) are excluded.
 - **Transformation:** Structured triage fields are rendered as a natural-language
   sentence using the template:
 
@@ -198,7 +205,8 @@ derivation.
 
 **Output column:** `chief_complaint_text` — a raw text string per admission.
 
-- **Primary source:** `triage.chiefcomplaint` column (if present).
+- **Primary source:** `triage.chiefcomplaint` column (if present). `hadm_id` is
+  resolved via `edstays` exactly as in F4 above (same join logic).
 - **Fallback:** `chartevents` `itemid = 223112`.
 - No cleaning or templating is applied.
 

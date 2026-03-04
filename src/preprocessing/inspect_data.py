@@ -24,7 +24,7 @@ pd.set_option("display.float_format", "{:.2f}".format)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
 _PATH_KEYS = {
-    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR",
+    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
     "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
     "HASH_REGISTRY_PATH",
 }
@@ -427,14 +427,26 @@ def _inspect_radiology(mimic_dir: str, note_dir: str) -> None:
     )
 
 
-def _inspect_triage(mimic_dir: str) -> None:
-    gz_ed = os.path.join(mimic_dir, "ed", "triage.csv.gz")
-    csv_ed = os.path.join(mimic_dir, "ed", "triage.csv")
-    gz_hosp = os.path.join(mimic_dir, "hosp", "triage.csv.gz")
-    csv_hosp = os.path.join(mimic_dir, "hosp", "triage.csv")
-    path_gz = gz_ed if os.path.exists(gz_ed) else gz_hosp
-    path_csv = csv_ed if os.path.exists(csv_ed) else csv_hosp
-    _print_header("ed/triage (fallback hosp/triage)", path_gz)
+def _inspect_triage(mimic_dir: str, ed_dir: str | None = None) -> None:
+    # Prefer MIMIC_ED_DIR/ed/ → MIMIC_DATA_DIR/ed/ → MIMIC_DATA_DIR/hosp/
+    candidates = []
+    if ed_dir:
+        candidates += [
+            (os.path.join(ed_dir, "triage.csv.gz"),
+             os.path.join(ed_dir, "triage.csv")),
+        ]
+    candidates += [
+        (os.path.join(mimic_dir, "ed", "triage.csv.gz"),
+         os.path.join(mimic_dir, "ed", "triage.csv")),
+        (os.path.join(mimic_dir, "hosp", "triage.csv.gz"),
+         os.path.join(mimic_dir, "hosp", "triage.csv")),
+    ]
+    path_gz, path_csv = candidates[0]
+    for gz, csv in candidates:
+        if os.path.exists(gz) or os.path.exists(csv):
+            path_gz, path_csv = gz, csv
+            break
+    _print_header("ed/triage (mimic-iv-ed, fallback MIMIC_DATA_DIR/ed or hosp/triage)", path_gz)
     try:
         df = _load_csv(path_gz, path_csv)
     except FileNotFoundError:
@@ -444,17 +456,60 @@ def _inspect_triage(mimic_dir: str) -> None:
     _print_snapshot(df)
 
     print(f"\nUnique patients:   {df['subject_id'].nunique():,}")
+    if "stay_id" in df.columns:
+        print(f"Unique stay_ids:    {df['stay_id'].nunique():,}")
     if "hadm_id" in df.columns:
         print(
             f"hadm_id null: {df['hadm_id'].isna().sum():,}"
             f" ({100 * df['hadm_id'].isna().mean():.1f}%)"
         )
+    else:
+        print("\nhadm_id column absent — must be resolved via edstays.")
     if "chiefcomplaint" in df.columns:
         print(f"\nchiefcomplaint — null: {df['chiefcomplaint'].isna().sum():,}")
         _print_value_counts(df, "chiefcomplaint", top_n=20, label="Top chief complaints")
     for col in ["temperature", "heartrate", "resprate", "o2sat", "sbp", "dbp", "pain", "acuity"]:
         if col in df.columns:
             print(f"\n{col}:\n{df[col].describe().to_string()}")
+
+
+def _inspect_edstays(mimic_dir: str, ed_dir: str | None = None) -> None:
+    # Prefer MIMIC_ED_DIR/ed/ → MIMIC_DATA_DIR/ed/
+    candidates = []
+    if ed_dir:
+        candidates += [
+            (os.path.join(ed_dir, "edstays.csv.gz"),
+             os.path.join(ed_dir, "edstays.csv")),
+        ]
+    candidates += [
+        (os.path.join(mimic_dir, "ed", "edstays.csv.gz"),
+         os.path.join(mimic_dir, "ed", "edstays.csv")),
+    ]
+    path_gz, path_csv = candidates[0]
+    for gz, csv in candidates:
+        if os.path.exists(gz) or os.path.exists(csv):
+            path_gz, path_csv = gz, csv
+            break
+    _print_header("ed/edstays (mimic-iv-ed bridge table)", path_gz)
+    try:
+        df = _load_csv(
+            path_gz, path_csv,
+            usecols=["subject_id", "hadm_id", "stay_id", "intime", "outtime", "disposition"],
+        )
+    except FileNotFoundError:
+        print("NOT FOUND — skipping.")
+        return
+
+    _print_snapshot(df)
+
+    print(f"\nhadm_id null (non-admitted visits): {df['hadm_id'].isna().sum():,}"
+          f" ({100 * df['hadm_id'].isna().mean():.1f}%)")
+    _print_category_stats(df, "disposition")
+    print(f"\nStay duration (hours):")
+    df["intime"] = pd.to_datetime(df["intime"])
+    df["outtime"] = pd.to_datetime(df["outtime"])
+    df["los_hrs"] = (df["outtime"] - df["intime"]).dt.total_seconds() / 3600
+    print(df["los_hrs"].describe().to_string())
 
 
 # ---------------------------------------------------------------------------
@@ -475,9 +530,14 @@ def main() -> None:
     config = _load_config(args.config)
     mimic_dir = config["MIMIC_DATA_DIR"]
     note_dir = config.get("MIMIC_NOTE_DIR", mimic_dir)
+    ed_dir = config.get("MIMIC_ED_DIR")
+    if ed_dir:
+        ed_dir = os.path.join(ed_dir, "ed")
 
     print(f"MIMIC_DATA_DIR: {mimic_dir}")
     print(f"MIMIC_NOTE_DIR: {note_dir}")
+    if ed_dir:
+        print(f"MIMIC_ED_DIR/ed: {ed_dir}")
 
     _inspect_admissions(mimic_dir)
     _inspect_patients(mimic_dir)
@@ -489,7 +549,8 @@ def main() -> None:
     _inspect_chartevents(mimic_dir)
     _inspect_discharge(mimic_dir, note_dir)
     _inspect_radiology(mimic_dir, note_dir)
-    _inspect_triage(mimic_dir)
+    _inspect_triage(mimic_dir, ed_dir)
+    _inspect_edstays(mimic_dir, ed_dir)
 
     print("\n" + "=" * 70)
     print("Inspection complete.")

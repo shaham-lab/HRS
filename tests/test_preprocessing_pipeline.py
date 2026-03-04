@@ -645,5 +645,146 @@ class TestHashUtils(unittest.TestCase):
             create_splits.run(config)
 
 
+
+class TestExtractTriageAndComplaint(unittest.TestCase):
+    """Tests for extract_triage_and_complaint.py edstays-based hadm_id resolution."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mimic_dir = os.path.join(self.tmp, "mimic")
+        self.ed_dir = os.path.join(self.mimic_dir, "ed")
+        self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
+        os.makedirs(self.ed_dir)
+        os.makedirs(self.hosp_dir)
+        self.features_dir = os.path.join(self.tmp, "features")
+
+        # Admissions table (for fallback linkage and presence in hosp/)
+        # subject_id=2 has admittime BEFORE ED intime → fallback won't resolve it
+        admissions = pd.DataFrame({
+            "subject_id": [1, 2, 3],
+            "hadm_id": [100, 200, 300],
+            "admittime": pd.to_datetime(["2020-01-01 10:00", "2020-02-01 06:00", "2020-03-01 09:00"]),
+            "dischtime": pd.to_datetime(["2020-01-05", "2020-02-05", "2020-03-05"]),
+            "hospital_expire_flag": [0, 0, 0],
+        })
+        admissions.to_csv(os.path.join(self.hosp_dir, "admissions.csv"), index=False)
+
+        # edstays table — stay_id 1→hadm_id 100 (admitted), stay_id 2→null (not admitted)
+        edstays = pd.DataFrame({
+            "subject_id": [1, 2, 3],
+            "stay_id": [1001, 1002, 1003],
+            "hadm_id": [100.0, float("nan"), float("nan")],
+            "intime": pd.to_datetime(["2020-01-01 08:00", "2020-02-01 07:30", "2020-03-01 08:45"]),
+            "outtime": pd.to_datetime(["2020-01-01 12:00", "2020-02-01 10:00", "2020-03-01 11:00"]),
+            "disposition": ["ADMITTED", "HOME", "ADMITTED"],
+        })
+        edstays.to_csv(os.path.join(self.ed_dir, "edstays.csv"), index=False)
+
+        # triage table — only stay_id, no hadm_id
+        triage = pd.DataFrame({
+            "subject_id": [1, 2, 3],
+            "stay_id": [1001, 1002, 1003],
+            "temperature": [37.0, 36.8, 38.1],
+            "heartrate": [80, 75, 90],
+            "resprate": [16, 14, 18],
+            "o2sat": [98, 99, 97],
+            "sbp": [120, 115, 130],
+            "dbp": [80, 75, 85],
+            "pain": [2, 0, 5],
+            "acuity": [3, 4, 2],
+            "chiefcomplaint": ["chest pain", "cough", "fever"],
+        })
+        triage.to_csv(os.path.join(self.ed_dir, "triage.csv"), index=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_primary_linkage_via_edstays(self):
+        """stay_id → hadm_id resolved via edstays primary join."""
+        import extract_triage_and_complaint
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_triage_and_complaint.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "triage_features.parquet"))
+        # subject_id=1: hadm_id directly from edstays (100)
+        row = df[df["subject_id"] == 1]
+        self.assertEqual(len(row), 1)
+        self.assertEqual(row.iloc[0]["hadm_id"], 100)
+
+    def test_fallback_linkage_via_intime(self):
+        """Null hadm_id in edstays resolved via closest admittime >= intime."""
+        import extract_triage_and_complaint
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_triage_and_complaint.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "triage_features.parquet"))
+        # subject_id=3: hadm_id not in edstays, resolved via fallback (300)
+        row = df[df["subject_id"] == 3]
+        self.assertEqual(len(row), 1)
+        self.assertEqual(row.iloc[0]["hadm_id"], 300)
+
+    def test_non_admitted_visit_dropped(self):
+        """ED visit with no resolvable hadm_id (HOME disposition) is excluded."""
+        import extract_triage_and_complaint
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_triage_and_complaint.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "triage_features.parquet"))
+        # subject_id=2: HOME disposition, no hadm_id resolvable → dropped
+        self.assertEqual(len(df[df["subject_id"] == 2]), 0)
+
+    def test_triage_text_built(self):
+        """Triage template is rendered with correct vitals."""
+        import extract_triage_and_complaint
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_triage_and_complaint.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "triage_features.parquet"))
+        row = df[df["hadm_id"] == 100].iloc[0]
+        self.assertIn("temperature 37.0°C", row["triage_text"])
+        self.assertIn("heart rate 80 bpm", row["triage_text"])
+
+    def test_chief_complaint_extracted(self):
+        """Chief complaint is extracted from triage.chiefcomplaint."""
+        import extract_triage_and_complaint
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_triage_and_complaint.run(config)
+        df = pd.read_parquet(
+            os.path.join(self.features_dir, "chief_complaint_features.parquet")
+        )
+        row = df[df["hadm_id"] == 100].iloc[0]
+        self.assertEqual(row["chief_complaint_text"], "chest pain")
+
+    def test_missing_config_key_raises(self):
+        """Missing required config key raises KeyError."""
+        import extract_triage_and_complaint
+        with self.assertRaises(KeyError):
+            extract_triage_and_complaint.run({"MIMIC_DATA_DIR": self.mimic_dir})
+
+    def test_missing_triage_file_raises(self):
+        """Missing triage file raises FileNotFoundError."""
+        import shutil
+        import extract_triage_and_complaint
+        shutil.rmtree(self.ed_dir)
+        os.makedirs(self.ed_dir)
+        with self.assertRaises(FileNotFoundError):
+            extract_triage_and_complaint.run({
+                "MIMIC_DATA_DIR": self.mimic_dir,
+                "FEATURES_DIR": self.features_dir,
+            })
+
+
 if __name__ == "__main__":
     unittest.main()
