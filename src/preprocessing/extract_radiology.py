@@ -6,12 +6,22 @@ Text cleaning removes everything before the first "EXAMINATION:" marker.
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
     FEATURES_DIR    – output directory for feature parquets
+    MIMIC_NOTE_DIR  – (optional) root of the mimic-iv-note module; radiology
+                      notes are looked up under <MIMIC_NOTE_DIR>/note/ first
+    HASH_REGISTRY_PATH – (optional) path to the source-file hash registry
 """
 
 import logging
 import os
 
-from preprocessing_utils import _load_csv
+import pandas as pd
+
+from preprocessing_utils import (
+    _gz_or_csv,
+    _load_csv,
+    _record_hashes,
+    _sources_unchanged,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -27,6 +37,29 @@ def _clean_note(text: str) -> str:
     return text[idx:]
 
 
+def _resolve_note_path(mimic_dir: str, note_dir: str, table: str) -> str:
+    """Return the resolved path of a note CSV, checking note_dir/note/ first.
+
+    Search order:
+      1. <note_dir>/note/<table>.csv[.gz]
+      2. <mimic_dir>/note/<table>.csv[.gz]
+      3. <mimic_dir>/hosp/<table>.csv[.gz]  (last resort)
+    """
+    for base, subdir in [
+        (note_dir, "note"),
+        (mimic_dir, "note"),
+        (mimic_dir, "hosp"),
+    ]:
+        gz = os.path.join(base, subdir, f"{table}.csv.gz")
+        csv = os.path.join(base, subdir, f"{table}.csv")
+        if os.path.exists(gz):
+            return gz
+        if os.path.exists(csv):
+            return csv
+    # Return default path for error messages
+    return os.path.join(note_dir, "note", f"{table}.csv.gz")
+
+
 def run(config: dict) -> None:
     """Extract the most recent radiology note for each admission."""
     required_keys = ["MIMIC_DATA_DIR", "FEATURES_DIR"]
@@ -36,29 +69,44 @@ def run(config: dict) -> None:
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
-
     hosp_dir = os.path.join(mimic_dir, "hosp")
-    note_dir = os.path.join(mimic_dir, "note")
+    note_dir = config.get("MIMIC_NOTE_DIR", mimic_dir)
+    registry_path = config.get("HASH_REGISTRY_PATH", "")
+
+    # ------------------------------------------------------------------ #
+    # Hash-based skip check
+    # ------------------------------------------------------------------ #
+    radiology_source = _resolve_note_path(mimic_dir, note_dir, "radiology")
+    source_paths = [
+        p for p in [
+            radiology_source,
+            _gz_or_csv(mimic_dir, "hosp", "admissions"),
+        ] if os.path.exists(p)
+    ]
+    output_paths = [os.path.join(features_dir, "radiology_features.parquet")]
+
+    if registry_path and not config.get("FORCE_RERUN", False):
+        if _sources_unchanged("extract_radiology", source_paths,
+                               output_paths, registry_path, logger):
+            return
 
     # ------------------------------------------------------------------ #
     # Load radiology notes
     # ------------------------------------------------------------------ #
-    for directory in [note_dir, hosp_dir]:
-        gz = os.path.join(directory, "radiology.csv.gz")
-        csv = os.path.join(directory, "radiology.csv")
-        if os.path.exists(gz) or os.path.exists(csv):
-            notes = _load_csv(
-                gz, csv,
-                usecols=["subject_id", "hadm_id", "charttime", "text"],
-                parse_dates=["charttime"],
-                dtype={"subject_id": int, "hadm_id": float},
-            )
-            break
-    else:
+    note_path = radiology_source
+    if not os.path.exists(note_path):
         raise FileNotFoundError(
-            f"Radiology notes file not found under {note_dir} or {hosp_dir}. "
+            f"Radiology notes file not found. Searched under "
+            f"{note_dir}/note/, {mimic_dir}/note/, and {mimic_dir}/hosp/. "
             "Expected radiology.csv[.gz]."
         )
+
+    notes = pd.read_csv(
+        note_path,
+        usecols=["subject_id", "hadm_id", "charttime", "text"],
+        parse_dates=["charttime"],
+        dtype={"subject_id": int, "hadm_id": float},
+    )
 
     notes["hadm_id"] = notes["hadm_id"].astype("Int64")
     notes = notes.dropna(subset=["hadm_id"])
@@ -118,3 +166,6 @@ def run(config: dict) -> None:
     out_df.to_parquet(output_path, index=False)
     logger.info("Saved radiology features to %s  (shape=%s)",
                 output_path, out_df.shape)
+
+    if registry_path:
+        _record_hashes("extract_radiology", source_paths, registry_path)

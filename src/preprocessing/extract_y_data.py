@@ -15,7 +15,7 @@ import os
 
 import pandas as pd
 
-from preprocessing_utils import _load_csv
+from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -32,6 +32,20 @@ def run(config: dict) -> None:
     mimic_dir = config["MIMIC_DATA_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]
     hosp_dir = os.path.join(mimic_dir, "hosp")
+    registry_path = config.get("HASH_REGISTRY_PATH", "")
+
+    # ------------------------------------------------------------------ #
+    # Hash-based skip check
+    # ------------------------------------------------------------------ #
+    source_paths = [p for p in [
+        _gz_or_csv(mimic_dir, "hosp", "admissions"),
+    ] if os.path.exists(p)]
+    output_paths = [os.path.join(classifications_dir, "y_labels.parquet")]
+
+    if registry_path and not config.get("FORCE_RERUN", False):
+        if _sources_unchanged("extract_y_data", source_paths,
+                               output_paths, registry_path, logger):
+            return
 
     # ------------------------------------------------------------------ #
     # Load admissions
@@ -98,3 +112,6 @@ def run(config: dict) -> None:
     output_path = os.path.join(classifications_dir, "y_labels.parquet")
     labels.to_parquet(output_path, index=False)
     logger.info("Saved Y labels to %s  (shape=%s)", output_path, labels.shape)
+
+    if registry_path:
+        _record_hashes("extract_y_data", source_paths, registry_path)

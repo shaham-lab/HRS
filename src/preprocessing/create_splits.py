@@ -18,6 +18,8 @@ import os
 import pandas as pd
 from sklearn.model_selection import train_test_split
 
+from preprocessing_utils import _gz_or_csv, _record_hashes, _sources_unchanged
+
 logger = logging.getLogger(__name__)
 
 
@@ -42,12 +44,26 @@ def run(config: dict) -> None:
     split_dev = float(config["SPLIT_DEV"])
     split_test = float(config["SPLIT_TEST"])
     classifications_dir = config["CLASSIFICATIONS_DIR"]
+    registry_path = config.get("HASH_REGISTRY_PATH", "")
 
     if abs(split_train + split_dev + split_test - 1.0) > 1e-6:
         raise ValueError(
             f"Split fractions must sum to 1.0, got "
             f"{split_train + split_dev + split_test:.4f}"
         )
+
+    # ------------------------------------------------------------------ #
+    # Hash-based skip check
+    # ------------------------------------------------------------------ #
+    source_paths = [p for p in [
+        _gz_or_csv(mimic_dir, "hosp", "admissions"),
+    ] if os.path.exists(p)]
+    output_paths = [os.path.join(classifications_dir, "data_splits.parquet")]
+
+    if registry_path and not config.get("FORCE_RERUN", False):
+        if _sources_unchanged("create_splits", source_paths,
+                               output_paths, registry_path, logger):
+            return
 
     # ------------------------------------------------------------------ #
     # Load admissions
@@ -129,3 +145,6 @@ def run(config: dict) -> None:
     output_path = os.path.join(classifications_dir, "data_splits.parquet")
     splits_df.to_parquet(output_path, index=False)
     logger.info("Saved splits to %s  (shape=%s)", output_path, splits_df.shape)
+
+    if registry_path:
+        _record_hashes("create_splits", source_paths, registry_path)

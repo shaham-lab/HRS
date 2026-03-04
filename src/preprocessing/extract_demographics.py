@@ -24,7 +24,7 @@ import os
 import numpy as np
 import pandas as pd
 
-from preprocessing_utils import _load_csv
+from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +369,23 @@ def run(config: dict) -> None:
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]
+    registry_path = config.get("HASH_REGISTRY_PATH", "")
+
+    # ------------------------------------------------------------------ #
+    # Hash-based skip check
+    # ------------------------------------------------------------------ #
+    source_paths = [p for p in [
+        _gz_or_csv(mimic_dir, "hosp", "admissions"),
+        _gz_or_csv(mimic_dir, "hosp", "patients"),
+        _gz_or_csv(mimic_dir, "hosp", "omr"),
+        _gz_or_csv(mimic_dir, "icu", "chartevents"),
+    ] if os.path.exists(p)]
+    output_paths = [os.path.join(features_dir, "demographics_features.parquet")]
+
+    if registry_path and not config.get("FORCE_RERUN", False):
+        if _sources_unchanged("extract_demographics", source_paths,
+                               output_paths, registry_path, logger):
+            return
 
     # ------------------------------------------------------------------ #
     # Load splits
@@ -482,3 +499,6 @@ def run(config: dict) -> None:
     out_df.to_parquet(output_path, index=False)
     logger.info("Saved demographics features to %s  (shape=%s)",
                 output_path, out_df.shape)
+
+    if registry_path:
+        _record_hashes("extract_demographics", source_paths, registry_path)

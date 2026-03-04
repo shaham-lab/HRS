@@ -18,7 +18,7 @@ import os
 
 import pandas as pd
 
-from preprocessing_utils import _load_csv
+from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +66,22 @@ def run(config: dict) -> None:
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
     hosp_dir = os.path.join(mimic_dir, "hosp")
+    registry_path = config.get("HASH_REGISTRY_PATH", "")
+
+    # ------------------------------------------------------------------ #
+    # Hash-based skip check
+    # ------------------------------------------------------------------ #
+    source_paths = [p for p in [
+        _gz_or_csv(mimic_dir, "hosp", "labevents"),
+        _gz_or_csv(mimic_dir, "hosp", "d_labitems"),
+        _gz_or_csv(mimic_dir, "hosp", "admissions"),
+    ] if os.path.exists(p)]
+    output_paths = [os.path.join(features_dir, "labs_features.parquet")]
+
+    if registry_path and not config.get("FORCE_RERUN", False):
+        if _sources_unchanged("extract_labs", source_paths,
+                               output_paths, registry_path, logger):
+            return
 
     # ------------------------------------------------------------------ #
     # Load d_labitems for label, fluid, category mapping
@@ -204,3 +220,6 @@ def run(config: dict) -> None:
         "Saved labs features to %s  (%d rows, %d unique admissions)",
         output_path, len(out_df), n_admissions,
     )
+
+    if registry_path:
+        _record_hashes("extract_labs", source_paths, registry_path)

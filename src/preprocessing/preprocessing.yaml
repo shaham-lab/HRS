@@ -4,6 +4,11 @@
 # Path to the raw MIMIC-IV data directory
 MIMIC_DATA_DIR: "~/data/physionet.org/files/mimiciv/3.1"
 
+# Path to the MIMIC-IV clinical notes directory (mimic-iv-note module).
+# Discharge and radiology notes are stored here under a note/ subdirectory.
+# If omitted the pipeline falls back to MIMIC_DATA_DIR/note then MIMIC_DATA_DIR/hosp.
+MIMIC_NOTE_DIR: "~/data/physionet.org/files/mimic-iv-note/2.2"
+
 # Train / Dev / Test split percentages (must sum to 1.0)
 SPLIT_TRAIN: 0.70
 SPLIT_DEV: 0.15
@@ -19,3 +24,6 @@ BERT_DEVICE: "cuda"
 FEATURES_DIR: "input/features"
 EMBEDDINGS_DIR: "input/embeddings"
 CLASSIFICATIONS_DIR: "input/classifications"
+
+# Path to the source-file hash registry (used to skip unchanged modules).
+HASH_REGISTRY_PATH: "input/classifications/source_hashes.json"

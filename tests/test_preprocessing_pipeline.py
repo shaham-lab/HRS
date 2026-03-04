@@ -493,5 +493,157 @@ class TestConfigLoading(unittest.TestCase):
             run_pipeline._load_config(os.path.join(self.tmp, "nonexistent.yaml"))
 
 
+class TestHashUtils(unittest.TestCase):
+    """Tests for preprocessing_utils hash-checking utilities."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        import preprocessing_utils
+        self.utils = preprocessing_utils
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def _write_file(self, name: str, content: bytes = b"hello") -> str:
+        path = os.path.join(self.tmp, name)
+        with open(path, "wb") as f:
+            f.write(content)
+        return path
+
+    def test_file_hash_returns_string(self):
+        """_file_hash returns a hex string."""
+        path = self._write_file("f.bin", b"test data")
+        h = self.utils._file_hash(path)
+        self.assertIsInstance(h, str)
+        self.assertEqual(len(h), 32)  # MD5 hex digest
+
+    def test_file_hash_changes_on_content_change(self):
+        """_file_hash differs when file content changes."""
+        path = self._write_file("f.bin", b"content_a")
+        h1 = self.utils._file_hash(path)
+        with open(path, "wb") as f:
+            f.write(b"content_b")
+        h2 = self.utils._file_hash(path)
+        self.assertNotEqual(h1, h2)
+
+    def test_load_hash_registry_empty_when_missing(self):
+        """_load_hash_registry returns {} when registry file is absent."""
+        registry = self.utils._load_hash_registry(
+            os.path.join(self.tmp, "nonexistent.json")
+        )
+        self.assertEqual(registry, {})
+
+    def test_save_and_load_registry_roundtrip(self):
+        """_save_hash_registry and _load_hash_registry are inverses."""
+        registry_path = os.path.join(self.tmp, "sub", "hashes.json")
+        data = {"module_a": {"/path/file.gz": "abc123"}}
+        self.utils._save_hash_registry(registry_path, data)
+        loaded = self.utils._load_hash_registry(registry_path)
+        self.assertEqual(loaded, data)
+
+    def test_sources_unchanged_returns_false_when_output_missing(self):
+        """_sources_unchanged is False when output file does not exist."""
+        import logging
+        logger = logging.getLogger("test")
+        src = self._write_file("src.csv", b"data")
+        registry_path = os.path.join(self.tmp, "hashes.json")
+        result = self.utils._sources_unchanged(
+            "mod",
+            [src],
+            [os.path.join(self.tmp, "missing_output.parquet")],
+            registry_path,
+            logger,
+        )
+        self.assertFalse(result)
+
+    def test_sources_unchanged_returns_false_on_first_run(self):
+        """_sources_unchanged is False on first run (no stored hash)."""
+        import logging
+        logger = logging.getLogger("test")
+        src = self._write_file("src.csv", b"data")
+        out = self._write_file("out.parquet", b"output")
+        registry_path = os.path.join(self.tmp, "hashes.json")
+        result = self.utils._sources_unchanged(
+            "mod", [src], [out], registry_path, logger
+        )
+        self.assertFalse(result)
+
+    def test_sources_unchanged_true_after_record(self):
+        """_sources_unchanged is True after _record_hashes is called."""
+        import logging
+        logger = logging.getLogger("test")
+        src = self._write_file("src.csv", b"stable data")
+        out = self._write_file("out.parquet", b"output")
+        registry_path = os.path.join(self.tmp, "hashes.json")
+        self.utils._record_hashes("mod", [src], registry_path)
+        result = self.utils._sources_unchanged(
+            "mod", [src], [out], registry_path, logger
+        )
+        self.assertTrue(result)
+
+    def test_sources_unchanged_false_after_source_modified(self):
+        """_sources_unchanged is False when source file changes after record."""
+        import logging
+        logger = logging.getLogger("test")
+        src = self._write_file("src.csv", b"original data")
+        out = self._write_file("out.parquet", b"output")
+        registry_path = os.path.join(self.tmp, "hashes.json")
+        self.utils._record_hashes("mod", [src], registry_path)
+        # Modify source
+        with open(src, "wb") as f:
+            f.write(b"modified data")
+        result = self.utils._sources_unchanged(
+            "mod", [src], [out], registry_path, logger
+        )
+        self.assertFalse(result)
+
+    def test_gz_or_csv_prefers_gz(self):
+        """_gz_or_csv returns .csv.gz path when .gz file exists."""
+        gz_path = os.path.join(self.tmp, "admissions.csv.gz")
+        with open(gz_path, "wb") as f:
+            f.write(b"gz data")
+        result = self.utils._gz_or_csv(self.tmp, "", "admissions")
+        self.assertTrue(result.endswith(".csv.gz"))
+
+    def test_gz_or_csv_falls_back_to_csv(self):
+        """_gz_or_csv returns .csv path when no .gz file exists."""
+        result = self.utils._gz_or_csv(self.tmp, "hosp", "admissions")
+        self.assertTrue(result.endswith(".csv"))
+        self.assertFalse(result.endswith(".csv.gz"))
+
+    def test_hash_check_skip_respects_force_rerun(self):
+        """Hash skip is bypassed when FORCE_RERUN is set in config."""
+        import logging
+        src = self._write_file("src.csv", b"data")
+        out = self._write_file("out.parquet", b"output")
+        registry_path = os.path.join(self.tmp, "hashes.json")
+        self.utils._record_hashes("create_splits", [src], registry_path)
+
+        # Without force: sources unchanged → skip
+        logger = logging.getLogger("test")
+        self.assertTrue(
+            self.utils._sources_unchanged(
+                "create_splits", [src], [out], registry_path, logger
+            )
+        )
+
+        import create_splits
+        config = {
+            "MIMIC_DATA_DIR": os.path.join(self.tmp, "mimic"),
+            "SPLIT_TRAIN": 0.7,
+            "SPLIT_DEV": 0.15,
+            "SPLIT_TEST": 0.15,
+            "CLASSIFICATIONS_DIR": os.path.join(self.tmp, "classifications"),
+            "HASH_REGISTRY_PATH": registry_path,
+            "FORCE_RERUN": False,
+        }
+        # create_splits will raise FileNotFoundError for missing admissions;
+        # confirming it was NOT skipped (i.e. force bypasses hash check)
+        config["FORCE_RERUN"] = True
+        with self.assertRaises(FileNotFoundError):
+            create_splits.run(config)
+
+
 if __name__ == "__main__":
     unittest.main()

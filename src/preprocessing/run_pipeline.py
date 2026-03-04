@@ -28,7 +28,11 @@ _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
 
 
-_PATH_KEYS = {"MIMIC_DATA_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR"}
+_PATH_KEYS = {
+    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR",
+    "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+    "HASH_REGISTRY_PATH",
+}
 
 
 def _load_config(config_path: str) -> dict:
@@ -154,6 +158,11 @@ def main() -> None:
         default=_CONFIG_PATH,
         help=f"Path to preprocessing.yaml (default: {_CONFIG_PATH})",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help="Force rerun of all selected modules even if sources are unchanged.",
+    )
 
     args = parser.parse_args()
 
@@ -161,6 +170,7 @@ def main() -> None:
     # Load configuration
     # ------------------------------------------------------------------ #
     config = _load_config(args.config)
+    config["FORCE_RERUN"] = args.force
     logger.info("Loaded configuration from %s", args.config)
 
     # ------------------------------------------------------------------ #

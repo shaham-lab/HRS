@@ -23,7 +23,11 @@ pd.set_option("display.float_format", "{:.2f}".format)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
-_PATH_KEYS = {"MIMIC_DATA_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR"}
+_PATH_KEYS = {
+    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR",
+    "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+    "HASH_REGISTRY_PATH",
+}
 
 
 # ---------------------------------------------------------------------------
@@ -343,14 +347,21 @@ def _inspect_chartevents(mimic_dir: str) -> None:
     _print_value_counts(df, "itemid", top_n=20, label="Most frequent itemids")
 
 
-def _inspect_discharge(mimic_dir: str) -> None:
-    gz_note = os.path.join(mimic_dir, "note", "discharge.csv.gz")
-    csv_note = os.path.join(mimic_dir, "note", "discharge.csv")
-    gz_hosp = os.path.join(mimic_dir, "hosp", "discharge.csv.gz")
-    csv_hosp = os.path.join(mimic_dir, "hosp", "discharge.csv")
-    # Try note/ first, then hosp/ as fallback
-    path_gz = gz_note if os.path.exists(gz_note) else gz_hosp
-    path_csv = csv_note if os.path.exists(csv_note) else csv_hosp
+def _inspect_discharge(mimic_dir: str, note_dir: str) -> None:
+    # Prefer MIMIC_NOTE_DIR/note/, then mimic_dir/note/, then mimic_dir/hosp/ as fallback
+    candidates = [
+        (os.path.join(note_dir, "note", "discharge.csv.gz"),
+         os.path.join(note_dir, "note", "discharge.csv")),
+        (os.path.join(mimic_dir, "note", "discharge.csv.gz"),
+         os.path.join(mimic_dir, "note", "discharge.csv")),
+        (os.path.join(mimic_dir, "hosp", "discharge.csv.gz"),
+         os.path.join(mimic_dir, "hosp", "discharge.csv")),
+    ]
+    path_gz, path_csv = candidates[0]
+    for gz, csv in candidates:
+        if os.path.exists(gz) or os.path.exists(csv):
+            path_gz, path_csv = gz, csv
+            break
     _print_header("note/discharge (fallback hosp/discharge)", path_gz)
     try:
         df = _load_csv(
@@ -376,13 +387,21 @@ def _inspect_discharge(mimic_dir: str) -> None:
     )
 
 
-def _inspect_radiology(mimic_dir: str) -> None:
-    gz_note = os.path.join(mimic_dir, "note", "radiology.csv.gz")
-    csv_note = os.path.join(mimic_dir, "note", "radiology.csv")
-    gz_hosp = os.path.join(mimic_dir, "hosp", "radiology.csv.gz")
-    csv_hosp = os.path.join(mimic_dir, "hosp", "radiology.csv")
-    path_gz = gz_note if os.path.exists(gz_note) else gz_hosp
-    path_csv = csv_note if os.path.exists(csv_note) else csv_hosp
+def _inspect_radiology(mimic_dir: str, note_dir: str) -> None:
+    # Prefer MIMIC_NOTE_DIR/note/, then mimic_dir/note/, then mimic_dir/hosp/ as fallback
+    candidates = [
+        (os.path.join(note_dir, "note", "radiology.csv.gz"),
+         os.path.join(note_dir, "note", "radiology.csv")),
+        (os.path.join(mimic_dir, "note", "radiology.csv.gz"),
+         os.path.join(mimic_dir, "note", "radiology.csv")),
+        (os.path.join(mimic_dir, "hosp", "radiology.csv.gz"),
+         os.path.join(mimic_dir, "hosp", "radiology.csv")),
+    ]
+    path_gz, path_csv = candidates[0]
+    for gz, csv in candidates:
+        if os.path.exists(gz) or os.path.exists(csv):
+            path_gz, path_csv = gz, csv
+            break
     _print_header("note/radiology (fallback hosp/radiology)", path_gz)
     try:
         df = _load_csv(
@@ -455,8 +474,10 @@ def main() -> None:
 
     config = _load_config(args.config)
     mimic_dir = config["MIMIC_DATA_DIR"]
+    note_dir = config.get("MIMIC_NOTE_DIR", mimic_dir)
 
     print(f"MIMIC_DATA_DIR: {mimic_dir}")
+    print(f"MIMIC_NOTE_DIR: {note_dir}")
 
     _inspect_admissions(mimic_dir)
     _inspect_patients(mimic_dir)
@@ -466,8 +487,8 @@ def main() -> None:
     _inspect_d_labitems(mimic_dir)
     _inspect_labevents(mimic_dir)
     _inspect_chartevents(mimic_dir)
-    _inspect_discharge(mimic_dir)
-    _inspect_radiology(mimic_dir)
+    _inspect_discharge(mimic_dir, note_dir)
+    _inspect_radiology(mimic_dir, note_dir)
     _inspect_triage(mimic_dir)
 
     print("\n" + "=" * 70)

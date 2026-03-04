@@ -15,7 +15,7 @@ import os
 
 import pandas as pd
 
-from preprocessing_utils import _load_csv
+from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +51,31 @@ def run(config: dict) -> None:
     # Possible locations for ED triage table
     ed_dir = os.path.join(mimic_dir, "ed")
     hosp_dir = os.path.join(mimic_dir, "hosp")
+    registry_path = config.get("HASH_REGISTRY_PATH", "")
+
+    # ------------------------------------------------------------------ #
+    # Hash-based skip check
+    # ------------------------------------------------------------------ #
+    source_paths = [p for p in [
+        _gz_or_csv(mimic_dir, "ed", "triage"),
+        _gz_or_csv(mimic_dir, "hosp", "admissions"),
+    ] if os.path.exists(p)]
+    # If ed/ triage not found, fall back to hosp/ triage
+    if not os.path.exists(_gz_or_csv(mimic_dir, "ed", "triage")):
+        hosp_triage = _gz_or_csv(mimic_dir, "hosp", "triage")
+        if os.path.exists(hosp_triage) and hosp_triage not in source_paths:
+            source_paths = [hosp_triage] + [
+                p for p in source_paths if "triage" not in p
+            ]
+    output_paths = [
+        os.path.join(features_dir, "triage_features.parquet"),
+        os.path.join(features_dir, "chief_complaint_features.parquet"),
+    ]
+
+    if registry_path and not config.get("FORCE_RERUN", False):
+        if _sources_unchanged("extract_triage_and_complaint", source_paths,
+                               output_paths, registry_path, logger):
+            return
 
     # ------------------------------------------------------------------ #
     # Load triage table
@@ -192,3 +217,6 @@ def run(config: dict) -> None:
         "Saved chief complaint features to %s  (shape=%s)",
         complaint_path, complaint_out.shape,
     )
+
+    if registry_path:
+        _record_hashes("extract_triage_and_complaint", source_paths, registry_path)
