@@ -2,7 +2,7 @@
 extract_demographics.py – Extract age, gender, height, weight, BMI.
 
 Feature vector (demographic_vec): 8 floats
-    [Age, Gender, Height, Weight, BMI,
+    [Age, Gender, Height (cm), Weight (kg), BMI,
      height_missing, weight_missing, bmi_missing]
 
 Missing height / weight are imputed by sampling from
@@ -26,10 +26,20 @@ import pandas as pd
 
 logger = logging.getLogger(__name__)
 
-# Chartevents item IDs commonly used for height / weight / BMI
-_CHART_HEIGHT_ITEMIDS = [226730, 1394]      # Height (Inches), Height
-_CHART_WEIGHT_ITEMIDS = [224639, 763]       # Weight (kg), Weight
-_CHART_BMI_ITEMIDS = [227457]               # BMI
+# Fix 1: MIMIC-IV only chartevents item IDs for height and weight
+# {itemid: unit}
+_CHART_HEIGHT_ITEMS: dict[int, str] = {
+    226707: "inch",   # Height          → convert to cm (* 2.54)
+    226730: "cm",     # Height (cm)     → use as-is
+}
+
+# List of (itemid, unit) in descending priority
+_CHART_WEIGHT_ITEMS: list[tuple[int, str]] = [
+    (226512, "kg"),   # Admission Weight (Kg)   → highest priority
+    (224639, "kg"),   # Daily Weight
+    (226531, "lbs"),  # Admission Weight (lbs.) → convert to kg (* 0.453592)
+    (226846, "kg"),   # Feeding Weight          → lowest priority
+]
 
 # Age bins boundaries (left-closed)
 _AGE_BINS = [18, 30, 45, 65, 75, 200]
@@ -112,17 +122,35 @@ def _load_chartevents(mimic_dir: str, item_ids: list) -> pd.DataFrame:
 
 
 def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFrame:
-    """Return per-admission latest height, weight, BMI from OMR."""
+    """Return per-admission latest height (cm), weight (kg), BMI from OMR."""
+    # Fix 3: Deduplicate OMR to remove seq_num duplicates
+    omr = omr.drop_duplicates(subset=["subject_id", "chartdate", "result_name"])
+    # Fix 3: Cast chartdate to datetime explicitly for safe comparison with admittime
+    omr["chartdate"] = pd.to_datetime(omr["chartdate"], errors="coerce")
+
     omr_height = omr[omr["result_name"].str.lower().str.contains("height", na=False)].copy()
     omr_weight = omr[omr["result_name"].str.lower().str.contains("weight", na=False)].copy()
     omr_bmi = omr[omr["result_name"].str.lower().str.contains("bmi", na=False)].copy()
 
+    # Fix 3: Normalise height to cm
+    omr_height["result_value"] = pd.to_numeric(omr_height["result_value"], errors="coerce").astype(float)
+    inches_mask = omr_height["result_name"].str.lower().str.contains("inches", na=False)
+    omr_height.loc[inches_mask, "result_value"] = (
+        omr_height.loc[inches_mask, "result_value"] * 2.54
+    )
+
+    # Fix 3: Normalise weight to kg
+    omr_weight["result_value"] = pd.to_numeric(omr_weight["result_value"], errors="coerce").astype(float)
+    lbs_mask = omr_weight["result_name"].str.lower().str.contains("lbs", na=False)
+    omr_weight.loc[lbs_mask, "result_value"] = (
+        omr_weight.loc[lbs_mask, "result_value"] * 0.453592
+    )
+
+    omr_bmi["result_value"] = pd.to_numeric(omr_bmi["result_value"], errors="coerce").astype(float)
+
     def _latest_before_admit(vital_df: pd.DataFrame, col: str) -> pd.DataFrame:
         # Join on subject_id, keep rows where chartdate <= admittime
         merged = admissions.merge(vital_df, on="subject_id", how="left")
-        merged["result_value"] = pd.to_numeric(
-            merged["result_value"], errors="coerce"
-        )
         merged = merged[
             merged["chartdate"].isna()
             | (merged["chartdate"] <= merged["admittime"])
@@ -137,8 +165,8 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
         )
         return latest
 
-    h = _latest_before_admit(omr_height, "omr_height")
-    w = _latest_before_admit(omr_weight, "omr_weight")
+    h = _latest_before_admit(omr_height, "omr_height_cm")
+    w = _latest_before_admit(omr_weight, "omr_weight_kg")
     b = _latest_before_admit(omr_bmi, "omr_bmi")
 
     result = admissions[["subject_id", "hadm_id"]].copy()
@@ -150,41 +178,63 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
 def _extract_chart_vitals(
     mimic_dir: str, admissions: pd.DataFrame
 ) -> pd.DataFrame:
-    all_item_ids = (
-        _CHART_HEIGHT_ITEMIDS + _CHART_WEIGHT_ITEMIDS + _CHART_BMI_ITEMIDS
-    )
+    # Fix 2: Use new itemid collections (no BMI from chartevents)
+    all_item_ids = list(_CHART_HEIGHT_ITEMS.keys()) + [
+        item_id for item_id, _ in _CHART_WEIGHT_ITEMS
+    ]
     chart = _load_chartevents(mimic_dir, all_item_ids)
     if chart.empty:
         result = admissions[["subject_id", "hadm_id"]].copy()
-        result["chart_height"] = np.nan
-        result["chart_weight"] = np.nan
-        result["chart_bmi"] = np.nan
+        result["chart_height_cm"] = np.nan
+        result["chart_weight_kg"] = np.nan
         return result
 
     chart["hadm_id"] = chart["hadm_id"].astype("Int64")
     adm = admissions[["subject_id", "hadm_id"]].copy()
 
-    def _agg_itemids(item_ids: list, col: str) -> pd.DataFrame:
-        sub = chart[chart["itemid"].isin(item_ids)].copy()
-        if sub.empty:
-            return adm.copy().assign(**{col: np.nan})
-        # Keep first recorded value per admission
-        first = (
-            sub.sort_values("charttime")
+    # Fix 2: Normalise height to cm
+    height_ids = list(_CHART_HEIGHT_ITEMS.keys())
+    h_sub = chart[chart["itemid"].isin(height_ids)].copy()
+    if not h_sub.empty:
+        inch_mask = h_sub["itemid"] == 226707
+        h_sub.loc[inch_mask, "valuenum"] = h_sub.loc[inch_mask, "valuenum"] * 2.54
+        # Filter implausible values
+        h_sub = h_sub[(h_sub["valuenum"] >= 50) & (h_sub["valuenum"] <= 250)]
+        first_h = (
+            h_sub.sort_values("charttime")
             .groupby(["subject_id", "hadm_id"])["valuenum"]
             .first()
             .reset_index()
-            .rename(columns={"valuenum": col})
+            .rename(columns={"valuenum": "chart_height_cm"})
         )
-        return adm.merge(first, on=["subject_id", "hadm_id"], how="left")
+        chart_height = adm.merge(first_h, on=["subject_id", "hadm_id"], how="left")
+    else:
+        chart_height = adm.copy().assign(chart_height_cm=np.nan)
 
-    h = _agg_itemids(_CHART_HEIGHT_ITEMIDS, "chart_height")
-    w = _agg_itemids(_CHART_WEIGHT_ITEMIDS, "chart_weight")
-    b = _agg_itemids(_CHART_BMI_ITEMIDS, "chart_bmi")
+    # Fix 2: Normalise weight to kg, respect priority order
+    weight_priority = {item_id: rank for rank, (item_id, _) in enumerate(_CHART_WEIGHT_ITEMS)}
+    weight_ids = list(weight_priority.keys())
+    w_sub = chart[chart["itemid"].isin(weight_ids)].copy()
+    if not w_sub.empty:
+        lbs_mask = w_sub["itemid"] == 226531
+        w_sub.loc[lbs_mask, "valuenum"] = w_sub.loc[lbs_mask, "valuenum"] * 0.453592
+        # Filter implausible values
+        w_sub = w_sub[(w_sub["valuenum"] >= 20) & (w_sub["valuenum"] <= 400)]
+        w_sub["priority"] = w_sub["itemid"].map(weight_priority)
+        first_w = (
+            w_sub.sort_values(["priority", "charttime"])
+            .groupby(["subject_id", "hadm_id"])["valuenum"]
+            .first()
+            .reset_index()
+            .rename(columns={"valuenum": "chart_weight_kg"})
+        )
+        chart_weight = adm.merge(first_w, on=["subject_id", "hadm_id"], how="left")
+    else:
+        chart_weight = adm.copy().assign(chart_weight_kg=np.nan)
 
     result = adm.copy()
-    for df in [h, w, b]:
-        result = result.merge(df, on=["subject_id", "hadm_id"], how="left")
+    result = result.merge(chart_height, on=["subject_id", "hadm_id"], how="left")
+    result = result.merge(chart_weight, on=["subject_id", "hadm_id"], how="left")
     return result
 
 
@@ -199,7 +249,8 @@ def _compute_age(patients: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFra
     merged["age"] = merged["anchor_age"] + (
         merged["admit_year"] - merged["anchor_year"]
     )
-    merged["gender_numeric"] = (merged["gender"] == "M").astype(float)
+    # Fix 7: Use .map() so unknown gender becomes NaN instead of False
+    merged["gender_numeric"] = merged["gender"].map({"M": 1.0, "F": 0.0})
     return merged[["subject_id", "hadm_id", "age", "gender_numeric"]]
 
 
@@ -219,17 +270,17 @@ def _compute_imputation_stats(
     stats: dict = {}
     for stratum, grp in train_df.groupby("stratum"):
         stats[stratum] = {
-            "height_mean": float(grp["height"].mean()),
-            "height_std": float(grp["height"].std()),
-            "weight_mean": float(grp["weight"].mean()),
-            "weight_std": float(grp["weight"].std()),
+            "height_cm_mean": float(grp["height_cm"].mean()),
+            "height_cm_std":  float(grp["height_cm"].std()),
+            "weight_kg_mean": float(grp["weight_kg"].mean()),
+            "weight_kg_std":  float(grp["weight_kg"].std()),
         }
 
     global_stats = {
-        "height_mean": float(train_df["height"].mean()),
-        "height_std": float(train_df["height"].std()),
-        "weight_mean": float(train_df["weight"].mean()),
-        "weight_std": float(train_df["weight"].std()),
+        "height_cm_mean": float(train_df["height_cm"].mean()),
+        "height_cm_std":  float(train_df["height_cm"].std()),
+        "weight_kg_mean": float(train_df["weight_kg"].mean()),
+        "weight_kg_std":  float(train_df["weight_kg"].std()),
     }
     stats["__global__"] = global_stats
 
@@ -241,17 +292,36 @@ def _compute_imputation_stats(
     return stats
 
 
-def _impute_value(row, col: str, stats: dict, rng: np.random.Generator) -> float:
-    stratum = f"{row['age_bin']}_{row['gender_numeric']}"
-    _s = stats.get(stratum)
-    s: dict = _s if _s is not None else stats["__global__"]
-    mean = s[f"{col}_mean"]
-    std = s[f"{col}_std"]
-    if pd.isna(mean):
-        return np.nan
-    if pd.isna(std) or std == 0:
-        return float(mean)
-    return float(rng.normal(mean, std))
+def _impute_vectorised(
+    df: pd.DataFrame,
+    col: str,
+    stats: dict,
+    rng: np.random.Generator,
+) -> pd.Series:
+    """Vectorised imputation: sample from N(mean, std) per stratum group.
+
+    Falls back to global stats when a stratum has no entry.
+    """
+    result = df[col].copy()
+    missing_mask = result.isna()
+    if not missing_mask.any():
+        return result
+
+    missing_df = df[missing_mask].copy()
+    for stratum, grp_idx in missing_df.groupby("stratum").groups.items():
+        _s = stats.get(str(stratum))
+        s: dict = _s if _s is not None else stats["__global__"]
+        mean = s[f"{col}_mean"]
+        std = s[f"{col}_std"]
+        n = len(grp_idx)
+        if pd.isna(mean):
+            values = np.full(n, np.nan)
+        elif pd.isna(std) or std == 0:
+            values = np.full(n, float(mean))
+        else:
+            values = rng.normal(mean, std, size=n)
+        result.loc[grp_idx] = values
+    return result
 
 
 def run(config: dict) -> None:
@@ -312,16 +382,28 @@ def run(config: dict) -> None:
     df = age_gender.merge(omr_vitals, on=["subject_id", "hadm_id"], how="left")
     df = df.merge(chart_vitals, on=["subject_id", "hadm_id"], how="left")
 
-    df["height"] = df["omr_height"].combine_first(df["chart_height"])
-    df["weight"] = df["omr_weight"].combine_first(df["chart_weight"])
-    df["bmi"] = df["omr_bmi"].combine_first(df["chart_bmi"])
+    # Fix 4: Merge canonical columns
+    df["height_cm"] = df["omr_height_cm"].combine_first(df["chart_height_cm"])
+    df["weight_kg"] = df["omr_weight_kg"].combine_first(df["chart_weight_kg"])
+    df["bmi"]       = df["omr_bmi"]  # BMI only from OMR
+
+    # Log coverage percentages after merging sources
+    n_total = len(df)
+    pct_h = 100.0 * df["height_cm"].notna().sum() / n_total
+    pct_w = 100.0 * df["weight_kg"].notna().sum() / n_total
+    pct_b = 100.0 * df["bmi"].notna().sum() / n_total
+    logger.info(
+        "Coverage after merge — height: %.1f%%, weight: %.1f%%, BMI: %.1f%%",
+        pct_h, pct_w, pct_b,
+    )
 
     # ------------------------------------------------------------------ #
     # Missingness indicators (before imputation)
     # ------------------------------------------------------------------ #
-    df["height_missing"] = df["height"].isna().astype(float)
-    df["weight_missing"] = df["weight"].isna().astype(float)
-    df["bmi_missing"] = df["bmi"].isna().astype(float)
+    # Fix 4: Use canonical column names
+    df["height_missing"] = df["height_cm"].isna().astype(float)
+    df["weight_missing"] = df["weight_kg"].isna().astype(float)
+    df["bmi_missing"]    = df["bmi"].isna().astype(float)
 
     # ------------------------------------------------------------------ #
     # Compute imputation statistics from train split, then impute
@@ -330,37 +412,29 @@ def run(config: dict) -> None:
     stats = _compute_imputation_stats(df, splits, classifications_dir)
 
     df["age_bin"] = df["age"].apply(_age_bin)
+    df["stratum"] = df["age_bin"].astype(str) + "_" + df["gender_numeric"].astype(str)
     rng = np.random.default_rng(seed=42)
 
     logger.info("Imputing missing height and weight…")
-    missing_height_mask = df["height"].isna()
-    missing_weight_mask = df["weight"].isna()
-
-    if missing_height_mask.any():
-        df.loc[missing_height_mask, "height"] = df[missing_height_mask].apply(
-            lambda r: _impute_value(r, "height", stats, rng), axis=1
-        )
-    if missing_weight_mask.any():
-        df.loc[missing_weight_mask, "weight"] = df[missing_weight_mask].apply(
-            lambda r: _impute_value(r, "weight", stats, rng), axis=1
-        )
+    # Fix 6: Vectorised imputation
+    df["height_cm"] = _impute_vectorised(df, "height_cm", stats, rng)
+    df["weight_kg"] = _impute_vectorised(df, "weight_kg", stats, rng)
 
     # BMI: derive from height/weight if still missing.
-    # NOTE: OMR height is typically recorded in inches; chartevents height
-    # (item IDs 226730, 1394) is also in inches. The factor 0.0254 converts
-    # inches → metres for the BMI formula (kg / m²).
+    # Fix 5: height is now in cm; divide by 100 to get metres
     still_missing_bmi = df["bmi"].isna()
     if still_missing_bmi.any():
-        height_m = df.loc[still_missing_bmi, "height"] * 0.0254  # inches → metres
-        weight_kg = df.loc[still_missing_bmi, "weight"]
+        height_m = df.loc[still_missing_bmi, "height_cm"] / 100.0
+        weight_kg = df.loc[still_missing_bmi, "weight_kg"]
         df.loc[still_missing_bmi, "bmi"] = weight_kg / (height_m ** 2)
 
     # ------------------------------------------------------------------ #
     # Assemble feature vector
     # ------------------------------------------------------------------ #
     logger.info("Assembling demographic_vec…")
+    # Fix 8: Use canonical column names
     feature_cols = [
-        "age", "gender_numeric", "height", "weight", "bmi",
+        "age", "gender_numeric", "height_cm", "weight_kg", "bmi",
         "height_missing", "weight_missing", "bmi_missing",
     ]
     df["demographic_vec"] = df[feature_cols].values.tolist()
