@@ -86,9 +86,11 @@ def _load_omr(mimic_dir: str) -> pd.DataFrame:
         path = os.path.join(mimic_dir, "hosp", "omr.csv")
     if not os.path.exists(path):
         logger.warning("OMR table not found – will rely on chartevents only")
-        return pd.DataFrame(
+        empty = pd.DataFrame(
             columns=["subject_id", "chartdate", "result_name", "result_value"]
         )
+        empty["chartdate"] = pd.to_datetime(empty["chartdate"])
+        return empty
     return pd.read_csv(
         path,
         usecols=["subject_id", "chartdate", "result_name", "result_value"],
@@ -287,7 +289,9 @@ def _compute_imputation_stats(
     train_ids = splits.loc[train_mask, "hadm_id"]
     train_df = df[df["hadm_id"].isin(train_ids)].copy()
 
-    train_df["age_bin"] = train_df["age"].apply(_age_bin)
+    train_df["age_bin"] = pd.cut(
+        train_df["age"], bins=_AGE_BINS, labels=_AGE_LABELS, right=False
+    ).astype(str)
     train_df["stratum"] = (
         train_df["age_bin"].astype(str) + "_" + train_df["gender_numeric"].astype(str)
     )
@@ -436,7 +440,9 @@ def run(config: dict) -> None:
     logger.info("Computing imputation statistics from train split…")
     stats = _compute_imputation_stats(df, splits, classifications_dir)
 
-    df["age_bin"] = df["age"].apply(_age_bin)
+    df["age_bin"] = pd.cut(
+        df["age"], bins=_AGE_BINS, labels=_AGE_LABELS, right=False
+    ).astype(str)
     df["stratum"] = df["age_bin"].astype(str) + "_" + df["gender_numeric"].astype(str)
     rng = np.random.default_rng(seed=42)
 
