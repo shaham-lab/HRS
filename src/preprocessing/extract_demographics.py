@@ -127,7 +127,7 @@ def _load_chartevents(mimic_dir: str, item_ids: list) -> pd.DataFrame:
 def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFrame:
     """Return per-admission latest height (cm), weight (kg), BMI from OMR."""
     # Fix 3: Deduplicate OMR to remove seq_num duplicates
-    omr = omr.drop_duplicates(subset=["subject_id", "chartdate", "result_name"])
+    omr = omr.drop_duplicates(subset=["subject_id", "chartdate", "result_name"]).copy()
     # Fix 3: Cast chartdate to datetime explicitly for safe comparison with admittime
     omr["chartdate"] = pd.to_datetime(omr["chartdate"], errors="coerce")
 
