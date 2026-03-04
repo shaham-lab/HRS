@@ -243,7 +243,8 @@ def _compute_imputation_stats(
 
 def _impute_value(row, col: str, stats: dict, rng: np.random.Generator) -> float:
     stratum = f"{row['age_bin']}_{row['gender_numeric']}"
-    s: dict = stats.get(stratum, stats["__global__"])
+    _s = stats.get(stratum)
+    s: dict = _s if _s is not None else stats["__global__"]
     mean = s[f"{col}_mean"]
     std = s[f"{col}_std"]
     if pd.isna(mean):
