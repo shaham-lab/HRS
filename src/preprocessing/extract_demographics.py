@@ -24,6 +24,8 @@ import os
 import numpy as np
 import pandas as pd
 
+from preprocessing_utils import _load_csv
+
 logger = logging.getLogger(__name__)
 
 # Fix 1: MIMIC-IV only chartevents item IDs for height and weight
@@ -56,45 +58,42 @@ def _age_bin(age: float) -> str:
 
 
 def _load_admissions(mimic_dir: str) -> pd.DataFrame:
-    path = os.path.join(mimic_dir, "hosp", "admissions.csv.gz")
-    if not os.path.exists(path):
-        path = os.path.join(mimic_dir, "hosp", "admissions.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"admissions table not found under {mimic_dir}")
-    return pd.read_csv(
-        path,
+    hosp = os.path.join(mimic_dir, "hosp")
+    return _load_csv(
+        os.path.join(hosp, "admissions.csv.gz"),
+        os.path.join(hosp, "admissions.csv"),
         usecols=["subject_id", "hadm_id", "admittime"],
         parse_dates=["admittime"],
+        dtype={"subject_id": int, "hadm_id": int},
     )
 
 
 def _load_patients(mimic_dir: str) -> pd.DataFrame:
-    path = os.path.join(mimic_dir, "hosp", "patients.csv.gz")
-    if not os.path.exists(path):
-        path = os.path.join(mimic_dir, "hosp", "patients.csv")
-    if not os.path.exists(path):
-        raise FileNotFoundError(f"patients table not found under {mimic_dir}")
-    return pd.read_csv(
-        path,
+    hosp = os.path.join(mimic_dir, "hosp")
+    return _load_csv(
+        os.path.join(hosp, "patients.csv.gz"),
+        os.path.join(hosp, "patients.csv"),
         usecols=["subject_id", "gender", "anchor_age", "anchor_year"],
+        dtype={"subject_id": int},
     )
 
 
 def _load_omr(mimic_dir: str) -> pd.DataFrame:
-    path = os.path.join(mimic_dir, "hosp", "omr.csv.gz")
-    if not os.path.exists(path):
-        path = os.path.join(mimic_dir, "hosp", "omr.csv")
-    if not os.path.exists(path):
-        logger.warning("OMR table not found – will rely on chartevents only")
+    hosp = os.path.join(mimic_dir, "hosp")
+    gz  = os.path.join(hosp, "omr.csv.gz")
+    csv = os.path.join(hosp, "omr.csv")
+    if not os.path.exists(gz) and not os.path.exists(csv):
+        logger.warning("OMR table not found – will rely on chartevents only.")
         empty = pd.DataFrame(
             columns=["subject_id", "chartdate", "result_name", "result_value"]
         )
         empty["chartdate"] = pd.to_datetime(empty["chartdate"])
         return empty
-    return pd.read_csv(
-        path,
+    return _load_csv(
+        gz, csv,
         usecols=["subject_id", "chartdate", "result_name", "result_value"],
         parse_dates=["chartdate"],
+        dtype={"subject_id": int},
     )
 
 
@@ -186,15 +185,16 @@ def _extract_chart_vitals(
     all_item_ids = list(_CHART_HEIGHT_ITEMS.keys()) + _CHART_WEIGHT_ITEMIDS
     weight_priority = {item_id: rank for rank, (item_id, _) in enumerate(_CHART_WEIGHT_ITEMS)}
 
-    path = os.path.join(mimic_dir, "icu", "chartevents.csv.gz")
-    if not os.path.exists(path):
-        path = os.path.join(mimic_dir, "icu", "chartevents.csv")
-    if not os.path.exists(path):
+    icu = os.path.join(mimic_dir, "icu")
+    gz  = os.path.join(icu, "chartevents.csv.gz")
+    csv = os.path.join(icu, "chartevents.csv")
+    if not os.path.exists(gz) and not os.path.exists(csv):
         logger.warning("chartevents table not found – no fallback for vitals")
         result = admissions[["subject_id", "hadm_id"]].copy()
         result["chart_height_cm"] = np.nan
         result["chart_weight_kg"] = np.nan
         return result
+    path = gz if os.path.exists(gz) else csv
 
     logger.info("Loading chartevents (may be large)…")
     height_chunks: list = []
