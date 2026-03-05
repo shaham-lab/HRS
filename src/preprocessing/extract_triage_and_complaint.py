@@ -289,16 +289,24 @@ def run(config: dict) -> None:
             complaint_out = triage[["subject_id", "hadm_id"]].copy()
             complaint_out["chief_complaint_text"] = ""
         else:
+            _CHART_CHUNK_SIZE = 1_000_000
+            chart_path = chart_gz if os.path.exists(chart_gz) else chart_csv
+            logger.info(
+                "Streaming chartevents from %s in chunks of %d…",
+                chart_path, _CHART_CHUNK_SIZE,
+            )
             chunks: list[pd.DataFrame] = []
-            for chunk in pd.read_csv(
-                chart_gz if os.path.exists(chart_gz) else chart_csv,
+            for i, chunk in enumerate(pd.read_csv(
+                chart_path,
                 usecols=["subject_id", "hadm_id", "itemid", "value"],
                 dtype={"subject_id": int, "hadm_id": float, "itemid": int},
-                chunksize=500_000,
-            ):
+                chunksize=_CHART_CHUNK_SIZE,
+            )):
                 sub = chunk[chunk["itemid"] == _CHIEF_COMPLAINT_ITEMID]
                 if not sub.empty:
                     chunks.append(sub)
+                if (i + 1) % 10 == 0:
+                    logger.info("  Processed %d chunks…", i + 1)
 
             if chunks:
                 cc = pd.concat(chunks, ignore_index=True)
