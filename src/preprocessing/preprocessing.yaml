@@ -1,0 +1,34 @@
+# Preprocessing pipeline configuration for CDSS-ML
+# All paths are relative to the repository root, absolute, or may use ~ for the home directory
+
+# Path to the raw MIMIC-IV data directory
+MIMIC_DATA_DIR: "~/data/physionet.org/files/mimiciv/3.1"
+
+# Path to the MIMIC-IV clinical notes directory (mimic-iv-note module).
+# Discharge and radiology notes are stored here under a note/ subdirectory.
+# If omitted the pipeline falls back to MIMIC_DATA_DIR/note then MIMIC_DATA_DIR/hosp.
+MIMIC_NOTE_DIR: "~/data/physionet.org/files/mimic-iv-note/2.2"
+
+# Path to the MIMIC-IV ED module (mimic-iv-ed).
+# The triage table is stored here under an ed/ subdirectory.
+# If omitted the pipeline falls back to MIMIC_DATA_DIR/ed then MIMIC_DATA_DIR/hosp.
+MIMIC_ED_DIR: "~/data/physionet.org/files/mimic-iv-ed/2.2"
+
+# Train / Dev / Test split percentages (must sum to 1.0)
+SPLIT_TRAIN: 0.70
+SPLIT_DEV: 0.15
+SPLIT_TEST: 0.15
+
+# HuggingFace BERT model settings
+BERT_MODEL_NAME: "emilyalsentzer/Bio_ClinicalBERT"
+BERT_MAX_LENGTH: 512
+BERT_BATCH_SIZE: 32
+BERT_DEVICE: "cuda"
+
+# Output directory roots (relative to repository root)
+FEATURES_DIR: "data/input/features"
+EMBEDDINGS_DIR: "data/input/embeddings"
+CLASSIFICATIONS_DIR: "data/input/classifications"
+
+# Path to the source-file hash registry (used to skip unchanged modules).
+HASH_REGISTRY_PATH: "data/input/classifications/source_hashes.json"
