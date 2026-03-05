@@ -23,7 +23,7 @@ from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_
 logger = logging.getLogger(__name__)
 
 # Rows to read per chunk from labevents
-_CHUNK_SIZE = 500_000
+_CHUNK_SIZE = 1_000_000
 
 
 def _build_lab_text_line(row) -> str:
