@@ -425,12 +425,8 @@ class TestCombineDataset(unittest.TestCase):
             "CLASSIFICATIONS_DIR": self.classifications_dir,
         }
         combine_dataset.run(config)
-        out_path = os.path.join(self.tmp, "input", "final_cdss_dataset.parquet")
-        # The output path depends on parent of classifications_dir
-        actual_out = os.path.join(
-            os.path.dirname(self.classifications_dir), "final_cdss_dataset.parquet"
-        )
-        self.assertTrue(os.path.exists(actual_out))
+        out_path = os.path.join(self.classifications_dir, "final_cdss_dataset.parquet")
+        self.assertTrue(os.path.exists(out_path))
 
     def test_split_column_present(self):
         """Final dataset must contain a 'split' column."""
@@ -442,9 +438,7 @@ class TestCombineDataset(unittest.TestCase):
         }
         combine_dataset.run(config)
         out = pd.read_parquet(
-            os.path.join(
-                os.path.dirname(self.classifications_dir), "final_cdss_dataset.parquet"
-            )
+            os.path.join(self.classifications_dir, "final_cdss_dataset.parquet")
         )
         self.assertIn("split", out.columns)
         self.assertIn("y1_mortality", out.columns)

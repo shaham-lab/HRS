@@ -328,7 +328,7 @@ in the following order:
   training time when the MDP agent selects a subset of `itemid` values.
 - Raw text parquets — superseded by embedding parquets.
 
-**Output:** `final_cdss_dataset.parquet` — one row per `hadm_id`; missing
+**Output:** `input/classifications/final_cdss_dataset.parquet` — one row per `hadm_id`; missing
 feature values appear as nulls.
 
 ---

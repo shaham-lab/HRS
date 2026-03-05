@@ -97,33 +97,6 @@ def _load_omr(mimic_dir: str) -> pd.DataFrame:
     )
 
 
-def _load_chartevents(mimic_dir: str, item_ids: list) -> pd.DataFrame:
-    path = os.path.join(mimic_dir, "icu", "chartevents.csv.gz")
-    if not os.path.exists(path):
-        path = os.path.join(mimic_dir, "icu", "chartevents.csv")
-    if not os.path.exists(path):
-        logger.warning("chartevents table not found – no fallback for vitals")
-        return pd.DataFrame(
-            columns=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"]
-        )
-    logger.info("Loading chartevents (may be large)…")
-    chunks = []
-    for chunk in pd.read_csv(
-        path,
-        usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
-        dtype={"subject_id": int, "hadm_id": float, "itemid": int},
-        parse_dates=["charttime"],
-        chunksize=500_000,
-    ):
-        chunk = chunk[chunk["itemid"].isin(item_ids)]
-        chunks.append(chunk)
-    if not chunks:
-        return pd.DataFrame(
-            columns=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"]
-        )
-    return pd.concat(chunks, ignore_index=True)
-
-
 def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFrame:
     """Return per-admission latest height (cm), weight (kg), BMI from OMR."""
     # Fix 3: Deduplicate OMR to remove seq_num duplicates

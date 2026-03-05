@@ -116,11 +116,9 @@ def run(config: dict) -> None:
         )
 
     # ------------------------------------------------------------------ #
-    # Save final dataset next to the classifications directory
+    # Save final dataset inside the classifications directory
     # ------------------------------------------------------------------ #
-    output_path = str(os.path.join(
-        os.path.dirname(classifications_dir), "final_cdss_dataset.parquet"
-    ))
+    output_path = str(os.path.join(classifications_dir, "final_cdss_dataset.parquet"))
     base.to_parquet(output_path, index=False)
     logger.info(
         "Saved final CDSS dataset to %s  (shape=%s)", output_path, base.shape
