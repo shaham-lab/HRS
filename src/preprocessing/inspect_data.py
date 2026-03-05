@@ -11,7 +11,6 @@ Usage:
 
 import argparse
 import os
-import sys
 from typing import Any, cast
 
 import pandas as pd
@@ -176,7 +175,7 @@ def _inspect_omr(mimic_dir: str) -> None:
         subset = df[df["result_name"].str.contains(keyword, case=False, na=False)]
         print(f"\n{keyword} entries: {len(subset):,}")
         print(f"  Unique result_name values: {subset['result_name'].unique().tolist()}")
-        vals = pd.to_numeric(subset["result_value"], errors="coerce").dropna()
+        vals = cast("pd.Series[float]", pd.to_numeric(subset["result_value"], errors="coerce")).dropna()
         if len(vals):
             print(
                 f"  Value range: {vals.min():.1f} – {vals.max():.1f},"
@@ -528,11 +527,10 @@ def main() -> None:
     args = parser.parse_args()
 
     config = _load_config(args.config)
-    mimic_dir = config["MIMIC_DATA_DIR"]
-    note_dir = config.get("MIMIC_NOTE_DIR", mimic_dir)
-    ed_dir = config.get("MIMIC_ED_DIR")
-    if ed_dir:
-        ed_dir = os.path.join(ed_dir, "ed")
+    mimic_dir: str = config["MIMIC_DATA_DIR"]
+    note_dir: str = cast(str, config.get("MIMIC_NOTE_DIR", mimic_dir))
+    _ed_dir_raw = config.get("MIMIC_ED_DIR")
+    ed_dir: str | None = os.path.join(str(_ed_dir_raw), "ed") if _ed_dir_raw else None
 
     print(f"MIMIC_DATA_DIR: {mimic_dir}")
     print(f"MIMIC_NOTE_DIR: {note_dir}")
