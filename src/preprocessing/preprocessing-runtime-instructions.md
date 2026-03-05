@@ -14,15 +14,15 @@ Python **3.10 or later** is required.
 
 ### Required packages
 
-| Package | Purpose |
-|---------|---------|
-| `pandas` | DataFrame operations |
-| `numpy` | Numerical processing |
-| `scikit-learn` | Stratified train/dev/test splitting |
+| Package        | Purpose                              |
+| -------------- | ------------------------------------ |
+| `pandas`       | DataFrame operations                 |
+| `numpy`        | Numerical processing                 |
+| `scikit-learn` | Stratified train/dev/test splitting  |
 | `transformers` | HuggingFace BERT tokenizer and model |
-| `torch` | BERT inference backend |
-| `pyyaml` | Configuration file parsing |
-| `pyarrow` | Parquet read/write |
+| `torch`        | BERT inference backend               |
+| `pyyaml`       | Configuration file parsing           |
+| `pyarrow`      | Parquet read/write                   |
 
 Install all dependencies:
 
@@ -38,34 +38,34 @@ paths configured in `preprocessing.yaml` (see [Section 3](#3-configuration-prepr
 
 **`hosp/` subdirectory** (under `MIMIC_DATA_DIR`):
 
-| Table | Used by |
-|-------|---------|
-| `admissions` | all modules |
-| `patients` | `extract_demographics` |
-| `omr` | `extract_demographics` |
-| `diagnoses_icd` | `extract_diag_history` |
+| Table             | Used by                |
+| ----------------- | ---------------------- |
+| `admissions`      | all modules            |
+| `patients`        | `extract_demographics` |
+| `omr`             | `extract_demographics` |
+| `diagnoses_icd`   | `extract_diag_history` |
 | `d_icd_diagnoses` | `extract_diag_history` |
-| `d_labitems` | `extract_labs` |
-| `labevents` | `extract_labs` |
+| `d_labitems`      | `extract_labs`         |
+| `labevents`       | `extract_labs`         |
 
 **`icu/` subdirectory** (under `MIMIC_DATA_DIR`):
 
-| Table | Used by |
-|-------|---------|
+| Table         | Used by                                         |
+| ------------- | ----------------------------------------------- |
 | `chartevents` | `extract_demographics` (height/weight fallback) |
 
 **`note/` subdirectory** (under `MIMIC_NOTE_DIR`, i.e. the `mimic-iv-note` module):
 
-| Table | Used by |
-|-------|---------|
+| Table       | Used by                     |
+| ----------- | --------------------------- |
 | `discharge` | `extract_discharge_history` |
-| `radiology` | `extract_radiology` |
+| `radiology` | `extract_radiology`         |
 
 **`ed/` subdirectory** (under `MIMIC_ED_DIR`, i.e. the `mimic-iv-ed` module):
 
-| Table | Used by |
-|-------|---------|
-| `triage` | `extract_triage_and_complaint` |
+| Table     | Used by                                                                       |
+| --------- | ----------------------------------------------------------------------------- |
+| `triage`  | `extract_triage_and_complaint`                                                |
 | `edstays` | `extract_triage_and_complaint` (bridge table to resolve `stay_id → hadm_id`) |
 
 All tables are expected as **`.csv.gz`** (gzip-compressed CSV). Uncompressed
@@ -126,22 +126,22 @@ All configuration is centralised in `src/preprocessing/preprocessing.yaml`.
 No paths or parameters are hardcoded in any pipeline script — all values flow
 from this file.
 
-| Key | Type | Description | Example |
-|-----|------|-------------|---------|
-| `MIMIC_DATA_DIR` | `str` | Root of the MIMIC-IV data download (contains `hosp/`, `icu/`). Supports `~` expansion. | `"~/data/physionet.org/files/mimiciv/3.1"` |
-| `MIMIC_NOTE_DIR` | `str` | Root of the `mimic-iv-note` module (contains `note/`). Falls back to `MIMIC_DATA_DIR/note` if omitted. Supports `~` expansion. | `"~/data/physionet.org/files/mimic-iv-note/2.2"` |
-| `MIMIC_ED_DIR` | `str` | Root of the `mimic-iv-ed` module (contains `ed/`). The triage table is looked up here first; falls back to `MIMIC_DATA_DIR/ed/` then `MIMIC_DATA_DIR/hosp/` if omitted. Supports `~` expansion. | `"~/data/physionet.org/files/mimic-iv-ed/2.2"` |
-| `SPLIT_TRAIN` | `float` | Fraction of patients for training. Must sum to 1.0 with `SPLIT_DEV` and `SPLIT_TEST`. | `0.70` |
-| `SPLIT_DEV` | `float` | Fraction of patients for dev/validation. | `0.15` |
-| `SPLIT_TEST` | `float` | Fraction of patients for testing. | `0.15` |
-| `BERT_MODEL_NAME` | `str` | HuggingFace model identifier used for embedding text features. | `"emilyalsentzer/Bio_ClinicalBERT"` |
-| `BERT_MAX_LENGTH` | `int` | Maximum token length passed to the BERT tokenizer. | `512` |
-| `BERT_BATCH_SIZE` | `int` | Number of text samples per inference batch. | `32` |
-| `BERT_DEVICE` | `str` | Inference device: `"cuda"` or `"cpu"`. Falls back to CPU automatically if CUDA is unavailable. | `"cuda"` |
-| `FEATURES_DIR` | `str` | Output directory for raw feature parquets. | `"input/features"` |
-| `EMBEDDINGS_DIR` | `str` | Output directory for BERT embedding parquets. | `"input/embeddings"` |
-| `CLASSIFICATIONS_DIR` | `str` | Output directory for label parquets, split files, and JSON artefacts. | `"input/classifications"` |
-| `HASH_REGISTRY_PATH` | `str` | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection. | `"input/classifications/source_hashes.json"` |
+| Key                   | Type    | Description                                                                                                                                                                                      | Example                                          |
+| --------------------- | ------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | ------------------------------------------------ |
+| `MIMIC_DATA_DIR`      | `str`   | Root of the MIMIC-IV data download (contains `hosp/`, `icu/`). Supports `~` expansion.                                                                                                           | `"~/data/physionet.org/files/mimiciv/3.1"`       |
+| `MIMIC_NOTE_DIR`      | `str`   | Root of the `mimic-iv-note` module (contains `note/`). Falls back to `MIMIC_DATA_DIR/note` if omitted. Supports `~` expansion.                                                                   | `"~/data/physionet.org/files/mimic-iv-note/2.2"` |
+| `MIMIC_ED_DIR`        | `str`   | Root of the `mimic-iv-ed` module (contains `ed/`). The triage table is looked up here first; falls back to `MIMIC_DATA_DIR/ed/` then `MIMIC_DATA_DIR/hosp/` if omitted. Supports `~` expansion.  | `"~/data/physionet.org/files/mimic-iv-ed/2.2"`   |
+| `SPLIT_TRAIN`         | `float` | Fraction of patients for training. Must sum to 1.0 with `SPLIT_DEV` and `SPLIT_TEST`.                                                                                                            | `0.70`                                           |
+| `SPLIT_DEV`           | `float` | Fraction of patients for dev/validation.                                                                                                                                                         | `0.15`                                           |
+| `SPLIT_TEST`          | `float` | Fraction of patients for testing.                                                                                                                                                                | `0.15`                                           |
+| `BERT_MODEL_NAME`     | `str`   | HuggingFace model identifier used for embedding text features.                                                                                                                                   | `"emilyalsentzer/Bio_ClinicalBERT"`              |
+| `BERT_MAX_LENGTH`     | `int`   | Maximum token length passed to the BERT tokenizer.                                                                                                                                               | `512`                                            |
+| `BERT_BATCH_SIZE`     | `int`   | Number of text samples per inference batch.                                                                                                                                                      | `32`                                             |
+| `BERT_DEVICE`         | `str`   | Inference device: `"cuda"` or `"cpu"`. Falls back to CPU automatically if CUDA is unavailable.                                                                                                   | `"cuda"`                                         |
+| `FEATURES_DIR`        | `str`   | Output directory for raw feature parquets.                                                                                                                                                       | `"input/features"`                               |
+| `EMBEDDINGS_DIR`      | `str`   | Output directory for BERT embedding parquets.                                                                                                                                                    | `"input/embeddings"`                             |
+| `CLASSIFICATIONS_DIR` | `str`   | Output directory for label parquets, split files, and JSON artefacts.                                                                                                                            | `"input/classifications"`                        |
+| `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"input/classifications/source_hashes.json"`     |
 
 ---
 
@@ -178,10 +178,10 @@ python src/preprocessing/run_pipeline.py --extract_demographics --extract_labs
 
 ### Force flags
 
-| Flag | Effect |
-|------|--------|
-| `--force` | Force rerun of **all** selected modules even if source files are unchanged. |
-| `--force-module MODULE [MODULE ...]` | Force rerun of **specific named modules** only. |
+| Flag                                 | Effect                                                                      |
+| ------------------------------------ | --------------------------------------------------------------------------- |
+| `--force`                            | Force rerun of **all** selected modules even if source files are unchanged. |
+| `--force-module MODULE [MODULE ...]` | Force rerun of **specific named modules** only.                             |
 
 ```bash
 # Rerun everything regardless of hashes
@@ -242,12 +242,12 @@ reprocess on the next run.
 
 ### When to use `--force` vs `--force-module`
 
-| Scenario | Recommended flag |
-|----------|-----------------|
-| Initial run (no hashes yet) | Neither — hash check is a no-op when outputs are missing |
-| Source files completely unchanged, want to re-embed with a new BERT model | `--force-module embed_features combine_dataset` |
-| One source table updated | `--force-module <affected_module> embed_features combine_dataset` |
-| Want to wipe and redo everything | `--force` |
+| Scenario                                                                   | Recommended flag                                                  |
+| -------------------------------------------------------------------------- | ----------------------------------------------------------------- |
+| Initial run (no hashes yet)                                                | Neither — hash check is a no-op when outputs are missing          |
+| Source files completely unchanged, want to re-embed with a new BERT model  | `--force-module embed_features combine_dataset`                   |
+| One source table updated                                                   | `--force-module <affected_module> embed_features combine_dataset` |
+| Want to wipe and redo everything                                           | `--force`                                                         |
 
 ### Example: only `labevents.csv.gz` was updated
 
@@ -277,25 +277,25 @@ python src/preprocessing/inspect_data.py --config /path/to/preprocessing.yaml
 
 ## 7. Output files reference
 
-| File | Location | Format | Produced by | Description |
-|------|----------|--------|-------------|-------------|
-| `data_splits.parquet` | `input/classifications/` | Parquet | `create_splits` | One row per admission with `split` column (`train`/`dev`/`test`) |
-| `demographics_features.parquet` | `input/features/` | Parquet | `extract_demographics` | One row per admission; `demographic_vec` array column (8 floats) |
-| `diag_history_features.parquet` | `input/features/` | Parquet | `extract_diag_history` | One row per admission; `diag_history_text` string column |
-| `discharge_history_features.parquet` | `input/features/` | Parquet | `extract_discharge_history` | One row per admission; `discharge_history_text` string column |
-| `triage_features.parquet` | `input/features/` | Parquet | `extract_triage_and_complaint` | One row per admission; `triage_text` string column |
-| `chief_complaint_features.parquet` | `input/features/` | Parquet | `extract_triage_and_complaint` | One row per admission; `chief_complaint_text` string column |
-| `labs_features.parquet` | `input/features/` | Parquet | `extract_labs` | Long format — one row per lab event; columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line` |
-| `radiology_features.parquet` | `input/features/` | Parquet | `extract_radiology` | One row per admission; `radiology_text` string column |
-| `y_labels.parquet` | `input/classifications/` | Parquet | `extract_y_data` | One row per admission; `y1_mortality` and `y2_readmission` columns |
-| `imputation_stats.json` | `input/classifications/` | JSON | `extract_demographics` | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only |
-| `source_hashes.json` | `input/classifications/` | JSON | all modules | MD5 hashes of source files per module; drives incremental-run skipping |
-| `diag_history_embeddings.parquet` | `input/embeddings/` | Parquet | `embed_features` | One row per admission; `diag_history_embedding` array column |
-| `discharge_history_embeddings.parquet` | `input/embeddings/` | Parquet | `embed_features` | One row per admission; `discharge_history_embedding` array column |
-| `triage_embeddings.parquet` | `input/embeddings/` | Parquet | `embed_features` | One row per admission; `triage_embedding` array column |
-| `chief_complaint_embeddings.parquet` | `input/embeddings/` | Parquet | `embed_features` | One row per admission; `chief_complaint_embedding` array column |
-| `radiology_embeddings.parquet` | `input/embeddings/` | Parquet | `embed_features` | One row per admission; `radiology_embedding` array column |
-| `final_cdss_dataset.parquet` | `input/classifications/` | Parquet | `combine_dataset` | One row per admission; all features and labels joined; labs excluded (long-format, joined at training time) |
+| File                                   | Location                 | Format  | Produced by                    | Description                                                                                                                                 |
+| -------------------------------------- | ------------------------ | ------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data_splits.parquet`                  | `input/classifications/` | Parquet | `create_splits`                | One row per admission with `split` column (`train`/`dev`/`test`)                                                                            |
+| `demographics_features.parquet`        | `input/features/`        | Parquet | `extract_demographics`         | One row per admission; `demographic_vec` array column (8 floats)                                                                            |
+| `diag_history_features.parquet`        | `input/features/`        | Parquet | `extract_diag_history`         | One row per admission; `diag_history_text` string column                                                                                    |
+| `discharge_history_features.parquet`   | `input/features/`        | Parquet | `extract_discharge_history`    | One row per admission; `discharge_history_text` string column                                                                               |
+| `triage_features.parquet`              | `input/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `triage_text` string column                                                                                          |
+| `chief_complaint_features.parquet`     | `input/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `chief_complaint_text` string column                                                                                 |
+| `labs_features.parquet`                | `input/features/`        | Parquet | `extract_labs`                 | Long format — one row per lab event; columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line` |
+| `radiology_features.parquet`           | `input/features/`        | Parquet | `extract_radiology`            | One row per admission; `radiology_text` string column                                                                                       |
+| `y_labels.parquet`                     | `input/classifications/` | Parquet | `extract_y_data`               | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
+| `imputation_stats.json`                | `input/classifications/` | JSON    | `extract_demographics`         | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
+| `source_hashes.json`                   | `input/classifications/` | JSON    | all modules                    | MD5 hashes of source files per module; drives incremental-run skipping                                                                      |
+| `diag_history_embeddings.parquet`      | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `diag_history_embedding` array column                                                                                |
+| `discharge_history_embeddings.parquet` | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `discharge_history_embedding` array column                                                                           |
+| `triage_embeddings.parquet`            | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `triage_embedding` array column                                                                                      |
+| `chief_complaint_embeddings.parquet`   | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `chief_complaint_embedding` array column                                                                             |
+| `radiology_embeddings.parquet`         | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `radiology_embedding` array column                                                                                   |
+| `final_cdss_dataset.parquet`           | `input/classifications/` | Parquet | `combine_dataset`              | One row per admission; all features and labels joined; labs excluded (long-format, joined at training time)                                 |
 
 ---
 

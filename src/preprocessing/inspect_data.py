@@ -45,7 +45,7 @@ def _load_config(config_path: str) -> dict:
     for key in _PATH_KEYS:
         if key in cfg and isinstance(cfg[key], str):
             cfg[key] = os.path.expanduser(cfg[key])
-    return cast(dict, cfg)
+    return cfg
 
 
 # ---------------------------------------------------------------------------
@@ -175,7 +175,7 @@ def _inspect_omr(mimic_dir: str) -> None:
         subset = df[df["result_name"].str.contains(keyword, case=False, na=False)]
         print(f"\n{keyword} entries: {len(subset):,}")
         print(f"  Unique result_name values: {subset['result_name'].unique().tolist()}")
-        vals = cast("pd.Series[float]", pd.to_numeric(subset["result_value"], errors="coerce")).dropna()
+        vals = pd.to_numeric(subset["result_value"], errors="coerce").dropna()
         if len(vals):
             print(
                 f"  Value range: {vals.min():.1f} – {vals.max():.1f},"
@@ -528,7 +528,7 @@ def main() -> None:
 
     config = _load_config(args.config)
     mimic_dir: str = config["MIMIC_DATA_DIR"]
-    note_dir: str = cast(str, config.get("MIMIC_NOTE_DIR", mimic_dir))
+    note_dir: str = config.get("MIMIC_NOTE_DIR", mimic_dir)
     _ed_dir_raw = config.get("MIMIC_ED_DIR")
     ed_dir: str | None = os.path.join(str(_ed_dir_raw), "ed") if _ed_dir_raw else None
 

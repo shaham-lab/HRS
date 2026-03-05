@@ -285,7 +285,7 @@ def _compute_age(patients: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFra
 
 def _compute_imputation_stats(
     df: pd.DataFrame, splits: pd.DataFrame, classifications_dir: str
-) -> dict:
+) -> dict[str, dict[str, float]]:
     """Compute per-stratum height/weight stats from train split only."""
     train_mask = splits["split"] == "train"
     train_ids = splits.loc[train_mask, "hadm_id"]
@@ -298,7 +298,7 @@ def _compute_imputation_stats(
         train_df["age_bin"].astype(str) + "_" + train_df["gender_numeric"].astype(str)
     )
 
-    stats: dict = {}
+    stats: dict[str, dict[str, float]] = {}
     for stratum, grp in train_df.groupby("stratum"):
         stats[stratum] = {
             "height_cm_mean": float(grp["height_cm"].mean()),
@@ -326,7 +326,7 @@ def _compute_imputation_stats(
 def _impute_vectorised(
     df: pd.DataFrame,
     col: str,
-    stats: dict,
+    stats: dict[str, dict[str, float]],
     rng: np.random.Generator,
 ) -> pd.Series:
     """Vectorised imputation: sample from N(mean, std) per stratum group.
