@@ -26,9 +26,9 @@ BERT_BATCH_SIZE: 32
 BERT_DEVICE: "cuda"
 
 # Output directory roots (relative to repository root)
-FEATURES_DIR: "input/features"
-EMBEDDINGS_DIR: "input/embeddings"
-CLASSIFICATIONS_DIR: "input/classifications"
+FEATURES_DIR: "data/input/features"
+EMBEDDINGS_DIR: "data/input/embeddings"
+CLASSIFICATIONS_DIR: "data/input/classifications"
 
 # Path to the source-file hash registry (used to skip unchanged modules).
-HASH_REGISTRY_PATH: "input/classifications/source_hashes.json"
+HASH_REGISTRY_PATH: "data/input/classifications/source_hashes.json"
