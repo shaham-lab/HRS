@@ -171,18 +171,19 @@ def _extract_chart_vitals(
         return result
     path = gz if os.path.exists(gz) else csv
 
-    logger.info("Loading chartevents (may be large)…")
+    _CHART_CHUNK_SIZE = 1_000_000
+    logger.info("Streaming chartevents from %s in chunks of %d…", path, _CHART_CHUNK_SIZE)
     height_chunks: list[pd.DataFrame] = []
     weight_chunks: list[pd.DataFrame] = []
 
     # Fix 2 CRITICAL: apply unit conversion and range filtering within each chunk
-    for chunk in pd.read_csv(
+    for i, chunk in enumerate(pd.read_csv(
         path,
         usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
         dtype={"subject_id": int, "hadm_id": float, "itemid": int},
         parse_dates=["charttime"],
-        chunksize=500_000,
-    ):
+        chunksize=_CHART_CHUNK_SIZE,
+    )):
         chunk = chunk[chunk["itemid"].isin(all_item_ids)].copy()
         if chunk.empty:
             continue
@@ -202,6 +203,9 @@ def _extract_chart_vitals(
             w_chunk.loc[lbs_mask, "valuenum"] = w_chunk.loc[lbs_mask, "valuenum"] * 0.453592
             w_chunk = w_chunk[w_chunk["valuenum"] > 0]
             weight_chunks.append(w_chunk)
+
+        if (i + 1) % 10 == 0:
+            logger.info("  Processed %d chunks…", i + 1)
 
     adm = admissions[["subject_id", "hadm_id"]].copy()
 
