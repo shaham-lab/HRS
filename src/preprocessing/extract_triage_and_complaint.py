@@ -77,11 +77,11 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Resolve which triage / edstays file will actually be used
     def _resolve_ed_table(table_name: str) -> str | None:
-        for directory in ed_dirs + [hosp_dir]:
-            gz = os.path.join(directory, f"{table_name}.csv.gz")
-            csv_p = os.path.join(directory, f"{table_name}.csv")
-            if os.path.exists(gz):
-                return gz
+        for dir_path in ed_dirs + [hosp_dir]:
+            gz_path = os.path.join(dir_path, f"{table_name}.csv.gz")
+            csv_p = os.path.join(dir_path, f"{table_name}.csv")
+            if os.path.exists(gz_path):
+                return gz_path
             if os.path.exists(csv_p):
                 return csv_p
         return None
