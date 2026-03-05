@@ -27,9 +27,9 @@ preprocessing/
 
 | Directory                     | Contents                                                                                                     |
 |-------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `input/features/`             | Raw feature parquet files (demographics, labs, text)                                                         |
-| `input/embeddings/`           | BERT embedding parquet files                                                                                 |
-| `input/classifications/`      | Labels (`y_labels.parquet`), splits (`data_splits.parquet`), imputation statistics (`imputation_stats.json`) |
+| `data/input/features/`             | Raw feature parquet files (demographics, labs, text)                                                         |
+| `data/input/embeddings/`           | BERT embedding parquet files                                                                                 |
+| `data/input/classifications/`      | Labels (`y_labels.parquet`), splits (`data_splits.parquet`), imputation statistics (`imputation_stats.json`) |
 
 ---
 
@@ -45,9 +45,9 @@ preprocessing/
 | `BERT_MAX_LENGTH`    | Maximum token length for BERT tokenizer               | `512`                                 |
 | `BERT_BATCH_SIZE`    | Batch size used when computing embeddings             | `32`                                  |
 | `BERT_DEVICE`        | Compute device (`cuda` or `cpu`)                      | `cuda`                                |
-| `FEATURES_DIR`       | Output directory for raw feature parquets             | `input/features`                      |
-| `EMBEDDINGS_DIR`     | Output directory for embedding parquets               | `input/embeddings`                    |
-| `CLASSIFICATIONS_DIR`| Output directory for labels and splits                | `input/classifications`               |
+| `FEATURES_DIR`       | Output directory for raw feature parquets             | `data/input/features`                      |
+| `EMBEDDINGS_DIR`     | Output directory for embedding parquets               | `data/input/embeddings`                    |
+| `CLASSIFICATIONS_DIR`| Output directory for labels and splits                | `data/input/classifications`               |
 
 > **No hardcoded paths, split ratios, or model names appear in any Python script.** All values are read exclusively from `preprocessing.yaml` at runtime, passed in via `run_pipeline.py`.
 
@@ -59,7 +59,7 @@ preprocessing/
 
 * **Sources**: `admissions` table, split ratios from config.
 * **Logic**: Groups admissions by `subject_id` to prevent patient-level data leakage. Computes a per-patient outcome rate (`hospital_expire_flag`) and uses it to stratify patients into Train / Dev / Test sets in the configured proportions.
-* **Output**: `input/classifications/data_splits.parquet` — columns: `subject_id`, `hadm_id`, `split`.
+* **Output**: `data/input/classifications/data_splits.parquet` — columns: `subject_id`, `hadm_id`, `split`.
 
 ---
 
@@ -74,7 +74,7 @@ preprocessing/
   * Imputes missing height/weight by sampling from `N(mean, std)` using train-derived statistics.
   * BMI is derived from height/weight when missing, never independently imputed.
   * No normalisation is applied.
-* **Output**: `input/features/demographics_features.parquet` — column `demographic_vec` (array of 8 floats: `[Age, Gender, Height, Weight, BMI, height_missing, weight_missing, bmi_missing]`).
+* **Output**: `data/input/features/demographics_features.parquet` — column `demographic_vec` (array of 8 floats: `[Age, Gender, Height, Weight, BMI, height_missing, weight_missing, bmi_missing]`).
 
 ---
 
@@ -82,7 +82,7 @@ preprocessing/
 
 * **Sources**: `diagnoses_icd`, `d_icd_diagnoses`, `admissions`.
 * **Logic**: Concatenates ICD `long_title` values from all admissions that precede the current admission (strictly before `admittime`).
-* **Output**: `input/features/diag_history_features.parquet` — columns: `subject_id`, `hadm_id`, `diag_history_text`.
+* **Output**: `data/input/features/diag_history_features.parquet` — columns: `subject_id`, `hadm_id`, `diag_history_text`.
 
 ---
 
@@ -90,7 +90,7 @@ preprocessing/
 
 * **Sources**: `note` table (discharge type), `admissions`.
 * **Logic**: Retrieves discharge notes from prior admissions only. Removes everything before the first occurrence of `"Allergies:"`.
-* **Output**: `input/features/discharge_history_features.parquet` — columns: `subject_id`, `hadm_id`, `discharge_history_text`.
+* **Output**: `data/input/features/discharge_history_features.parquet` — columns: `subject_id`, `hadm_id`, `discharge_history_text`.
 
 ---
 
@@ -99,8 +99,8 @@ preprocessing/
 * **Sources**: `triage` table, early `chartevents`.
 * **Logic**: Converts triage structured fields to a natural-language template. Extracts chief complaint as raw text.
 * **Output**:
-  * `input/features/triage_features.parquet` — columns: `subject_id`, `hadm_id`, `triage_text`.
-  * `input/features/chief_complaint_features.parquet` — columns: `subject_id`, `hadm_id`, `chief_complaint_text`.
+  * `data/input/features/triage_features.parquet` — columns: `subject_id`, `hadm_id`, `triage_text`.
+  * `data/input/features/chief_complaint_features.parquet` — columns: `subject_id`, `hadm_id`, `chief_complaint_text`.
 
 ---
 
@@ -119,7 +119,7 @@ preprocessing/
   * Sorts events chronologically within each admission.
   * **No aggregation, no pivoting, no wide format.**
   * Lab embedding is intentionally deferred to training/inference time. The MDP agent selects a subset of `itemid`s, their text lines are concatenated in chronological order, and passed to the language model for encoding.
-* **Output**: `input/features/labs_features.parquet` — long format, one row per lab event. Columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line`.
+* **Output**: `data/input/features/labs_features.parquet` — long format, one row per lab event. Columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line`.
 * **Note**: `labs_features.parquet` is excluded from `final_cdss_dataset.parquet` and joined dynamically at training time.
 
 ---
@@ -128,7 +128,7 @@ preprocessing/
 
 * **Sources**: `note` table (radiology type).
 * **Logic**: Selects the most recent radiology note during the current admission. Removes everything before the first occurrence of `"EXAMINATION:"`.
-* **Output**: `input/features/radiology_features.parquet` — columns: `subject_id`, `hadm_id`, `radiology_text`.
+* **Output**: `data/input/features/radiology_features.parquet` — columns: `subject_id`, `hadm_id`, `radiology_text`.
 
 ---
 
@@ -138,27 +138,27 @@ preprocessing/
 * **Logic**:
   * Y1: `admissions.hospital_expire_flag`.
   * Y2: 1 if the patient has a subsequent admission within 30 days of `dischtime`. Patients with `hospital_expire_flag = 1` are excluded from Y2 (set to `NaN`).
-* **Output**: `input/classifications/y_labels.parquet`.
+* **Output**: `data/input/classifications/y_labels.parquet`.
 
 ---
 
 ### 9. `embed_features.py` – BERT sentence embeddings
 
-* **Sources**: text parquets from `input/features/`, BERT config from `preprocessing.yaml`.
+* **Sources**: text parquets from `data/input/features/`, BERT config from `preprocessing.yaml`.
 * **Logic**:
   * Loads the model/tokenizer specified by `BERT_MODEL_NAME`.
   * Falls back to CPU with a warning if `BERT_DEVICE: cuda` is set but CUDA is unavailable.
   * Embeds text using the `[CLS]` token representation.
   * Outputs a zero vector for null/empty text.
   * Processes in batches of `BERT_BATCH_SIZE`.
-* **Output**: one parquet per text feature saved to `input/embeddings/`.
+* **Output**: one parquet per text feature saved to `data/input/embeddings/`.
 
 ---
 
 ### 10. `combine_dataset.py` – Final dataset assembly
 
 * **Logic**: Left-joins all embedding parquets, demographics, and classifications on (`subject_id`, `hadm_id`). Excludes raw text parquets and `labs_features.parquet` (which is in long format and joined dynamically at training time). Ensures the `split` column is present.
-* **Output**: `final_cdss_dataset.parquet`.
+* **Output**: `data/input/classifications/final_cdss_dataset.parquet`.
 
 ---
 

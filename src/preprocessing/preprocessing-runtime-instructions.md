@@ -95,27 +95,28 @@ HRS/
 │       ├── combine_dataset.py
 │       └── preprocessing_utils.py
 │
-└── input/                                      # Generated artefacts (git-ignored)
-    ├── features/
-    │   ├── demographics_features.parquet
-    │   ├── diag_history_features.parquet
-    │   ├── discharge_history_features.parquet
-    │   ├── triage_features.parquet
-    │   ├── chief_complaint_features.parquet
-    │   ├── labs_features.parquet
-    │   └── radiology_features.parquet
-    ├── embeddings/
-    │   ├── diag_history_embeddings.parquet
-    │   ├── discharge_history_embeddings.parquet
-    │   ├── triage_embeddings.parquet
-    │   ├── chief_complaint_embeddings.parquet
-    │   └── radiology_embeddings.parquet
-    └── classifications/
-        ├── data_splits.parquet
-        ├── y_labels.parquet
-        ├── imputation_stats.json
-        ├── source_hashes.json
-        └── final_cdss_dataset.parquet
+└── data/
+    └── input/                                  # Generated artefacts (git-ignored)
+        ├── features/
+        │   ├── demographics_features.parquet
+        │   ├── diag_history_features.parquet
+        │   ├── discharge_history_features.parquet
+        │   ├── triage_features.parquet
+        │   ├── chief_complaint_features.parquet
+        │   ├── labs_features.parquet
+        │   └── radiology_features.parquet
+        ├── embeddings/
+        │   ├── diag_history_embeddings.parquet
+        │   ├── discharge_history_embeddings.parquet
+        │   ├── triage_embeddings.parquet
+        │   ├── chief_complaint_embeddings.parquet
+        │   └── radiology_embeddings.parquet
+        └── classifications/
+            ├── data_splits.parquet
+            ├── y_labels.parquet
+            ├── imputation_stats.json
+            ├── source_hashes.json
+            └── final_cdss_dataset.parquet
 ```
 
 ---
@@ -138,10 +139,10 @@ from this file.
 | `BERT_MAX_LENGTH`     | `int`   | Maximum token length passed to the BERT tokenizer.                                                                                                                                               | `512`                                            |
 | `BERT_BATCH_SIZE`     | `int`   | Number of text samples per inference batch.                                                                                                                                                      | `32`                                             |
 | `BERT_DEVICE`         | `str`   | Inference device: `"cuda"` or `"cpu"`. Falls back to CPU automatically if CUDA is unavailable.                                                                                                   | `"cuda"`                                         |
-| `FEATURES_DIR`        | `str`   | Output directory for raw feature parquets.                                                                                                                                                       | `"input/features"`                               |
-| `EMBEDDINGS_DIR`      | `str`   | Output directory for BERT embedding parquets.                                                                                                                                                    | `"input/embeddings"`                             |
-| `CLASSIFICATIONS_DIR` | `str`   | Output directory for label parquets, split files, and JSON artefacts.                                                                                                                            | `"input/classifications"`                        |
-| `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"input/classifications/source_hashes.json"`     |
+| `FEATURES_DIR`        | `str`   | Output directory for raw feature parquets.                                                                                                                                                       | `"data/input/features"`                               |
+| `EMBEDDINGS_DIR`      | `str`   | Output directory for BERT embedding parquets.                                                                                                                                                    | `"data/input/embeddings"`                             |
+| `CLASSIFICATIONS_DIR` | `str`   | Output directory for label parquets, split files, and JSON artefacts.                                                                                                                            | `"data/input/classifications"`                        |
+| `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"data/input/classifications/source_hashes.json"`     |
 
 ---
 
@@ -279,23 +280,23 @@ python src/preprocessing/inspect_data.py --config /path/to/preprocessing.yaml
 
 | File                                   | Location                 | Format  | Produced by                    | Description                                                                                                                                 |
 | -------------------------------------- | ------------------------ | ------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `data_splits.parquet`                  | `input/classifications/` | Parquet | `create_splits`                | One row per admission with `split` column (`train`/`dev`/`test`)                                                                            |
-| `demographics_features.parquet`        | `input/features/`        | Parquet | `extract_demographics`         | One row per admission; `demographic_vec` array column (8 floats)                                                                            |
-| `diag_history_features.parquet`        | `input/features/`        | Parquet | `extract_diag_history`         | One row per admission; `diag_history_text` string column                                                                                    |
-| `discharge_history_features.parquet`   | `input/features/`        | Parquet | `extract_discharge_history`    | One row per admission; `discharge_history_text` string column                                                                               |
-| `triage_features.parquet`              | `input/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `triage_text` string column                                                                                          |
-| `chief_complaint_features.parquet`     | `input/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `chief_complaint_text` string column                                                                                 |
-| `labs_features.parquet`                | `input/features/`        | Parquet | `extract_labs`                 | Long format — one row per lab event; columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line` |
-| `radiology_features.parquet`           | `input/features/`        | Parquet | `extract_radiology`            | One row per admission; `radiology_text` string column                                                                                       |
-| `y_labels.parquet`                     | `input/classifications/` | Parquet | `extract_y_data`               | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
-| `imputation_stats.json`                | `input/classifications/` | JSON    | `extract_demographics`         | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
-| `source_hashes.json`                   | `input/classifications/` | JSON    | all modules                    | MD5 hashes of source files per module; drives incremental-run skipping                                                                      |
-| `diag_history_embeddings.parquet`      | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `diag_history_embedding` array column                                                                                |
-| `discharge_history_embeddings.parquet` | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `discharge_history_embedding` array column                                                                           |
-| `triage_embeddings.parquet`            | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `triage_embedding` array column                                                                                      |
-| `chief_complaint_embeddings.parquet`   | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `chief_complaint_embedding` array column                                                                             |
-| `radiology_embeddings.parquet`         | `input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `radiology_embedding` array column                                                                                   |
-| `final_cdss_dataset.parquet`           | `input/classifications/` | Parquet | `combine_dataset`              | One row per admission; all features and labels joined; labs excluded (long-format, joined at training time)                                 |
+| `data_splits.parquet`                  | `data/input/classifications/` | Parquet | `create_splits`                | One row per admission with `split` column (`train`/`dev`/`test`)                                                                            |
+| `demographics_features.parquet`        | `data/input/features/`        | Parquet | `extract_demographics`         | One row per admission; `demographic_vec` array column (8 floats)                                                                            |
+| `diag_history_features.parquet`        | `data/input/features/`        | Parquet | `extract_diag_history`         | One row per admission; `diag_history_text` string column                                                                                    |
+| `discharge_history_features.parquet`   | `data/input/features/`        | Parquet | `extract_discharge_history`    | One row per admission; `discharge_history_text` string column                                                                               |
+| `triage_features.parquet`              | `data/input/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `triage_text` string column                                                                                          |
+| `chief_complaint_features.parquet`     | `data/input/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `chief_complaint_text` string column                                                                                 |
+| `labs_features.parquet`                | `data/input/features/`        | Parquet | `extract_labs`                 | Long format — one row per lab event; columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line` |
+| `radiology_features.parquet`           | `data/input/features/`        | Parquet | `extract_radiology`            | One row per admission; `radiology_text` string column                                                                                       |
+| `y_labels.parquet`                     | `data/input/classifications/` | Parquet | `extract_y_data`               | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
+| `imputation_stats.json`                | `data/input/classifications/` | JSON    | `extract_demographics`         | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
+| `source_hashes.json`                   | `data/input/classifications/` | JSON    | all modules                    | MD5 hashes of source files per module; drives incremental-run skipping                                                                      |
+| `diag_history_embeddings.parquet`      | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `diag_history_embedding` array column                                                                                |
+| `discharge_history_embeddings.parquet` | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `discharge_history_embedding` array column                                                                           |
+| `triage_embeddings.parquet`            | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `triage_embedding` array column                                                                                      |
+| `chief_complaint_embeddings.parquet`   | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `chief_complaint_embedding` array column                                                                             |
+| `radiology_embeddings.parquet`         | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `radiology_embedding` array column                                                                                   |
+| `final_cdss_dataset.parquet`           | `data/input/classifications/` | Parquet | `combine_dataset`              | One row per admission; all features and labels joined; labs excluded (long-format, joined at training time)                                 |
 
 ---
 
