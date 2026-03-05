@@ -199,8 +199,8 @@ def _extract_chart_vitals(
     path = gz if os.path.exists(gz) else csv
 
     logger.info("Loading chartevents (may be large)…")
-    height_chunks: list = []
-    weight_chunks: list = []
+    height_chunks: list[pd.DataFrame] = []
+    weight_chunks: list[pd.DataFrame] = []
 
     # Fix 2 CRITICAL: apply unit conversion and range filtering within each chunk
     for chunk in pd.read_csv(
@@ -341,7 +341,7 @@ def _impute_vectorised(
     missing_df = df[missing_mask].copy()
     for stratum, grp_idx in missing_df.groupby("stratum").groups.items():
         _s = stats.get(str(stratum))
-        s: dict = _s if _s is not None else stats["__global__"]
+        s = _s if _s is not None else stats["__global__"]
         mean = s[f"{col}_mean"]
         std = s[f"{col}_std"]
         n = len(grp_idx)
