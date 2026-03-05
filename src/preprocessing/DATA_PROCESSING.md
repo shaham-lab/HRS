@@ -13,10 +13,10 @@ For instructions on how to run the pipeline, see
 
 ### Prediction targets
 
-| Target | Name                  | Definition                                                                                                                       |
-| ------ | --------------------- | -------------------------------------------------------------------------------------------------------------------------------- |
-| Y1     | In-hospital mortality | `admissions.hospital_expire_flag` — binary flag set to 1 if the patient died during the admission                                |
-| Y2     | 30-day readmission    | Derived — 1 if the patient has a subsequent admission with `admittime` within 30 days after `dischtime` of the current admission |
+| Target | Name | Definition |
+|--------|------|------------|
+| Y1 | In-hospital mortality | `admissions.hospital_expire_flag` — binary flag set to 1 if the patient died during the admission |
+| Y2 | 30-day readmission | Derived — 1 if the patient has a subsequent admission with `admittime` within 30 days after `dischtime` of the current admission |
 
 ### Split strategy
 
@@ -40,32 +40,32 @@ Every `hadm_id` inherits the split label of its `subject_id`.
 
 ## 2. Source tables
 
-| Table             | Location                | Used by                        | Columns extracted                                                                                                                         |
-| ----------------- | ----------------------- | ------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------- |
-| `admissions`      | `hosp/`                 | all modules                    | `subject_id`, `hadm_id`, `admittime`, `dischtime`, `hospital_expire_flag`                                                                 |
-| `patients`        | `hosp/`                 | `extract_demographics`         | `subject_id`, `gender`, `anchor_age`, `anchor_year`                                                                                       |
-| `omr`             | `hosp/`                 | `extract_demographics`         | `subject_id`, `chartdate`, `result_name`, `result_value`                                                                                  |
-| `diagnoses_icd`   | `hosp/`                 | `extract_diag_history`         | `subject_id`, `hadm_id`, `icd_code`, `icd_version`                                                                                        |
-| `d_icd_diagnoses` | `hosp/`                 | `extract_diag_history`         | `icd_code`, `icd_version`, `long_title`                                                                                                   |
-| `d_labitems`      | `hosp/`                 | `extract_labs`                 | `itemid`, `label`, `fluid`, `category`                                                                                                    |
-| `labevents`       | `hosp/`                 | `extract_labs`                 | `subject_id`, `hadm_id`, `itemid`, `charttime`, `value`, `valuenum`, `valueuom`, `ref_range_lower`, `ref_range_upper`, `flag`, `priority` |
-| `chartevents`     | `icu/`                  | `extract_demographics`         | `subject_id`, `hadm_id`, `itemid`, `charttime`, `value`, `valuenum`                                                                       |
-| `discharge`       | `note/` (mimic-iv-note) | `extract_discharge_history`    | `subject_id`, `hadm_id`, `charttime`, `text`                                                                                              |
-| `radiology`       | `note/` (mimic-iv-note) | `extract_radiology`            | `subject_id`, `hadm_id`, `charttime`, `text`                                                                                              |
-| `triage`          | `ed/` (mimic-iv-ed)     | `extract_triage_and_complaint` | `subject_id`, `stay_id`, `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`, `pain`, `acuity`, `chiefcomplaint`                |
-| `edstays`         | `ed/` (mimic-iv-ed)     | `extract_triage_and_complaint` | `subject_id`, `stay_id`, `hadm_id`, `intime`                                                                                              |
+| Table | Location | Used by | Columns extracted |
+|-------|----------|---------|-------------------|
+| `admissions` | `hosp/` | all modules | `subject_id`, `hadm_id`, `admittime`, `dischtime`, `hospital_expire_flag` |
+| `patients` | `hosp/` | `extract_demographics` | `subject_id`, `gender`, `anchor_age`, `anchor_year` |
+| `omr` | `hosp/` | `extract_demographics` | `subject_id`, `chartdate`, `result_name`, `result_value` |
+| `diagnoses_icd` | `hosp/` | `extract_diag_history` | `subject_id`, `hadm_id`, `icd_code`, `icd_version` |
+| `d_icd_diagnoses` | `hosp/` | `extract_diag_history` | `icd_code`, `icd_version`, `long_title` |
+| `d_labitems` | `hosp/` | `extract_labs` | `itemid`, `label`, `fluid`, `category` |
+| `labevents` | `hosp/` | `extract_labs` | `subject_id`, `hadm_id`, `itemid`, `charttime`, `value`, `valuenum`, `valueuom`, `ref_range_lower`, `ref_range_upper`, `flag`, `priority` |
+| `chartevents` | `icu/` | `extract_demographics` | `subject_id`, `hadm_id`, `itemid`, `charttime`, `valuenum` |
+| `discharge` | `note/` (mimic-iv-note) | `extract_discharge_history` | `subject_id`, `hadm_id`, `charttime`, `text` |
+| `radiology` | `note/` (mimic-iv-note) | `extract_radiology` | `subject_id`, `hadm_id`, `charttime`, `text` |
+| `triage` | `ed/` (mimic-iv-ed) | `extract_triage_and_complaint` | `subject_id`, `stay_id`, `temperature`, `heartrate`, `resprate`, `o2sat`, `sbp`, `dbp`, `pain`, `acuity`, `chiefcomplaint` |
+| `edstays` | `ed/` (mimic-iv-ed) | `extract_triage_and_complaint` | `subject_id`, `stay_id`, `hadm_id`, `intime` |
 
 ---
 
 ## 3. Train/Dev/Test splitting (`create_splits.py`)
 
-| Property                | Value                                                                                      |
-| ----------------------- | ------------------------------------------------------------------------------------------ |
-| Unit of splitting       | `subject_id` (patient level, not admission level)                                          |
-| Stratification variable | Binary — `1` if any of the patient's admissions has `hospital_expire_flag > 0`, else `0`   |
-| Split ratios            | Configurable via `SPLIT_TRAIN`, `SPLIT_DEV`, `SPLIT_TEST` (default 70/15/15)               |
-| Random seed             | 42 (fixed for reproducibility)                                                             |
-| Output                  | `data_splits.parquet` — one row per `hadm_id` with a `split` column (`train`/`dev`/`test`) |
+| Property | Value |
+|----------|-------|
+| Unit of splitting | `subject_id` (patient level, not admission level) |
+| Stratification variable | Binary — `1` if any of the patient's admissions has `hospital_expire_flag > 0`, else `0` |
+| Split ratios | Configurable via `SPLIT_TRAIN`, `SPLIT_DEV`, `SPLIT_TEST` (default 70/15/15) |
+| Random seed | 42 (fixed for reproducibility) |
+| Output | `data_splits.parquet` — one row per `hadm_id` with a `split` column (`train`/`dev`/`test`) |
 
 **Why patient-level splitting?** If multiple admissions of the same patient
 were assigned to different splits, features from earlier admissions (e.g.
@@ -98,23 +98,23 @@ Encoded as `M = 1.0`, `F = 0.0`. Unknown values → `NaN`.
 
 #### Height
 
-| Priority | Source                                | Condition                                    | Transformation                                                              |
-| -------- | ------------------------------------- | -------------------------------------------- | --------------------------------------------------------------------------- |
-| 1        | `omr.result_name` contains `"Height"` | `chartdate ≤ admittime` (leakage control)    | If `result_name` contains `"Inches"`, multiply by 2.54; otherwise assume cm |
-| 2        | `chartevents` `itemid = 226707`       | First recorded value within admission window | Inches → cm (× 2.54)                                                        |
-| 3        | `chartevents` `itemid = 226730`       | First recorded value within admission window | Use as-is (already cm)                                                      |
+| Priority | Source | Condition | Transformation |
+|----------|--------|-----------|----------------|
+| 1 | `omr.result_name` contains `"Height"` | `chartdate ≤ admittime` (leakage control) | If `result_name` contains `"Inches"`, multiply by 2.54; otherwise assume cm |
+| 2 | `chartevents` `itemid = 226707` | First recorded value within admission window | Inches to cm (× 2.54) |
+| 3 | `chartevents` `itemid = 226730` | First recorded value within admission window | Use as-is (already cm) |
 
 Plausibility filter: 50–250 cm. Values outside this range are discarded.
 
 #### Weight
 
-| Priority | Source                                | Condition                                    | Transformation                                                               |
-| -------- | ------------------------------------- | -------------------------------------------- | ---------------------------------------------------------------------------- |
-| 1        | `omr.result_name` contains `"Weight"` | `chartdate ≤ admittime` (leakage control)    | If `result_name` contains `"Lbs"`, multiply by 0.453592; otherwise assume kg |
-| 2        | `chartevents` `itemid = 226512`       | First recorded value within admission window | Use as-is (kg) — Admission Weight                                            |
-| 3        | `chartevents` `itemid = 224639`       | First recorded value within admission window | Use as-is (kg) — Daily Weight                                                |
-| 4        | `chartevents` `itemid = 226531`       | First recorded value within admission window | lbs → kg (× 0.453592) — Admission Weight lbs                                 |
-| 5        | `chartevents` `itemid = 226846`       | First recorded value within admission window | Use as-is (kg) — Feeding Weight                                              |
+| Priority | Source | Condition | Transformation |
+|----------|--------|-----------|----------------|
+| 1 | `omr.result_name` contains `"Weight"` | `chartdate ≤ admittime` (leakage control) | If `result_name` contains `"Lbs"`, multiply by 0.453592; otherwise assume kg |
+| 2 | `chartevents` `itemid = 226512` | First recorded value within admission window | Use as-is (kg) — Admission Weight |
+| 3 | `chartevents` `itemid = 224639` | First recorded value within admission window | Use as-is (kg) — Daily Weight |
+| 4 | `chartevents` `itemid = 226531` | First recorded value within admission window | lbs to kg (× 0.453592) — Admission Weight lbs |
+| 5 | `chartevents` `itemid = 226846` | First recorded value within admission window | Use as-is (kg) — Feeding Weight |
 
 Plausibility filter: 20–400 kg. Values outside this range are discarded.
 
@@ -266,21 +266,21 @@ training/inference time.
 
 ### Y1 — In-hospital mortality
 
-| Property       | Value                                      |
-| -------------- | ------------------------------------------ |
-| Source         | `admissions.hospital_expire_flag`          |
-| Type           | Binary integer: `1 = died`, `0 = survived` |
-| Output column  | `y1_mortality`                             |
-| Transformation | None                                       |
+| Property | Value |
+|----------|-------|
+| Source | `admissions.hospital_expire_flag` |
+| Type | Binary integer: `1 = died`, `0 = survived` |
+| Output column | `y1_mortality` |
+| Transformation | None |
 
 ### Y2 — 30-day readmission
 
-| Property                       | Value                                                                                                                    |
-| ------------------------------ | ------------------------------------------------------------------------------------------------------------------------ |
-| Definition                     | `1` if the patient has a subsequent admission with `admittime` within 30 days after `dischtime` of the current admission |
-| Subsequent admission condition | `next_admittime > dischtime` (strictly after discharge) AND `next_admittime ≤ dischtime + 30 days`                       |
-| Deceased patients              | Excluded — patients with `hospital_expire_flag = 1` receive `NaN` for Y2 (they cannot be readmitted)                     |
-| Output column                  | `y2_readmission`                                                                                                         |
+| Property | Value |
+|----------|-------|
+| Definition | `1` if the patient has a subsequent admission with `admittime` within 30 days after `dischtime` of the current admission |
+| Subsequent admission condition | `next_admittime > dischtime` (strictly after discharge) AND `next_admittime ≤ dischtime + 30 days` |
+| Deceased patients | Excluded — patients with `hospital_expire_flag = 1` receive `NaN` for Y2 (they cannot be readmitted) |
+| Output column | `y2_readmission` |
 
 **Output file:** `y_labels.parquet` — one row per `hadm_id` with
 `y1_mortality` and `y2_readmission` columns.
@@ -289,24 +289,24 @@ training/inference time.
 
 ## 6. BERT embeddings (`embed_features.py`)
 
-| Property         | Value                                                                                        |
-| ---------------- | -------------------------------------------------------------------------------------------- |
-| Model            | Configurable via `BERT_MODEL_NAME` (default: `emilyalsentzer/Bio_ClinicalBERT`)              |
-| Embedding method | `[CLS]` token from the final hidden state                                                    |
-| Null/empty text  | Zero vector of the same dimensionality as the model's hidden size                            |
-| Truncation       | Inputs are truncated to `BERT_MAX_LENGTH` tokens (default: 512)                              |
-| Batch size       | `BERT_BATCH_SIZE` samples per inference call (default: 32)                                   |
-| Device           | `BERT_DEVICE` (`"cuda"` or `"cpu"`); falls back to CPU with a warning if CUDA is unavailable |
+| Property | Value |
+|----------|-------|
+| Model | Configurable via `BERT_MODEL_NAME` (default: `emilyalsentzer/Bio_ClinicalBERT`) |
+| Embedding method | `[CLS]` token from the final hidden state |
+| Null/empty text | Zero vector of the same dimensionality as the model's hidden size |
+| Truncation | Inputs are truncated to `BERT_MAX_LENGTH` tokens (default: 512) |
+| Batch size | `BERT_BATCH_SIZE` samples per inference call (default: 32) |
+| Device | `BERT_DEVICE` (`"cuda"` or `"cpu"`); falls back to CPU with a warning if CUDA is unavailable |
 
 **Features embedded:**
 
-| Input parquet                        | Text column              | Output parquet                         | Embedding column              |
-| ------------------------------------ | ------------------------ | -------------------------------------- | ----------------------------- |
-| `diag_history_features.parquet`      | `diag_history_text`      | `diag_history_embeddings.parquet`      | `diag_history_embedding`      |
+| Input parquet | Text column | Output parquet | Embedding column |
+|---------------|-------------|----------------|------------------|
+| `diag_history_features.parquet` | `diag_history_text` | `diag_history_embeddings.parquet` | `diag_history_embedding` |
 | `discharge_history_features.parquet` | `discharge_history_text` | `discharge_history_embeddings.parquet` | `discharge_history_embedding` |
-| `triage_features.parquet`            | `triage_text`            | `triage_embeddings.parquet`            | `triage_embedding`            |
-| `chief_complaint_features.parquet`   | `chief_complaint_text`   | `chief_complaint_embeddings.parquet`   | `chief_complaint_embedding`   |
-| `radiology_features.parquet`         | `radiology_text`         | `radiology_embeddings.parquet`         | `radiology_embedding`         |
+| `triage_features.parquet` | `triage_text` | `triage_embeddings.parquet` | `triage_embedding` |
+| `chief_complaint_features.parquet` | `chief_complaint_text` | `chief_complaint_embeddings.parquet` | `chief_complaint_embedding` |
+| `radiology_features.parquet` | `radiology_text` | `radiology_embeddings.parquet` | `radiology_embedding` |
 
 Lab features (F6) are **not embedded here** — they are in long format and
 embedded dynamically at training time.
