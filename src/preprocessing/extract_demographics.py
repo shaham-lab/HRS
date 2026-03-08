@@ -15,6 +15,12 @@ Expected config keys:
     MIMIC_DATA_DIR       – root directory containing MIMIC-IV tables
     FEATURES_DIR         – output directory for feature parquets
     CLASSIFICATIONS_DIR  – directory containing data_splits.parquet
+
+Optional config keys:
+    HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
+                                   null hadm_id in chartevents
+    HADM_LINKAGE_TOLERANCE_HOURS – hours of tolerance for time-window linkage
+                                   (default 1, only used when strategy is "link")
 """
 
 import json
@@ -154,8 +160,11 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
 
 
 def _extract_chart_vitals(
-    mimic_dir: str, admissions: pd.DataFrame
-) -> pd.DataFrame:
+    mimic_dir: str, admissions: pd.DataFrame,
+    hadm_linkage_strategy: str = "drop",
+    hadm_linkage_tolerance_hours: int = 1,
+) -> tuple[pd.DataFrame, dict]:
+    """Extract height/weight from chartevents, returning (vitals_df, linkage_stats)."""
     # Fix 2: Use new itemid collections (no BMI from chartevents)
     all_item_ids = list(_CHART_HEIGHT_ITEMS.keys()) + _CHART_WEIGHT_ITEMIDS
     weight_priority = {item_id: rank for rank, (item_id, _) in enumerate(_CHART_WEIGHT_ITEMS)}
@@ -168,13 +177,27 @@ def _extract_chart_vitals(
         result = admissions[["subject_id", "hadm_id"]].copy()
         result["chart_height_cm"] = np.nan
         result["chart_weight_kg"] = np.nan
-        return result
+        linkage_stats: dict = {
+            "total_null_hadm": 0, "dropped": 0,
+            "linked": 0, "ambiguous_resolved": 0, "unresolvable": 0,
+        }
+        return result, linkage_stats
     path = gz if os.path.exists(gz) else csv
 
     _CHART_CHUNK_SIZE = 1_000_000
     logger.info("Streaming chartevents from %s in chunks of %d…", path, _CHART_CHUNK_SIZE)
     height_chunks: list[pd.DataFrame] = []
     weight_chunks: list[pd.DataFrame] = []
+
+    total_null_hadm = 0
+    dropped_count = 0
+    linked_count = 0
+    ambiguous_resolved_count = 0
+    unresolvable_count = 0
+
+    # Prepare admissions index for linkage strategy
+    adm_for_link = admissions.copy()
+    adm_for_link["admittime"] = pd.to_datetime(adm_for_link["admittime"])
 
     # Fix 2 CRITICAL: apply unit conversion and range filtering within each chunk
     for i, chunk in enumerate(pd.read_csv(
@@ -184,6 +207,62 @@ def _extract_chart_vitals(
         parse_dates=["charttime"],
         chunksize=_CHART_CHUNK_SIZE,
     )):
+        null_hadm = chunk["hadm_id"].isna().sum()
+        if null_hadm > 0:
+            total_null_hadm += null_hadm
+            logger.info(
+                "chartevents chunk %d: %d rows (%.1f%%) have null hadm_id — strategy: %s",
+                i, null_hadm, 100 * null_hadm / len(chunk), hadm_linkage_strategy,
+            )
+
+        if hadm_linkage_strategy == "link":
+            null_mask = chunk["hadm_id"].isna()
+            if null_mask.any():
+                null_rows = chunk[null_mask].copy()
+                tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
+                linked_rows = []
+                for _, row in null_rows.iterrows():
+                    sid = row["subject_id"]
+                    ct = pd.to_datetime(row["charttime"])
+                    candidates = adm_for_link[adm_for_link["subject_id"] == sid].copy()
+                    if candidates.empty:
+                        unresolvable_count += 1
+                        continue
+                    window_mask = (
+                        (candidates["admittime"] - tolerance <= ct) &
+                        (ct <= candidates["dischtime"] + tolerance)
+                        if "dischtime" in candidates.columns
+                        else (candidates["admittime"] - tolerance <= ct)
+                    )
+                    matches = candidates[window_mask]
+                    if len(matches) == 0:
+                        unresolvable_count += 1
+                    elif len(matches) == 1:
+                        linked_count += 1
+                        new_row = row.copy()
+                        new_row["hadm_id"] = float(matches.iloc[0]["hadm_id"])
+                        linked_rows.append(new_row)
+                    else:
+                        # Multiple matches: pick the one whose admittime is closest to charttime
+                        matches = matches.copy()
+                        matches["_hadm_link_gap"] = (matches["admittime"] - ct).abs()
+                        best = matches.sort_values("_hadm_link_gap").iloc[0]
+                        ambiguous_resolved_count += 1
+                        new_row = row.copy()
+                        new_row["hadm_id"] = float(best["hadm_id"])
+                        linked_rows.append(new_row)
+                if linked_rows:
+                    linked_df = pd.DataFrame(linked_rows)
+                    chunk = pd.concat(
+                        [chunk[~null_mask], linked_df], ignore_index=True
+                    )
+                else:
+                    chunk = chunk[~null_mask]
+        else:
+            # "drop" strategy
+            dropped_count += chunk["hadm_id"].isna().sum()
+            chunk = chunk[chunk["hadm_id"].notna()].copy()
+
         chunk = chunk[chunk["itemid"].isin(all_item_ids)].copy()
         if chunk.empty:
             continue
@@ -206,6 +285,22 @@ def _extract_chart_vitals(
 
         if (i + 1) % 10 == 0:
             logger.info("  Processed %d chunks…", i + 1)
+
+    if total_null_hadm > 0:
+        logger.info(
+            "chartevents null hadm_id summary: total=%d, dropped=%d, linked=%d, "
+            "ambiguous_resolved=%d, unresolvable=%d",
+            total_null_hadm, dropped_count, linked_count,
+            ambiguous_resolved_count, unresolvable_count,
+        )
+
+    linkage_stats = {
+        "total_null_hadm": int(total_null_hadm),
+        "dropped": int(dropped_count),
+        "linked": int(linked_count),
+        "ambiguous_resolved": int(ambiguous_resolved_count),
+        "unresolvable": int(unresolvable_count),
+    }
 
     adm = admissions[["subject_id", "hadm_id"]].copy()
 
@@ -241,7 +336,7 @@ def _extract_chart_vitals(
     result = adm.copy()
     result = result.merge(chart_height, on=["subject_id", "hadm_id"], how="left")
     result = result.merge(chart_weight, on=["subject_id", "hadm_id"], how="left")
-    return result
+    return result, linkage_stats
 
 
 def _compute_age(patients: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFrame:
@@ -347,6 +442,8 @@ def run(config: dict) -> None:
     features_dir = config["FEATURES_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]
     registry_path = config.get("HASH_REGISTRY_PATH", "")
+    hadm_linkage_strategy = config.get("HADM_LINKAGE_STRATEGY", "drop").lower()
+    hadm_linkage_tolerance_hours = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 1))
 
     # ------------------------------------------------------------------ #
     # Hash-based skip check
@@ -399,7 +496,29 @@ def run(config: dict) -> None:
     # Fallback via chartevents
     # ------------------------------------------------------------------ #
     logger.info("Extracting vitals from chartevents (fallback)…")
-    chart_vitals = _extract_chart_vitals(mimic_dir, admissions)
+    chart_vitals, linkage_stats = _extract_chart_vitals(
+        mimic_dir, admissions,
+        hadm_linkage_strategy=hadm_linkage_strategy,
+        hadm_linkage_tolerance_hours=hadm_linkage_tolerance_hours,
+    )
+
+    # ------------------------------------------------------------------ #
+    # Write hadm_linkage_stats.json (merge with existing if present)
+    # ------------------------------------------------------------------ #
+    os.makedirs(classifications_dir, exist_ok=True)
+    stats_json_path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
+    existing_stats: dict = {}
+    if os.path.exists(stats_json_path):
+        with open(stats_json_path, "r", encoding="utf-8") as fh:
+            try:
+                existing_stats = json.load(fh)
+            except (json.JSONDecodeError, ValueError):
+                existing_stats = {}
+    existing_stats.setdefault("extract_demographics", {})
+    existing_stats["extract_demographics"]["chartevents"] = linkage_stats
+    with open(stats_json_path, "w", encoding="utf-8") as fh:
+        json.dump(existing_stats, fh, indent=2)
+    logger.info("Updated hadm_linkage_stats.json at %s", stats_json_path)
 
     # ------------------------------------------------------------------ #
     # Merge and combine sources

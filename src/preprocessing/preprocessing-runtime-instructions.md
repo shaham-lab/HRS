@@ -88,6 +88,8 @@ HRS/
 │       ├── extract_diag_history.py
 │       ├── extract_discharge_history.py
 │       ├── extract_triage_and_complaint.py
+│       ├── build_lab_panel_config.py           # Must run before extract_labs
+│       ├── build_lab_text_lines.py             # Helper called by extract_labs
 │       ├── extract_labs.py
 │       ├── extract_radiology.py
 │       ├── extract_y_data.py
@@ -110,12 +112,15 @@ HRS/
         │   ├── discharge_history_embeddings.parquet
         │   ├── triage_embeddings.parquet
         │   ├── chief_complaint_embeddings.parquet
-        │   └── radiology_embeddings.parquet
+        │   ├── radiology_embeddings.parquet
+        │   └── lab_{group}_embeddings.parquet  # ×13, e.g. lab_blood_chemistry_embeddings.parquet
         └── classifications/
             ├── data_splits.parquet
             ├── y_labels.parquet
             ├── imputation_stats.json
             ├── source_hashes.json
+            ├── lab_panel_config.yaml
+            ├── hadm_linkage_stats.json
             └── final_cdss_dataset.parquet
 ```
 
@@ -132,17 +137,20 @@ from this file.
 | `MIMIC_DATA_DIR`      | `str`   | Root of the MIMIC-IV data download (contains `hosp/`, `icu/`). Supports `~` expansion.                                                                                                           | `"~/data/physionet.org/files/mimiciv/3.1"`       |
 | `MIMIC_NOTE_DIR`      | `str`   | Root of the `mimic-iv-note` module (contains `note/`). Falls back to `MIMIC_DATA_DIR/note` if omitted. Supports `~` expansion.                                                                   | `"~/data/physionet.org/files/mimic-iv-note/2.2"` |
 | `MIMIC_ED_DIR`        | `str`   | Root of the `mimic-iv-ed` module (contains `ed/`). The triage table is looked up here first; falls back to `MIMIC_DATA_DIR/ed/` then `MIMIC_DATA_DIR/hosp/` if omitted. Supports `~` expansion.  | `"~/data/physionet.org/files/mimic-iv-ed/2.2"`   |
-| `SPLIT_TRAIN`         | `float` | Fraction of patients for training. Must sum to 1.0 with `SPLIT_DEV` and `SPLIT_TEST`.                                                                                                            | `0.70`                                           |
-| `SPLIT_DEV`           | `float` | Fraction of patients for dev/validation.                                                                                                                                                         | `0.15`                                           |
-| `SPLIT_TEST`          | `float` | Fraction of patients for testing.                                                                                                                                                                | `0.15`                                           |
-| `BERT_MODEL_NAME`     | `str`   | HuggingFace model identifier used for embedding text features.                                                                                                                                   | `"emilyalsentzer/Bio_ClinicalBERT"`              |
-| `BERT_MAX_LENGTH`     | `int`   | Maximum token length passed to the BERT tokenizer.                                                                                                                                               | `512`                                            |
+| `SPLIT_TRAIN`         | `float` | Fraction of patients for training. Must sum to 1.0 with `SPLIT_DEV` and `SPLIT_TEST`.                                                                                                            | `0.80`                                           |
+| `SPLIT_DEV`           | `float` | Fraction of patients for dev/validation.                                                                                                                                                         | `0.10`                                           |
+| `SPLIT_TEST`          | `float` | Fraction of patients for testing.                                                                                                                                                                | `0.10`                                           |
+| `BERT_MODEL_NAME`     | `str`   | HuggingFace model identifier used for embedding text features.                                                                                                                                   | `"Simonlee711/Clinical_ModernBERT"`              |
+| `BERT_MAX_LENGTH`     | `int`   | Maximum token length passed to the BERT tokenizer.                                                                                                                                               | `8192`                                           |
 | `BERT_BATCH_SIZE`     | `int`   | Number of text samples per inference batch.                                                                                                                                                      | `32`                                             |
 | `BERT_DEVICE`         | `str`   | Inference device: `"cuda"` or `"cpu"`. Falls back to CPU automatically if CUDA is unavailable.                                                                                                   | `"cuda"`                                         |
 | `FEATURES_DIR`        | `str`   | Output directory for raw feature parquets.                                                                                                                                                       | `"data/input/features"`                               |
 | `EMBEDDINGS_DIR`      | `str`   | Output directory for BERT embedding parquets.                                                                                                                                                    | `"data/input/embeddings"`                             |
 | `CLASSIFICATIONS_DIR` | `str`   | Output directory for label parquets, split files, and JSON artefacts.                                                                                                                            | `"data/input/classifications"`                        |
 | `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"data/input/classifications/source_hashes.json"`     |
+| `HADM_LINKAGE_STRATEGY` | `str` | How to handle records with null `hadm_id`. `"drop"` excludes them (default); `"link"` attempts time-window linkage using `charttime` and admission windows.                                    | `"drop"`                                         |
+| `HADM_LINKAGE_TOLERANCE_HOURS` | `int` | Hours of tolerance outside `admittime`/`dischtime` used when `HADM_LINKAGE_STRATEGY` is `"link"`. Ignored when strategy is `"drop"`.                                                   | `1`                                              |
+| `LAB_ADMISSION_WINDOW` | `int` or `"full"` | Hours from `admittime` to include in `labs_features.parquet`. Integer: include events within this many hours of `admittime`. `"full"`: include all events within the full admission. | `24`                                             |
 
 ---
 
@@ -213,17 +221,16 @@ create_splits
   └─► extract_diag_history        │
   └─► extract_discharge_history   │  (these can run in parallel)
   └─► extract_triage_and_complaint│
-  └─► extract_labs                │
+  └─► build_lab_panel_config ─► extract_labs
   └─► extract_radiology           │
   └─► extract_y_data             ─┘
         └─► embed_features
               └─► combine_dataset
 ```
 
-**`create_splits` must complete first.** All seven `extract_*` modules depend
-on `data_splits.parquet` and can be run in parallel once splits exist.
-`embed_features` requires all text feature parquets. `combine_dataset` requires
-all embedding parquets and labels.
+**`create_splits` must complete first.** `build_lab_panel_config` must run
+before `extract_labs`. All other `extract_*` modules can run in parallel once
+splits exist.
 
 ---
 
@@ -291,12 +298,15 @@ python src/preprocessing/inspect_data.py --config /path/to/preprocessing.yaml
 | `y_labels.parquet`                     | `data/input/classifications/` | Parquet | `extract_y_data`               | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
 | `imputation_stats.json`                | `data/input/classifications/` | JSON    | `extract_demographics`         | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
 | `source_hashes.json`                   | `data/input/classifications/` | JSON    | all modules                    | MD5 hashes of source files per module; drives incremental-run skipping                                                                      |
+| `lab_panel_config.yaml`                | `data/input/classifications/` | YAML    | `build_lab_panel_config`       | Defines the 13 lab group names and their constituent itemids, derived from `d_labitems`                                                     |
+| `hadm_linkage_stats.json`              | `data/input/classifications/` | JSON    | all modules                    | Per-module counts of null hadm_id records: dropped, linked, ambiguous-resolved, unresolvable                                               |
 | `diag_history_embeddings.parquet`      | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `diag_history_embedding` array column                                                                                |
 | `discharge_history_embeddings.parquet` | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `discharge_history_embedding` array column                                                                           |
 | `triage_embeddings.parquet`            | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `triage_embedding` array column                                                                                      |
 | `chief_complaint_embeddings.parquet`   | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `chief_complaint_embedding` array column                                                                             |
 | `radiology_embeddings.parquet`         | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission; `radiology_embedding` array column                                                                                   |
-| `final_cdss_dataset.parquet`           | `data/input/classifications/` | Parquet | `combine_dataset`              | One row per admission; all features and labels joined; labs excluded (long-format, joined at training time)                                 |
+| `lab_{group}_embeddings.parquet` (×13) | `data/input/embeddings/`      | Parquet | `embed_features`               | One row per admission per lab group; `lab_{group}_embedding` array column (768 floats); zero vector for admissions with no events in that group |
+| `final_cdss_dataset.parquet`           | `data/input/classifications/` | Parquet | `combine_dataset`              | One row per admission; all features and labels joined. Includes demographics, all 5 non-lab embedding columns, and all 13 lab group embedding columns as independent columns. `labs_features.parquet` (long-format raw event data) is excluded — it is superseded by the 13 per-group embedding parquets. The 13 lab group embeddings are discovered and joined automatically by `combine_dataset.py` via dynamic parquet discovery in `EMBEDDINGS_DIR`. |
 
 ---
 

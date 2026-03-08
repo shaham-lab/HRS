@@ -287,10 +287,10 @@ def _inspect_labevents(mimic_dir: str) -> None:
 
     _print_snapshot(df)
 
-    print(
-        f"\nhadm_id — null: {df['hadm_id'].isna().sum():,}"
-        f" ({100 * df['hadm_id'].isna().mean():.1f}% — outpatient rows)"
-    )
+    null_hadm_count = df["hadm_id"].isna().sum()
+    null_hadm_pct = 100 * df["hadm_id"].isna().mean()
+    print(f"\nNull hadm_id: {null_hadm_count:,} ({null_hadm_pct:.1f}%) — these are outpatient/unlinked events")
+    print("  → HADM_LINKAGE_STRATEGY in preprocessing.yaml controls how these are handled.")
     print(
         f"valuenum — null: {df['valuenum'].isna().sum():,}"
         f" ({100 * df['valuenum'].isna().mean():.1f}% — qualitative results)"
@@ -343,6 +343,12 @@ def _inspect_chartevents(mimic_dir: str) -> None:
             .agg(["count", "mean", "min", "max"])
             .to_string()
         )
+
+    null_hadm_count = df["hadm_id"].isna().sum()
+    null_hadm_pct = 100 * df["hadm_id"].isna().mean()
+    print(f"\nNull hadm_id: {null_hadm_count:,} ({null_hadm_pct:.1f}%) — these are outpatient/unlinked events")
+    print("  → HADM_LINKAGE_STRATEGY in preprocessing.yaml controls how these are handled.")
+
     _print_value_counts(df, "itemid", top_n=20, label="Most frequent itemids")
 
 
@@ -379,6 +385,11 @@ def _inspect_discharge(mimic_dir: str, note_dir: str) -> None:
     print(f"\nFirst 3 non-empty note previews (first 300 chars each):")
     for i, text in enumerate(df["text"].dropna().head(3)):
         print(f"\n  [{i + 1}] {str(text)[:300].strip()!r}")
+
+    avg_len = df["text"].dropna().str.len().mean()
+    print(f"\nAverage note length: {avg_len:,.0f} characters (~{avg_len / 4:.0f} tokens estimated)")
+    print("  Clinical_ModernBERT context window: 8,192 tokens. Notes exceeding this will be truncated.")
+
     has_marker = df["text"].str.contains("Allergies:", na=False)
     print(
         f"\n'Allergies:' marker present: {has_marker.sum():,} / {len(df):,}"
@@ -419,6 +430,11 @@ def _inspect_radiology(mimic_dir: str, note_dir: str) -> None:
     print(f"\nFirst 3 non-empty note previews (first 300 chars each):")
     for i, text in enumerate(df["text"].dropna().head(3)):
         print(f"\n  [{i + 1}] {str(text)[:300].strip()!r}")
+
+    avg_len = df["text"].dropna().str.len().mean()
+    print(f"\nAverage note length: {avg_len:,.0f} characters (~{avg_len / 4:.0f} tokens estimated)")
+    print("  Clinical_ModernBERT context window: 8,192 tokens. Notes exceeding this will be truncated.")
+
     has_marker = df["text"].str.contains("EXAMINATION:", na=False)
     print(
         f"\n'EXAMINATION:' marker present: {has_marker.sum():,} / {len(df):,}"
@@ -515,6 +531,38 @@ def _inspect_edstays(mimic_dir: str, ed_dir: str | None = None) -> None:
 # Entry point
 # ---------------------------------------------------------------------------
 
+
+def _inspect_lab_panel_config(classifications_dir: str) -> None:
+    path = os.path.join(classifications_dir, "lab_panel_config.yaml")
+    _print_header("lab_panel_config.yaml", path)
+    if not os.path.exists(path):
+        print("NOT FOUND — run build_lab_panel_config.py first.")
+        return
+    import yaml as _yaml
+    with open(path, encoding="utf-8") as f:
+        cfg = _yaml.safe_load(f)
+    print(f"\nTotal lab groups: {len(cfg)}")
+    for group_name, items in sorted(cfg.items()):
+        print(f"  {group_name}: {len(items)} itemids")
+
+
+def _inspect_hadm_linkage_stats(classifications_dir: str) -> None:
+    path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
+    _print_header("hadm_linkage_stats.json", path)
+    if not os.path.exists(path):
+        print("NOT FOUND — will be created after pipeline runs.")
+        return
+    import json as _json
+    with open(path, encoding="utf-8") as f:
+        stats = _json.load(f)
+    for module, tables in stats.items():
+        print(f"\n  Module: {module}")
+        for table, counts in tables.items():
+            print(f"    {table}:")
+            for k, v in counts.items():
+                print(f"      {k}: {v:,}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
         description="Inspect MIMIC-IV source files — diagnostic snapshots only, no output files.",
@@ -543,12 +591,14 @@ def main() -> None:
     _inspect_diagnoses_icd(mimic_dir)
     _inspect_d_icd_diagnoses(mimic_dir)
     _inspect_d_labitems(mimic_dir)
+    _inspect_lab_panel_config(config.get("CLASSIFICATIONS_DIR", ""))
     _inspect_labevents(mimic_dir)
     _inspect_chartevents(mimic_dir)
     _inspect_discharge(mimic_dir, note_dir)
     _inspect_radiology(mimic_dir, note_dir)
     _inspect_triage(mimic_dir, ed_dir)
     _inspect_edstays(mimic_dir, ed_dir)
+    _inspect_hadm_linkage_stats(config.get("CLASSIFICATIONS_DIR", ""))
 
     print("\n" + "=" * 70)
     print("Inspection complete.")

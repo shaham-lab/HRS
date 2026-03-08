@@ -1,9 +1,20 @@
 """
 extract_diag_history.py – Prior-visit ICD diagnosis text.
 
-For each admission, concatenates ICD long_title values from all prior
-admissions of the same patient (strictly before current admittime).
+For each admission, builds a structured text block of ICD diagnoses from all
+prior admissions of the same patient (strictly before current admittime).
+Formatted with dated section headers and one long_title per line per visit.
 An empty string is produced if no prior admissions exist.
+
+Output format:
+    Past Diagnoses:
+
+    Visit (YYYY-MM-DD):
+    Chronic kidney disease, stage 3
+    Hypertension
+
+    Visit (YYYY-MM-DD):
+    Acute kidney injury
 
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
@@ -13,9 +24,41 @@ Expected config keys:
 import logging
 import os
 
+import pandas as pd
+
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
+
+
+def _format_diag_history(prior: pd.DataFrame) -> str:
+    """Format prior diagnosis rows into a structured text block.
+
+    Parameters
+    ----------
+    prior : pd.DataFrame
+        Rows for a single (subject_id, hadm_id) pair, already filtered to
+        strictly prior visits. Expected columns: diag_admittime, long_title.
+
+    Returns
+    -------
+    str
+        Structured text block; empty string if prior is empty.
+    """
+    if prior.empty:
+        return ""
+
+    lines = ["Past Diagnoses:"]
+    for visit_date, visit_group in prior.sort_values("diag_admittime").groupby(
+        "diag_admittime", sort=False
+    ):
+        date_str = pd.to_datetime(visit_date).strftime("%Y-%m-%d")
+        lines.append("")
+        lines.append(f"Visit ({date_str}):")
+        for title in visit_group["long_title"]:
+            if title:
+                lines.append(title)
+    return "\n".join(lines)
 
 
 def run(config: dict) -> None:
@@ -104,11 +147,12 @@ def run(config: dict) -> None:
     prior_mask = merged["diag_admittime"] < merged["admittime"]
     prior = merged[prior_mask]
 
+    # Build structured text block per admission
     diag_text = (
-        prior.groupby(["subject_id", "hadm_id"])["long_title"]
-        .apply(lambda titles: " | ".join(t for t in titles if t))
+        prior.groupby(["subject_id", "hadm_id"])
+        .apply(lambda grp: _format_diag_history(grp))
         .reset_index()
-        .rename(columns={"long_title": "diag_history_text"})
+        .rename(columns={0: "diag_history_text"})
     )
 
     out_df = admissions[["subject_id", "hadm_id"]].merge(

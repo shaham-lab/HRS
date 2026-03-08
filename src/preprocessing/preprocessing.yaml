@@ -15,15 +15,30 @@ MIMIC_NOTE_DIR: "~/data/physionet.org/files/mimic-iv-note/2.2"
 MIMIC_ED_DIR: "~/data/physionet.org/files/mimic-iv-ed/2.2"
 
 # Train / Dev / Test split percentages (must sum to 1.0)
-SPLIT_TRAIN: 0.70
-SPLIT_DEV: 0.15
-SPLIT_TEST: 0.15
+SPLIT_TRAIN: 0.80
+SPLIT_DEV: 0.10
+SPLIT_TEST: 0.10
 
 # HuggingFace BERT model settings
-BERT_MODEL_NAME: "emilyalsentzer/Bio_ClinicalBERT"
-BERT_MAX_LENGTH: 512
+BERT_MODEL_NAME: "Simonlee711/Clinical_ModernBERT"
+BERT_MAX_LENGTH: 8192
 BERT_BATCH_SIZE: 32
 BERT_DEVICE: "cuda"
+
+# Strategy for handling records with null hadm_id.
+# "drop" (default): exclude records with null hadm_id; log count per module.
+# "link": attempt to assign hadm_id by matching charttime against admission
+#         windows within HADM_LINKAGE_TOLERANCE_HOURS hours.
+HADM_LINKAGE_STRATEGY: "drop"
+HADM_LINKAGE_TOLERANCE_HOURS: 1
+
+# Lab event admission window.
+# Integer: include only lab events within this many hours of admittime
+#   (admittime <= charttime <= admittime + LAB_ADMISSION_WINDOW hours).
+# "full": include all events within the full admission window
+#   (admittime <= charttime <= dischtime).
+# Default: 24 (first 24 hours of admission).
+LAB_ADMISSION_WINDOW: 24
 
 # Output directory roots (relative to repository root)
 FEATURES_DIR: "data/input/features"

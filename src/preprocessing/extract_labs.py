@@ -4,13 +4,18 @@ extract_labs.py – Lab events (current admission, long format).
 Outputs one row per lab event per admission, formatted as a chronological
 natural-language text line. No aggregation, no pivoting, no wide format.
 
-Lab embedding is intentionally deferred to training/inference time. The MDP
-agent selects a subset of itemids, their text lines are concatenated in
-chronological order, and passed to the language model for encoding.
+The admission window is controlled by LAB_ADMISSION_WINDOW:
+  - Integer N: include events in [admittime, admittime + N hours]
+  - "full": include all events in [admittime, dischtime]
+  Default: 24 hours.
 
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
     FEATURES_DIR    – output directory for feature parquets
+
+Optional config keys:
+    LAB_ADMISSION_WINDOW – hours from admittime to include (default 24),
+                           or "full" to include entire admission
 """
 
 import logging
@@ -27,7 +32,24 @@ _CHUNK_SIZE = 1_000_000
 
 
 def _build_lab_text_line(row) -> str:
-    """Convert a single lab event row to a chronological text line."""
+    """Convert a single lab event row to a chronological text line.
+
+    Format: [HH:MM] {label}: {value} {unit} (ref: lower-upper) [ABNORMAL]
+
+    Where [HH:MM] is elapsed time since admittime (relative, not clock time).
+    [ABNORMAL] is appended when flag == "abnormal" OR when valuenum falls
+    outside [ref_range_lower, ref_range_upper].
+    """
+    # Elapsed time since admittime
+    try:
+        elapsed = pd.to_datetime(row["charttime"]) - pd.to_datetime(row["admittime"])
+        total_minutes = int(elapsed.total_seconds() // 60)
+        hours = total_minutes // 60
+        minutes = total_minutes % 60
+        time_str = f"{hours:02d}:{minutes:02d}"
+    except Exception:
+        time_str = "00:00"
+
     # Value: prefer numeric formatted to 2dp, fall back to text value
     if pd.notna(row["valuenum"]):
         value_str = f"{row['valuenum']:.2f}"
@@ -39,20 +61,24 @@ def _build_lab_text_line(row) -> str:
 
     # Reference range — only include when both bounds are present
     ref_str = ""
-    if pd.notna(row["ref_range_lower"]) and pd.notna(row["ref_range_upper"]):
-        ref_str = f" (ref: {row['ref_range_lower']}-{row['ref_range_upper']})"
+    ref_lower = row.get("ref_range_lower", None)
+    ref_upper = row.get("ref_range_upper", None)
+    if pd.notna(ref_lower) and pd.notna(ref_upper):
+        ref_str = f" (ref: {ref_lower}-{ref_upper})"
 
-    # Abnormal flag — only include when flagged
-    flag_str = " [ABNORMAL]" if str(row["flag"]).strip().lower() == "abnormal" else ""
-
-    # Priority — only include when STAT
-    priority_str = " [STAT]" if str(row["priority"]).strip().upper() == "STAT" else ""
-
-    time_str = pd.to_datetime(row["charttime"]).strftime("%H:%M")
+    # Abnormal flag: flagged as "abnormal" OR valuenum outside reference range
+    is_abnormal = str(row["flag"]).strip().lower() == "abnormal"
+    if not is_abnormal and pd.notna(row.get("valuenum")) and pd.notna(ref_lower) and pd.notna(ref_upper):
+        try:
+            vn = float(row["valuenum"])
+            is_abnormal = vn < float(ref_lower) or vn > float(ref_upper)
+        except (TypeError, ValueError):
+            pass
+    flag_str = " [ABNORMAL]" if is_abnormal else ""
 
     return (
-        f"[{time_str}] {row['label']} ({row['fluid']}/{row['category']}): "
-        f"{value_str}{uom}{ref_str}{flag_str}{priority_str}"
+        f"[{time_str}] {row['label']}: "
+        f"{value_str}{uom}{ref_str}{flag_str}"
     )
 
 
@@ -67,6 +93,21 @@ def run(config: dict) -> None:
     features_dir = config["FEATURES_DIR"]
     hosp_dir = os.path.join(mimic_dir, "hosp")
     registry_path = config.get("HASH_REGISTRY_PATH", "")
+
+    # Parse LAB_ADMISSION_WINDOW: int (hours) or "full"
+    raw_window = config.get("LAB_ADMISSION_WINDOW", 24)
+    if str(raw_window).strip().lower() == "full":
+        lab_window_hours: int | None = None  # sentinel: use dischtime
+    else:
+        try:
+            lab_window_hours = int(raw_window)
+            if lab_window_hours <= 0:
+                raise ValueError(f"LAB_ADMISSION_WINDOW must be positive, got {lab_window_hours}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"LAB_ADMISSION_WINDOW must be a positive integer or 'full', "
+                f"got {raw_window!r}"
+            ) from exc
 
     # ------------------------------------------------------------------ #
     # Hash-based skip check
@@ -113,6 +154,13 @@ def run(config: dict) -> None:
         parse_dates=["admittime", "dischtime"],
         dtype={"subject_id": int, "hadm_id": int},
     )
+
+    if lab_window_hours is not None:
+        logger.info(
+            "Lab admission window: first %d hours from admittime", lab_window_hours
+        )
+    else:
+        logger.info("Lab admission window: full admission (admittime → dischtime)")
 
     # ------------------------------------------------------------------ #
     # Stream labevents in chunks, applying per-chunk filters
@@ -184,10 +232,20 @@ def run(config: dict) -> None:
         on=["subject_id", "hadm_id"],
         how="inner",
     )
-    labs = labs[
-        (labs["charttime"] >= labs["admittime"]) &
-        (labs["charttime"] <= labs["dischtime"])
-    ]
+
+    # Lower bound: charttime >= admittime (always)
+    window_mask = labs["charttime"] >= labs["admittime"]
+
+    # Upper bound: configurable
+    if lab_window_hours is None:
+        # "full" — use entire admission window
+        window_mask &= labs["charttime"] <= labs["dischtime"]
+    else:
+        # Integer hours — cut off at admittime + window
+        cutoff = labs["admittime"] + pd.to_timedelta(lab_window_hours, unit="h")
+        window_mask &= labs["charttime"] <= cutoff
+
+    labs = labs[window_mask]
 
     # ------------------------------------------------------------------ #
     # Build chronological text line per event

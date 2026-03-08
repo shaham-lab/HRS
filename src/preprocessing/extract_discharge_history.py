@@ -3,7 +3,17 @@ extract_discharge_history.py – Prior-visit discharge summary text.
 
 For each admission, retrieves discharge notes from all prior admissions of
 the same patient (strictly before current admittime). Text cleaning removes
-everything before the first "Allergies:" marker.
+everything before the first "Allergies:" marker. Notes are concatenated with
+dated header lines.
+
+Output format:
+    Prior Discharge Summary (YYYY-MM-DD):
+    Allergies: Penicillin
+    [clinical note body...]
+
+    Prior Discharge Summary (YYYY-MM-DD):
+    Allergies: None known
+    [clinical note body...]
 
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
@@ -155,10 +165,16 @@ def run(config: dict) -> None:
 
     discharge_text = (
         prior.sort_values("note_admittime")
-        .groupby(["subject_id", "hadm_id"])["text"]
-        .apply(lambda note_texts: "\n\n---\n\n".join(n for n in note_texts if n))
+        .assign(
+            _header=lambda df: df["note_admittime"].apply(
+                lambda t: f"Prior Discharge Summary ({pd.to_datetime(t).strftime('%Y-%m-%d')}):"
+            ),
+            _entry=lambda df: df["_header"] + "\n" + df["text"],
+        )
+        .groupby(["subject_id", "hadm_id"])["_entry"]
+        .apply(lambda entries: "\n\n".join(e for e in entries if e))
         .reset_index()
-        .rename(columns={"text": "discharge_history_text"})
+        .rename(columns={"_entry": "discharge_history_text"})
     )
 
     out_df = admissions[["subject_id", "hadm_id"]].merge(
