@@ -235,7 +235,7 @@ derivation.
   ```
   - `valuenum` is used when available (formatted to 2 decimal places); otherwise
     the text `value` field is used.
-  - Reference range is omitted when either bound is null.
+  - Reference range is omitted when either bound is null
   - `[ABNORMAL]` is appended only when `flag = "abnormal"`.
   - `[STAT]` is appended only when `priority = "STAT"`.
 
