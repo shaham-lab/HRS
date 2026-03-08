@@ -21,7 +21,7 @@ For instructions on how to run the pipeline, see
 ### Split strategy
 
 Patients (identified by `subject_id`) are split into **train / dev / test**
-(70 / 15 / 15) using a stratified split with a **fixed random seed of 42**.
+(80 / 10 / 10) using a stratified split with a **fixed random seed of 42**.
 
 **Patient-level splitting** is used — not admission-level — to prevent data
 leakage: a single patient may have multiple admissions, and if these were
@@ -63,7 +63,7 @@ Every `hadm_id` inherits the split label of its `subject_id`.
 |----------|-------|
 | Unit of splitting | `subject_id` (patient level, not admission level) |
 | Stratification variable | Binary — `1` if any of the patient's admissions has `hospital_expire_flag > 0`, else `0` |
-| Split ratios | Configurable via `SPLIT_TRAIN`, `SPLIT_DEV`, `SPLIT_TEST` (default 70/15/15) |
+| Split ratios | Configurable via `SPLIT_TRAIN`, `SPLIT_DEV`, `SPLIT_TEST` (default 80/10/10) |
 | Random seed | 42 (fixed for reproducibility) |
 | Output | `data_splits.parquet` — one row per `hadm_id` with a `split` column (`train`/`dev`/`test`) |
 
@@ -76,6 +76,45 @@ out split, creating leakage.
 receive `NaN` for Y2 (they cannot be readmitted). Including them in a joint
 stratification on Y1 and Y2 would create degenerate strata, so only Y1 is
 used for stratification.
+
+---
+
+## 3a. Identifier handling
+
+### Identifier hierarchy
+
+```
+subject_id  (patient)
+  └── hadm_id  (hospital admission)
+        └── stay_id  (ICU stay within that admission)
+```
+
+### stay_id
+
+`stay_id` identifies a single ICU stay within an `hadm_id`. It appears in ICU
+module tables: `icustays`, `chartevents`, `inputevents`, `outputevents`,
+`procedureevents`, `datetimeevents`. In the current pipeline, `stay_id` is only
+encountered indirectly when `chartevents` is used as a height/weight fallback in
+`extract_demographics`; the join there is performed via `hadm_id` so `stay_id`
+does not need to be handled explicitly. `stay_id` becomes critical in the MDP
+phase for modelling clinical interventions.
+
+### Missing hadm_id
+
+Several MIMIC-IV tables contain records with null `hadm_id`. This is most
+significant in `labevents` (10–20% of rows) and also affects `note` and
+`chartevents`. The handling strategy is configurable via `HADM_LINKAGE_STRATEGY`
+in `preprocessing.yaml`:
+
+- `"drop"` (default): Records with null `hadm_id` are excluded. Each module
+  logs the count and percentage of records dropped.
+- `"link"`: For records with a valid `subject_id` and `charttime` but null
+  `hadm_id`, the pipeline attempts to assign an `hadm_id` by matching
+  `charttime` against the patient's admission windows within a tolerance of
+  `HADM_LINKAGE_TOLERANCE_HOURS` hours (default 1). If exactly one window
+  matches, `hadm_id` is assigned. If multiple match, the closest is used. If
+  none match, the record is dropped. All outcomes are logged and saved to
+  `hadm_linkage_stats.json`.
 
 ---
 
@@ -154,8 +193,22 @@ derivation.
   to obtain `long_title`.
 - **Leakage control:** Only diagnoses from admissions where
   `admittime < current admittime` (strictly prior visits) are included.
-- **Transformation:** `long_title` values from all prior admissions are
-  concatenated with `|` as separator, sorted by admission time.
+- **Transformation:** All diagnoses from prior admissions are formatted as a
+  structured text block, ordered chronologically by admission date. Each visit
+  is rendered as a dated section header followed by one diagnosis `long_title`
+  per line. The format is:
+
+  ```
+  Past Diagnoses:
+
+  Visit (YYYY-MM-DD):
+  {long_title}
+  {long_title}
+
+  Visit (YYYY-MM-DD):
+  {long_title}
+  ```
+
 - First-time admissions (no prior visits) produce an empty string.
 
 ---
@@ -171,8 +224,17 @@ derivation.
   `admittime < current admittime` (strictly prior visits) are included.
 - **Text cleaning:** Everything before the first `"Allergies:"` marker is
   removed from each note.
-- Multiple prior discharge notes are concatenated in chronological order with
-  `\n\n---\n\n` as separator.
+- Multiple prior discharge notes are concatenated in chronological order. Each
+  note is prefixed with a dated header line. The format is:
+
+  ```
+  Prior Discharge Summary (YYYY-MM-DD):
+  [cleaned note text]
+
+  Prior Discharge Summary (YYYY-MM-DD):
+  [cleaned note text]
+  ```
+
 - First-time admissions (no prior discharge notes) produce an empty string.
 
 ---
@@ -212,7 +274,7 @@ derivation.
 
 ---
 
-### F6 — Lab events (`extract_labs.py`)
+### F6–F18 — Lab events (`extract_labs.py`)
 
 **Output:** Long-format parquet — one row per lab event.
 
@@ -229,25 +291,30 @@ derivation.
     removed.
   - Admission window filter: `admittime ≤ charttime ≤ dischtime`
 - **Streaming:** `labevents` is read in chunks of 500,000 rows to manage memory.
+- **Lab groups:** `extract_labs.py` produces a single long-format parquet
+  covering all 13 lab groups. The 13 groups are defined by `(fluid × category)`
+  combinations derived from `d_labitems` and stored in `lab_panel_config.yaml`
+  (generated by `build_lab_panel_config.py`). At embedding time, each group is
+  embedded independently, producing 13 embedding parquets:
+  `lab_{group_name}_embeddings.parquet`.
 - **Text line format per event:**
   ```
-  [HH:MM] {label} ({fluid}/{category}): {value} {unit} (ref: lower-upper) [ABNORMAL] [STAT]
+  [HH:MM] {label}: {value} {unit} (ref: lower-upper) [ABNORMAL]
   ```
-  - `valuenum` is used when available (formatted to 2 decimal places); otherwise
-    the text `value` field is used.
-  - Reference range is omitted when either bound is null
-  - `[ABNORMAL]` is appended only when `flag = "abnormal"`.
-  - `[STAT]` is appended only when `priority = "STAT"`.
+  - `[HH:MM]` = elapsed time since `admittime` (e.g. `[02:14]` = 2 hours and
+    14 minutes after admission)
+  - `{value}` = `valuenum` formatted to 2 decimal places if available,
+    otherwise the text `value` field
+  - `(ref: lower-upper)` is omitted when either bound is null
+  - `[ABNORMAL]` is appended when `flag == "abnormal"` **or** when `valuenum`
+    is not null and falls outside `[ref_range_lower, ref_range_upper]`
 
-**Note:** Lab embedding is intentionally deferred to training time. The MDP
-agent selects a subset of `itemid` values, their text lines are concatenated
-chronologically, and passed to the language model for encoding. `labs_features.parquet`
-is excluded from `final_cdss_dataset.parquet` and joined dynamically at
-training/inference time.
+**Note:** `labs_features.parquet` is excluded from `final_cdss_dataset.parquet`
+as it is superseded by the 13 per-group embedding parquets.
 
 ---
 
-### F7 — Radiology notes (`extract_radiology.py`)
+### F19 — Radiology notes (`extract_radiology.py`)
 
 **Output column:** `radiology_text` — a single string per admission.
 
@@ -291,12 +358,17 @@ training/inference time.
 
 | Property | Value |
 |----------|-------|
-| Model | Configurable via `BERT_MODEL_NAME` (default: `emilyalsentzer/Bio_ClinicalBERT`) |
-| Embedding method | `[CLS]` token from the final hidden state |
+| Model | Configurable via `BERT_MODEL_NAME` (default: `Simonlee711/Clinical_ModernBERT`) |
+| Embedding method | Mean pooling over all non-padding content tokens from the final hidden layer |
 | Null/empty text | Zero vector of the same dimensionality as the model's hidden size |
-| Truncation | Inputs are truncated to `BERT_MAX_LENGTH` tokens (default: 512) |
+| Truncation | Inputs are truncated to `BERT_MAX_LENGTH` tokens (default: 8192) |
 | Batch size | `BERT_BATCH_SIZE` samples per inference call (default: 32) |
 | Device | `BERT_DEVICE` (`"cuda"` or `"cpu"`); falls back to CPU with a warning if CUDA is unavailable |
+
+> Mean pooling is used because Clinical_ModernBERT is deployed as a frozen feature extractor,
+> not fine-tuned end-to-end. Mean pooling ensures every content token — every lab measurement,
+> diagnostic term, and clinical observation — contributes equally to the embedding. This is
+> especially important for long multi-visit and multi-measurement texts (F2, F3, F6–F18, F19).
 
 **Features embedded:**
 
@@ -307,9 +379,26 @@ training/inference time.
 | `triage_features.parquet` | `triage_text` | `triage_embeddings.parquet` | `triage_embedding` |
 | `chief_complaint_features.parquet` | `chief_complaint_text` | `chief_complaint_embeddings.parquet` | `chief_complaint_embedding` |
 | `radiology_features.parquet` | `radiology_text` | `radiology_embeddings.parquet` | `radiology_embedding` |
+| `labs_features.parquet` (filtered to group) | `lab_text_line` (concatenated per admission per group) | `lab_blood_gas_embeddings.parquet` | `lab_blood_gas_embedding` |
+| … | … | `lab_blood_chemistry_embeddings.parquet` | `lab_blood_chemistry_embedding` |
+| … | … | `lab_blood_hematology_embeddings.parquet` | `lab_blood_hematology_embedding` |
+| … | … | `lab_urine_chemistry_embeddings.parquet` | `lab_urine_chemistry_embedding` |
+| … | … | `lab_urine_hematology_embeddings.parquet` | `lab_urine_hematology_embedding` |
+| … | … | `lab_other_body_fluid_chemistry_embeddings.parquet` | `lab_other_body_fluid_chemistry_embedding` |
+| … | … | `lab_other_body_fluid_hematology_embeddings.parquet` | `lab_other_body_fluid_hematology_embedding` |
+| … | … | `lab_ascites_embeddings.parquet` | `lab_ascites_embedding` |
+| … | … | `lab_pleural_embeddings.parquet` | `lab_pleural_embedding` |
+| … | … | `lab_csf_embeddings.parquet` | `lab_csf_embedding` |
+| … | … | `lab_bone_marrow_embeddings.parquet` | `lab_bone_marrow_embedding` |
+| … | … | `lab_joint_fluid_embeddings.parquet` | `lab_joint_fluid_embedding` |
+| … | … | `lab_stool_embeddings.parquet` | `lab_stool_embedding` |
 
-Lab features (F6) are **not embedded here** — they are in long format and
-embedded dynamically at training time.
+> Lab group embedding parquets are included in `final_cdss_dataset.parquet` as 13 independent
+> columns, discovered and joined automatically by `combine_dataset.py`. Lab group embedding
+> columns are always a 768-float array — admissions with no events in a given group carry a
+> zero vector, consistent with the empty-text convention used throughout the pipeline.
+> `labs_features.parquet` (the long-format raw event data) remains excluded from the final
+> dataset as it is superseded by the embedding parquets.
 
 ---
 

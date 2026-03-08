@@ -2,8 +2,11 @@
 embed_features.py – BERT sentence embeddings for all text features.
 
 Loads text parquets from FEATURES_DIR, embeds each text column using
-the [CLS] token of the configured BERT model, and saves embedding parquets
-to EMBEDDINGS_DIR.
+mean pooling over all non-padding content tokens from the configured BERT
+model, and saves embedding parquets to EMBEDDINGS_DIR.
+
+Also reads labs_features.parquet (long format) and builds 13 per-lab-group
+embedding parquets, one per group defined in lab_panel_config.yaml.
 
 Device selection:
   - Uses BERT_DEVICE from config.
@@ -14,6 +17,8 @@ Empty / null text → zero vector of the same embedding dimension.
 Expected config keys:
     FEATURES_DIR      – directory containing raw text feature parquets
     EMBEDDINGS_DIR    – output directory for embedding parquets
+    CLASSIFICATIONS_DIR – directory containing lab_panel_config.yaml and
+                          data_splits.parquet
     BERT_MODEL_NAME   – HuggingFace model identifier
     BERT_MAX_LENGTH   – maximum token length
     BERT_BATCH_SIZE   – batch size for embedding inference
@@ -85,7 +90,7 @@ def _embed_texts(
     max_length: int,
     batch_size: int,
 ) -> np.ndarray:
-    """Return a (N, hidden_size) array of [CLS] embeddings."""
+    """Return a (N, hidden_size) array using mean pooling over content tokens."""
     import torch  # type: ignore
 
     model.eval()
@@ -112,14 +117,21 @@ def _embed_texts(
         with torch.no_grad():
             outputs = model(**encoded)
 
-        cls_embeddings = outputs.last_hidden_state[:, 0, :].cpu().numpy()
+        # Mean pooling over all non-padding content tokens in the final hidden layer
+        attention_mask = encoded["attention_mask"]
+        token_embeddings = outputs.last_hidden_state  # (batch, seq_len, hidden)
+        # Expand mask to match embedding dimension
+        mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
+        sum_embeddings = torch.sum(token_embeddings * mask_expanded, dim=1)
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
+        mean_embeddings = (sum_embeddings / sum_mask).cpu().numpy()
 
         # Zero-out embeddings for originally empty texts
         for i, is_empty in enumerate(empty_flags):
             if is_empty:
-                cls_embeddings[i] = np.zeros_like(cls_embeddings[i])
+                mean_embeddings[i] = np.zeros_like(mean_embeddings[i])
 
-        all_embeddings.append(cls_embeddings)
+        all_embeddings.append(mean_embeddings)
 
         if (start // batch_size + 1) % 10 == 0:
             logger.info(
@@ -134,6 +146,7 @@ def run(config: dict) -> None:
     required_keys = [
         "FEATURES_DIR",
         "EMBEDDINGS_DIR",
+        "CLASSIFICATIONS_DIR",
         "BERT_MODEL_NAME",
         "BERT_MAX_LENGTH",
         "BERT_BATCH_SIZE",
@@ -145,6 +158,7 @@ def run(config: dict) -> None:
 
     features_dir = str(config["FEATURES_DIR"])
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
+    classifications_dir = str(config["CLASSIFICATIONS_DIR"])
     model_name = str(config["BERT_MODEL_NAME"])
     max_length = int(config["BERT_MAX_LENGTH"])
     batch_size = int(config["BERT_BATCH_SIZE"])
@@ -170,7 +184,7 @@ def run(config: dict) -> None:
     os.makedirs(embeddings_dir, exist_ok=True)
 
     # ------------------------------------------------------------------ #
-    # Embed each text feature file
+    # Embed each standard text feature file
     # ------------------------------------------------------------------ #
     for (
         input_filename,
@@ -207,4 +221,89 @@ def run(config: dict) -> None:
         logger.info(
             "Saved embeddings to %s  (shape=%s, embedding_dim=%d)",
             output_path, out_df.shape, embeddings.shape[1],
+        )
+
+    # ------------------------------------------------------------------ #
+    # Embed 13 lab group features using lab_panel_config.yaml
+    # ------------------------------------------------------------------ #
+    lab_panel_config_path = os.path.join(classifications_dir, "lab_panel_config.yaml")
+    if not os.path.exists(lab_panel_config_path):
+        logger.warning(
+            "lab_panel_config.yaml not found at %s — lab group embeddings skipped. "
+            "Run build_lab_panel_config.py first.",
+            lab_panel_config_path,
+        )
+        return
+
+    try:
+        import yaml  # type: ignore
+    except ImportError as exc:
+        raise ImportError(
+            "The 'pyyaml' package is required for reading lab_panel_config.yaml. "
+            "Install it with: pip install pyyaml"
+        ) from exc
+
+    with open(lab_panel_config_path, encoding="utf-8") as fh:
+        lab_panel_config: dict[str, list[int]] = yaml.safe_load(fh)
+
+    labs_path = os.path.join(features_dir, "labs_features.parquet")
+    if not os.path.exists(labs_path):
+        logger.warning(
+            "labs_features.parquet not found at %s — lab group embeddings skipped.",
+            labs_path,
+        )
+        return
+
+    logger.info("Loading labs_features.parquet for lab group embeddings…")
+    labs_df = pd.read_parquet(labs_path)
+
+    splits_path = os.path.join(classifications_dir, "data_splits.parquet")
+    if not os.path.exists(splits_path):
+        logger.warning(
+            "data_splits.parquet not found at %s — lab group embeddings skipped. "
+            "Run create_splits.py first.",
+            splits_path,
+        )
+        return
+
+    splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
+
+    for group_name, itemids in lab_panel_config.items():
+        output_filename = f"lab_{group_name}_embeddings.parquet"
+        output_path = os.path.join(embeddings_dir, output_filename)
+        embedding_col = f"lab_{group_name}_embedding"
+
+        logger.info("Embedding lab group '%s' (%d itemids)…", group_name, len(itemids))
+
+        # Filter to this group's itemids and aggregate per admission
+        group_df = labs_df[labs_df["itemid"].isin(itemids)]
+        if not group_df.empty and "charttime" in group_df.columns:
+            group_text = (
+                group_df.sort_values("charttime")
+                .groupby(["subject_id", "hadm_id"])["lab_text_line"]
+                .apply(lambda lines: "\n".join(lines))
+                .reset_index()
+                .rename(columns={"lab_text_line": "text"})
+            )
+        else:
+            group_text = pd.DataFrame(columns=["subject_id", "hadm_id", "text"])
+
+        # Left-join to full admission universe so admissions with no events
+        # in this group get an empty string → zero vector
+        group_text = splits_df.merge(
+            group_text, on=["subject_id", "hadm_id"], how="left"
+        )
+        group_text["text"] = group_text["text"].fillna("")
+
+        texts_group: list[str] = group_text["text"].tolist()
+        embeddings_group = _embed_texts(
+            texts_group, tokenizer, model, device, max_length, batch_size
+        )
+
+        out_df = group_text[["subject_id", "hadm_id"]].copy()
+        out_df[embedding_col] = list(embeddings_group)
+        out_df.to_parquet(output_path, index=False)
+        logger.info(
+            "Saved %s embeddings to %s  (shape=%s, embedding_dim=%d)",
+            group_name, output_path, out_df.shape, embeddings_group.shape[1],
         )

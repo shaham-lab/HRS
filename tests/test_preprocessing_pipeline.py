@@ -780,5 +780,347 @@ class TestExtractTriageAndComplaint(unittest.TestCase):
             })
 
 
+class TestLabTextLineFormat(unittest.TestCase):
+    """Tests for the new lab text line format in extract_labs.py and build_lab_text_lines.py."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+
+    def _make_row(self, **kwargs):
+        """Create a minimal lab event row dict with defaults."""
+        defaults = {
+            "charttime": pd.Timestamp("2020-01-01 02:14:00"),
+            "admittime": pd.Timestamp("2020-01-01 00:00:00"),
+            "label": "Sodium",
+            "value": "135",
+            "valuenum": 135.0,
+            "valueuom": "mEq/L",
+            "ref_range_lower": 135.0,
+            "ref_range_upper": 145.0,
+            "flag": None,
+            "fluid": "Blood",
+            "category": "Chemistry",
+        }
+        defaults.update(kwargs)
+        return pd.Series(defaults)
+
+    def test_elapsed_time_format(self):
+        """[HH:MM] shows elapsed time since admittime, not clock time."""
+        import extract_labs
+        row = self._make_row(
+            charttime=pd.Timestamp("2020-01-01 02:14:00"),
+            admittime=pd.Timestamp("2020-01-01 00:00:00"),
+        )
+        result = extract_labs._build_lab_text_line(row)
+        self.assertTrue(result.startswith("[02:14]"), f"Expected [02:14] prefix, got: {result}")
+
+    def test_no_fluid_category_in_line(self):
+        """New format does not include (fluid/category) in the text line."""
+        import extract_labs
+        row = self._make_row()
+        result = extract_labs._build_lab_text_line(row)
+        self.assertNotIn("Blood/Chemistry", result)
+        self.assertNotIn("(Blood/Chemistry)", result)
+
+    def test_no_stat_flag_in_line(self):
+        """New format does not include [STAT] even when priority is STAT."""
+        import extract_labs
+        row = self._make_row(priority="STAT")
+        result = extract_labs._build_lab_text_line(row)
+        self.assertNotIn("[STAT]", result)
+
+    def test_abnormal_flag_from_flag_column(self):
+        """[ABNORMAL] is appended when flag == 'abnormal'."""
+        import extract_labs
+        row = self._make_row(flag="abnormal", valuenum=140.0)
+        result = extract_labs._build_lab_text_line(row)
+        self.assertIn("[ABNORMAL]", result)
+
+    def test_abnormal_flag_from_range_below(self):
+        """[ABNORMAL] is appended when valuenum is below ref_range_lower."""
+        import extract_labs
+        row = self._make_row(
+            flag=None,
+            valuenum=120.0,
+            ref_range_lower=135.0,
+            ref_range_upper=145.0,
+        )
+        result = extract_labs._build_lab_text_line(row)
+        self.assertIn("[ABNORMAL]", result)
+
+    def test_abnormal_flag_from_range_above(self):
+        """[ABNORMAL] is appended when valuenum is above ref_range_upper."""
+        import extract_labs
+        row = self._make_row(
+            flag=None,
+            valuenum=150.0,
+            ref_range_lower=135.0,
+            ref_range_upper=145.0,
+        )
+        result = extract_labs._build_lab_text_line(row)
+        self.assertIn("[ABNORMAL]", result)
+
+    def test_normal_value_no_abnormal_flag(self):
+        """[ABNORMAL] is NOT appended when valuenum is within reference range."""
+        import extract_labs
+        row = self._make_row(
+            flag=None,
+            valuenum=140.0,
+            ref_range_lower=135.0,
+            ref_range_upper=145.0,
+        )
+        result = extract_labs._build_lab_text_line(row)
+        self.assertNotIn("[ABNORMAL]", result)
+
+    def test_ref_range_included_when_both_present(self):
+        """Reference range (ref: lower-upper) is included when both bounds present."""
+        import extract_labs
+        row = self._make_row(ref_range_lower=135.0, ref_range_upper=145.0)
+        result = extract_labs._build_lab_text_line(row)
+        self.assertIn("(ref:", result)
+
+    def test_ref_range_omitted_when_null(self):
+        """Reference range is omitted when either bound is null."""
+        import extract_labs
+        row = self._make_row(ref_range_lower=None, ref_range_upper=None)
+        result = extract_labs._build_lab_text_line(row)
+        self.assertNotIn("(ref:", result)
+
+    def test_value_format_numeric(self):
+        """Numeric value is formatted to 2 decimal places."""
+        import extract_labs
+        row = self._make_row(valuenum=135.0)
+        result = extract_labs._build_lab_text_line(row)
+        self.assertIn("135.00", result)
+
+    def test_text_value_fallback(self):
+        """Text value field is used when valuenum is null."""
+        import extract_labs
+        row = self._make_row(valuenum=None, value="POSITIVE")
+        result = extract_labs._build_lab_text_line(row)
+        self.assertIn("POSITIVE", result)
+
+
+class TestBuildLabTextLines(unittest.TestCase):
+    """Tests for build_lab_text_lines.py module."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+
+    def _make_df(self, **kwargs):
+        """Create a minimal lab events DataFrame."""
+        defaults = {
+            "charttime": [pd.Timestamp("2020-01-01 02:14:00")],
+            "admittime": [pd.Timestamp("2020-01-01 00:00:00")],
+            "label": ["Sodium"],
+            "value": ["135"],
+            "valuenum": [135.0],
+            "valueuom": ["mEq/L"],
+            "ref_range_lower": [135.0],
+            "ref_range_upper": [145.0],
+            "flag": [None],
+        }
+        defaults.update(kwargs)
+        return pd.DataFrame(defaults)
+
+    def test_series_elapsed_time(self):
+        """build_lab_text_line_series returns correct elapsed time."""
+        import build_lab_text_lines
+        df = self._make_df()
+        result = build_lab_text_lines.build_lab_text_line_series(df)
+        self.assertTrue(result.iloc[0].startswith("[02:14]"))
+
+    def test_series_abnormal_from_range(self):
+        """build_lab_text_line_series marks ABNORMAL when out of range."""
+        import build_lab_text_lines
+        df = self._make_df(valuenum=[120.0])
+        result = build_lab_text_lines.build_lab_text_line_series(df)
+        self.assertIn("[ABNORMAL]", result.iloc[0])
+
+    def test_row_function_matches_series(self):
+        """build_lab_text_line_row and series produce identical output."""
+        import build_lab_text_lines
+        df = self._make_df()
+        series_result = build_lab_text_lines.build_lab_text_line_series(df).iloc[0]
+        row_result = build_lab_text_lines.build_lab_text_line_row(df.iloc[0])
+        self.assertEqual(series_result, row_result)
+
+
+class TestBuildLabPanelConfig(unittest.TestCase):
+    """Tests for build_lab_panel_config.py."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mimic_dir = os.path.join(self.tmp, "mimic")
+        self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
+        os.makedirs(self.hosp_dir)
+        self.classifications_dir = os.path.join(self.tmp, "classifications")
+
+        # Minimal d_labitems covering multiple groups
+        d_labitems = pd.DataFrame({
+            "itemid": [51001, 51002, 51003, 51004, 51005, 51006, 51007],
+            "label": ["Sodium", "pO2", "WBC", "Urine Na", "Glucose urine",
+                      "Ascites Protein", "Junk"],
+            "fluid": ["Blood", "Blood", "Blood", "Urine", "Urine",
+                      "Ascites", "I"],
+            "category": ["Chemistry", "Blood Gas", "Hematology",
+                         "Chemistry", "Chemistry", "Chemistry", "Chemistry"],
+        })
+        d_labitems.to_csv(
+            os.path.join(self.hosp_dir, "d_labitems.csv"), index=False
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_groups_created(self):
+        """lab_panel_config.yaml is created with expected groups."""
+        import yaml
+        import build_lab_panel_config
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "CLASSIFICATIONS_DIR": self.classifications_dir,
+        }
+        build_lab_panel_config.run(config)
+        out_path = os.path.join(self.classifications_dir, "lab_panel_config.yaml")
+        self.assertTrue(os.path.exists(out_path))
+        with open(out_path) as f:
+            cfg = yaml.safe_load(f)
+        self.assertIn("blood_chemistry", cfg)
+        self.assertIn("blood_gas", cfg)
+        self.assertIn("blood_hematology", cfg)
+        self.assertIn("urine_chemistry", cfg)
+        self.assertIn("ascites", cfg)
+
+    def test_artefact_rows_excluded(self):
+        """Rows with fluid in ['I', 'Q', 'fluid'] are excluded."""
+        import yaml
+        import build_lab_panel_config
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "CLASSIFICATIONS_DIR": self.classifications_dir,
+        }
+        build_lab_panel_config.run(config)
+        out_path = os.path.join(self.classifications_dir, "lab_panel_config.yaml")
+        with open(out_path) as f:
+            cfg = yaml.safe_load(f)
+        # itemid 51007 has fluid='I' → should be excluded
+        all_itemids = [iid for items in cfg.values() for iid in items]
+        self.assertNotIn(51007, all_itemids)
+
+    def test_itemids_sorted(self):
+        """Itemids within each group are sorted for determinism."""
+        import yaml
+        import build_lab_panel_config
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "CLASSIFICATIONS_DIR": self.classifications_dir,
+        }
+        build_lab_panel_config.run(config)
+        out_path = os.path.join(self.classifications_dir, "lab_panel_config.yaml")
+        with open(out_path) as f:
+            cfg = yaml.safe_load(f)
+        for group_name, items in cfg.items():
+            self.assertEqual(items, sorted(items), f"Group {group_name} itemids not sorted")
+
+    def test_missing_config_key_raises(self):
+        """Missing required config key raises KeyError."""
+        import build_lab_panel_config
+        with self.assertRaises(KeyError):
+            build_lab_panel_config.run({"MIMIC_DATA_DIR": self.mimic_dir})
+
+
+class TestExtractDemographicsHadmLinkage(unittest.TestCase):
+    """Tests for the new HADM_LINKAGE_STRATEGY support in extract_demographics.py."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mimic_dir = os.path.join(self.tmp, "mimic")
+        self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
+        self.icu_dir = os.path.join(self.mimic_dir, "icu")
+        os.makedirs(self.hosp_dir)
+        os.makedirs(self.icu_dir)
+        self.features_dir = os.path.join(self.tmp, "features")
+        self.classifications_dir = os.path.join(self.tmp, "classifications")
+        os.makedirs(self.classifications_dir)
+
+        # Minimal admissions
+        admissions = pd.DataFrame({
+            "subject_id": [1, 2],
+            "hadm_id": [10, 20],
+            "admittime": pd.to_datetime(["2020-01-01", "2020-06-01"]),
+        })
+        admissions.to_csv(os.path.join(self.hosp_dir, "admissions.csv"), index=False)
+
+        # Minimal patients
+        patients = pd.DataFrame({
+            "subject_id": [1, 2],
+            "gender": ["M", "F"],
+            "anchor_age": [45, 60],
+            "anchor_year": [2019, 2020],
+        })
+        patients.to_csv(os.path.join(self.hosp_dir, "patients.csv"), index=False)
+
+        # Splits parquet
+        splits = pd.DataFrame({
+            "subject_id": [1, 2],
+            "hadm_id": [10, 20],
+            "split": ["train", "dev"],
+        })
+        splits.to_parquet(os.path.join(self.classifications_dir, "data_splits.parquet"))
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def _base_config(self):
+        return {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+            "CLASSIFICATIONS_DIR": self.classifications_dir,
+        }
+
+    def test_hadm_linkage_stats_written(self):
+        """hadm_linkage_stats.json is created after running extract_demographics."""
+        import extract_demographics
+        extract_demographics.run(self._base_config())
+        stats_path = os.path.join(self.classifications_dir, "hadm_linkage_stats.json")
+        self.assertTrue(os.path.exists(stats_path))
+        import json
+        with open(stats_path) as f:
+            stats = json.load(f)
+        self.assertIn("extract_demographics", stats)
+        self.assertIn("chartevents", stats["extract_demographics"])
+
+    def test_hadm_linkage_strategy_config_keys(self):
+        """HADM_LINKAGE_STRATEGY and HADM_LINKAGE_TOLERANCE_HOURS are accepted."""
+        import extract_demographics
+        config = self._base_config()
+        config["HADM_LINKAGE_STRATEGY"] = "drop"
+        config["HADM_LINKAGE_TOLERANCE_HOURS"] = 2
+        # Should not raise
+        extract_demographics.run(config)
+
+    def test_hadm_linkage_stats_merged(self):
+        """Running extract_demographics twice merges stats, not overwrites."""
+        import extract_demographics, json
+        extract_demographics.run(self._base_config())
+        stats_path = os.path.join(self.classifications_dir, "hadm_linkage_stats.json")
+        # Inject an extra key to simulate another module having written stats
+        with open(stats_path) as f:
+            existing = json.load(f)
+        existing["other_module"] = {"some_table": {"total_null_hadm": 99}}
+        with open(stats_path, "w") as f:
+            json.dump(existing, f)
+        # Run again
+        extract_demographics.run(self._base_config())
+        with open(stats_path) as f:
+            merged = json.load(f)
+        # Both keys should be present
+        self.assertIn("extract_demographics", merged)
+        self.assertIn("other_module", merged)
+
+
 if __name__ == "__main__":
     unittest.main()
