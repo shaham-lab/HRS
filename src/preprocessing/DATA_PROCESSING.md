@@ -227,7 +227,7 @@ derivation.
   - Unmapped `itemid` values (not present in `d_labitems`) are removed.
   - `d_labitems` artefact rows with `fluid` in `["I", "Q", "fluid"]` are
     removed.
-  - Admission window filter: `admittime ≤ charttime ≤ dischtime`.
+  - Admission window filter: `admittime ≤ charttime ≤ dischtime`
 - **Streaming:** `labevents` is read in chunks of 500,000 rows to manage memory.
 - **Text line format per event:**
   ```
