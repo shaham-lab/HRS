@@ -4,13 +4,18 @@ extract_labs.py – Lab events (current admission, long format).
 Outputs one row per lab event per admission, formatted as a chronological
 natural-language text line. No aggregation, no pivoting, no wide format.
 
-Lab embedding is intentionally deferred to training/inference time. The MDP
-agent selects a subset of itemids, their text lines are concatenated in
-chronological order, and passed to the language model for encoding.
+The admission window is controlled by LAB_ADMISSION_WINDOW:
+  - Integer N: include events in [admittime, admittime + N hours]
+  - "full": include all events in [admittime, dischtime]
+  Default: 24 hours.
 
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
     FEATURES_DIR    – output directory for feature parquets
+
+Optional config keys:
+    LAB_ADMISSION_WINDOW – hours from admittime to include (default 24),
+                           or "full" to include entire admission
 """
 
 import logging
@@ -89,6 +94,21 @@ def run(config: dict) -> None:
     hosp_dir = os.path.join(mimic_dir, "hosp")
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
+    # Parse LAB_ADMISSION_WINDOW: int (hours) or "full"
+    raw_window = config.get("LAB_ADMISSION_WINDOW", 24)
+    if str(raw_window).strip().lower() == "full":
+        lab_window_hours: int | None = None  # sentinel: use dischtime
+    else:
+        try:
+            lab_window_hours = int(raw_window)
+            if lab_window_hours <= 0:
+                raise ValueError(f"LAB_ADMISSION_WINDOW must be positive, got {lab_window_hours}")
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                f"LAB_ADMISSION_WINDOW must be a positive integer or 'full', "
+                f"got {raw_window!r}"
+            ) from exc
+
     # ------------------------------------------------------------------ #
     # Hash-based skip check
     # ------------------------------------------------------------------ #
@@ -134,6 +154,13 @@ def run(config: dict) -> None:
         parse_dates=["admittime", "dischtime"],
         dtype={"subject_id": int, "hadm_id": int},
     )
+
+    if lab_window_hours is not None:
+        logger.info(
+            "Lab admission window: first %d hours from admittime", lab_window_hours
+        )
+    else:
+        logger.info("Lab admission window: full admission (admittime → dischtime)")
 
     # ------------------------------------------------------------------ #
     # Stream labevents in chunks, applying per-chunk filters
@@ -205,10 +232,20 @@ def run(config: dict) -> None:
         on=["subject_id", "hadm_id"],
         how="inner",
     )
-    labs = labs[
-        (labs["charttime"] >= labs["admittime"]) &
-        (labs["charttime"] <= labs["dischtime"])
-    ]
+
+    # Lower bound: charttime >= admittime (always)
+    window_mask = labs["charttime"] >= labs["admittime"]
+
+    # Upper bound: configurable
+    if lab_window_hours is None:
+        # "full" — use entire admission window
+        window_mask &= labs["charttime"] <= labs["dischtime"]
+    else:
+        # Integer hours — cut off at admittime + window
+        cutoff = labs["admittime"] + pd.to_timedelta(lab_window_hours, unit="h")
+        window_mask &= labs["charttime"] <= cutoff
+
+    labs = labs[window_mask]
 
     # ------------------------------------------------------------------ #
     # Build chronological text line per event

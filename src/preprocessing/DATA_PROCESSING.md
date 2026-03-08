@@ -289,7 +289,9 @@ derivation.
   - Unmapped `itemid` values (not present in `d_labitems`) are removed.
   - `d_labitems` artefact rows with `fluid` in `["I", "Q", "fluid"]` are
     removed.
-  - Admission window filter: `admittime ≤ charttime ≤ dischtime`
+  - Admission window filter: `admittime ≤ charttime ≤ admittime + LAB_ADMISSION_WINDOW hours`
+    (when `LAB_ADMISSION_WINDOW` is an integer; `admittime ≤ charttime ≤ dischtime` when set
+    to `"full"`). Default window: **24 hours**.
 - **Streaming:** `labevents` is read in chunks of 500,000 rows to manage memory.
 - **Lab groups:** `extract_labs.py` produces a single long-format parquet
   covering all 13 lab groups. The 13 groups are defined by `(fluid × category)`

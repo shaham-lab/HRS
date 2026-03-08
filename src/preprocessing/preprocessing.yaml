@@ -32,6 +32,14 @@ BERT_DEVICE: "cuda"
 HADM_LINKAGE_STRATEGY: "drop"
 HADM_LINKAGE_TOLERANCE_HOURS: 1
 
+# Lab event admission window.
+# Integer: include only lab events within this many hours of admittime
+#   (admittime <= charttime <= admittime + LAB_ADMISSION_WINDOW hours).
+# "full": include all events within the full admission window
+#   (admittime <= charttime <= dischtime).
+# Default: 24 (first 24 hours of admission).
+LAB_ADMISSION_WINDOW: 24
+
 # Output directory roots (relative to repository root)
 FEATURES_DIR: "data/input/features"
 EMBEDDINGS_DIR: "data/input/embeddings"

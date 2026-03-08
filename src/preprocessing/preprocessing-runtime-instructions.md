@@ -150,6 +150,7 @@ from this file.
 | `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"data/input/classifications/source_hashes.json"`     |
 | `HADM_LINKAGE_STRATEGY` | `str` | How to handle records with null `hadm_id`. `"drop"` excludes them (default); `"link"` attempts time-window linkage using `charttime` and admission windows.                                    | `"drop"`                                         |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | `int` | Hours of tolerance outside `admittime`/`dischtime` used when `HADM_LINKAGE_STRATEGY` is `"link"`. Ignored when strategy is `"drop"`.                                                   | `1`                                              |
+| `LAB_ADMISSION_WINDOW` | `int` or `"full"` | Hours from `admittime` to include in `labs_features.parquet`. Integer: include events within this many hours of `admittime`. `"full"`: include all events within the full admission. | `24`                                             |
 
 ---
 

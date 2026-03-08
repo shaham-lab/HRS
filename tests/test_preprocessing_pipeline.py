@@ -1122,5 +1122,338 @@ class TestExtractDemographicsHadmLinkage(unittest.TestCase):
         self.assertIn("other_module", merged)
 
 
+class TestExtractLabsAdmissionWindow(unittest.TestCase):
+    """Tests for LAB_ADMISSION_WINDOW support in extract_labs.py."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mimic_dir = os.path.join(self.tmp, "mimic")
+        self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
+        os.makedirs(self.hosp_dir)
+        self.features_dir = os.path.join(self.tmp, "features")
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+
+        # Admissions: one patient, one admission starting at 2020-01-01 00:00
+        admissions = pd.DataFrame({
+            "subject_id": [1],
+            "hadm_id": [10],
+            "admittime": pd.to_datetime(["2020-01-01 00:00:00"]),
+            "dischtime": pd.to_datetime(["2020-01-05 00:00:00"]),
+            "hospital_expire_flag": [0],
+        })
+        admissions.to_csv(os.path.join(self.hosp_dir, "admissions.csv"), index=False)
+
+        # d_labitems: one item
+        d_labitems = pd.DataFrame({
+            "itemid": [50931],
+            "label": ["Glucose"],
+            "fluid": ["Blood"],
+            "category": ["Chemistry"],
+        })
+        d_labitems.to_csv(os.path.join(self.hosp_dir, "d_labitems.csv"), index=False)
+
+        # labevents: three events at 6h, 24h, and 48h after admittime
+        labevents = pd.DataFrame({
+            "subject_id": [1, 1, 1],
+            "hadm_id": [10.0, 10.0, 10.0],
+            "itemid": [50931, 50931, 50931],
+            "charttime": pd.to_datetime([
+                "2020-01-01 06:00:00",   # 6 hours — inside 24h window
+                "2020-01-02 00:00:00",   # 24 hours — boundary: inside 24h window
+                "2020-01-02 01:00:00",   # 25 hours — outside 24h window
+            ]),
+            "value": ["100", "110", "120"],
+            "valuenum": [100.0, 110.0, 120.0],
+            "valueuom": ["mg/dL", "mg/dL", "mg/dL"],
+            "ref_range_lower": [70.0, 70.0, 70.0],
+            "ref_range_upper": [100.0, 100.0, 100.0],
+            "flag": [None, None, None],
+            "priority": [None, None, None],
+        })
+        labevents.to_csv(os.path.join(self.hosp_dir, "labevents.csv"), index=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def _base_config(self):
+        return {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+
+    def test_default_window_is_24_hours(self):
+        """Default LAB_ADMISSION_WINDOW=24 includes events up to and including 24h."""
+        import extract_labs
+        extract_labs.run(self._base_config())
+        df = pd.read_parquet(os.path.join(self.features_dir, "labs_features.parquet"))
+        # 6h and 24h events are within [0, 24]; 25h event is excluded
+        # The key check: we should have 2 events, not 3
+        self.assertEqual(len(df), 2)
+
+    def test_window_24_excludes_later_events(self):
+        """Events after admittime + 24 hours are excluded when LAB_ADMISSION_WINDOW=24."""
+        import extract_labs
+        config = self._base_config()
+        config["LAB_ADMISSION_WINDOW"] = 24
+        extract_labs.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "labs_features.parquet"))
+        # 25-hour event (120.0 value) must be absent
+        self.assertFalse((df["lab_text_line"].str.contains("120.00")).any())
+
+    def test_full_window_includes_all_events(self):
+        """LAB_ADMISSION_WINDOW='full' includes all events within the entire admission."""
+        import extract_labs
+        config = self._base_config()
+        config["LAB_ADMISSION_WINDOW"] = "full"
+        extract_labs.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "labs_features.parquet"))
+        # All three events (6h, 24h, 25h) are within the admission (dischtime = 2020-01-05)
+        self.assertEqual(len(df), 3)
+
+    def test_custom_window_6_hours(self):
+        """LAB_ADMISSION_WINDOW=6 includes only the first 6 hours."""
+        import extract_labs
+        config = self._base_config()
+        config["LAB_ADMISSION_WINDOW"] = 6
+        extract_labs.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "labs_features.parquet"))
+        # Only the 6-hour event is within [0, 6]
+        self.assertEqual(len(df), 1)
+        self.assertIn("100.00", df.iloc[0]["lab_text_line"])
+
+    def test_invalid_window_raises(self):
+        """Non-numeric, non-'full' LAB_ADMISSION_WINDOW raises ValueError."""
+        import extract_labs
+        config = self._base_config()
+        config["LAB_ADMISSION_WINDOW"] = "yesterday"
+        with self.assertRaises(ValueError):
+            extract_labs.run(config)
+
+    def test_negative_window_raises(self):
+        """Negative LAB_ADMISSION_WINDOW raises ValueError."""
+        import extract_labs
+        config = self._base_config()
+        config["LAB_ADMISSION_WINDOW"] = -1
+        with self.assertRaises(ValueError):
+            extract_labs.run(config)
+
+
+class TestExtractDiagHistoryFormat(unittest.TestCase):
+    """Tests for the structured text block format in extract_diag_history.py."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mimic_dir = os.path.join(self.tmp, "mimic")
+        self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
+        os.makedirs(self.hosp_dir)
+        self.features_dir = os.path.join(self.tmp, "features")
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+
+        # Patient 1: two prior admissions before hadm_id=30
+        admissions = pd.DataFrame({
+            "subject_id": [1, 1, 1],
+            "hadm_id": [10, 20, 30],
+            "admittime": pd.to_datetime(["2018-03-12", "2019-07-24", "2020-01-01"]),
+        })
+        admissions.to_csv(os.path.join(self.hosp_dir, "admissions.csv"), index=False)
+
+        diagnoses = pd.DataFrame({
+            "subject_id": [1, 1, 1],
+            "hadm_id": [10, 10, 20],
+            "icd_code": ["N18.3", "I10", "N17.9"],
+            "icd_version": [10, 10, 10],
+        })
+        diagnoses.to_csv(os.path.join(self.hosp_dir, "diagnoses_icd.csv"), index=False)
+
+        d_icd = pd.DataFrame({
+            "icd_code": ["N18.3", "I10", "N17.9"],
+            "icd_version": [10, 10, 10],
+            "long_title": [
+                "Chronic kidney disease, stage 3",
+                "Hypertension",
+                "Acute kidney injury",
+            ],
+        })
+        d_icd.to_csv(os.path.join(self.hosp_dir, "d_icd_diagnoses.csv"), index=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_header_present(self):
+        """Structured block starts with 'Past Diagnoses:' header."""
+        import extract_diag_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_diag_history.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "diag_history_features.parquet"))
+        row = df[df["hadm_id"] == 30].iloc[0]
+        self.assertTrue(row["diag_history_text"].startswith("Past Diagnoses:"))
+
+    def test_dated_visit_headers(self):
+        """Each prior visit has a 'Visit (YYYY-MM-DD):' section header."""
+        import extract_diag_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_diag_history.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "diag_history_features.parquet"))
+        row = df[df["hadm_id"] == 30].iloc[0]
+        text = row["diag_history_text"]
+        self.assertIn("Visit (2018-03-12):", text)
+        self.assertIn("Visit (2019-07-24):", text)
+
+    def test_diagnoses_in_correct_visit_block(self):
+        """Diagnoses appear under the correct dated visit header."""
+        import extract_diag_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_diag_history.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "diag_history_features.parquet"))
+        row = df[df["hadm_id"] == 30].iloc[0]
+        text = row["diag_history_text"]
+        # 2018-03-12 visit: CKD and Hypertension
+        idx_2018 = text.index("Visit (2018-03-12):")
+        idx_2019 = text.index("Visit (2019-07-24):")
+        block_2018 = text[idx_2018:idx_2019]
+        self.assertIn("Chronic kidney disease, stage 3", block_2018)
+        self.assertIn("Hypertension", block_2018)
+        # 2019-07-24 visit: AKI
+        block_2019 = text[idx_2019:]
+        self.assertIn("Acute kidney injury", block_2019)
+
+    def test_no_pipe_separator(self):
+        """New format does not use pipe (|) separator between diagnoses."""
+        import extract_diag_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_diag_history.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "diag_history_features.parquet"))
+        row = df[df["hadm_id"] == 30].iloc[0]
+        self.assertNotIn(" | ", row["diag_history_text"])
+
+    def test_first_visit_empty(self):
+        """First visit produces an empty string (no prior admissions)."""
+        import extract_diag_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_diag_history.run(config)
+        df = pd.read_parquet(os.path.join(self.features_dir, "diag_history_features.parquet"))
+        row_10 = df[df["hadm_id"] == 10].iloc[0]
+        self.assertEqual(row_10["diag_history_text"], "")
+
+
+class TestExtractDischargeHistoryFormat(unittest.TestCase):
+    """Tests for the dated-header format in extract_discharge_history.py."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.mimic_dir = os.path.join(self.tmp, "mimic")
+        self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
+        self.note_dir = os.path.join(self.mimic_dir, "note")
+        os.makedirs(self.hosp_dir)
+        os.makedirs(self.note_dir)
+        self.features_dir = os.path.join(self.tmp, "features")
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+
+        admissions = pd.DataFrame({
+            "subject_id": [1, 1, 1],
+            "hadm_id": [10, 20, 30],
+            "admittime": pd.to_datetime(["2018-03-12", "2019-07-24", "2020-01-01"]),
+        })
+        admissions.to_csv(os.path.join(self.hosp_dir, "admissions.csv"), index=False)
+
+        # Two prior discharge notes
+        notes = pd.DataFrame({
+            "subject_id": [1, 1],
+            "hadm_id": [10, 20],
+            "charttime": pd.to_datetime(["2018-03-20", "2019-07-31"]),
+            "text": [
+                "Some header\nAllergies: Penicillin\nBody of note 1.",
+                "Some header\nAllergies: None known\nBody of note 2.",
+            ],
+        })
+        notes.to_csv(os.path.join(self.note_dir, "discharge.csv"), index=False)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_dated_header_present(self):
+        """Prior Discharge Summary header with date is present for each prior note."""
+        import extract_discharge_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_discharge_history.run(config)
+        df = pd.read_parquet(
+            os.path.join(self.features_dir, "discharge_history_features.parquet")
+        )
+        row = df[df["hadm_id"] == 30].iloc[0]
+        text = row["discharge_history_text"]
+        self.assertIn("Prior Discharge Summary (2018-03-12):", text)
+        self.assertIn("Prior Discharge Summary (2019-07-24):", text)
+
+    def test_note_body_follows_header(self):
+        """Cleaned note body appears after each dated header."""
+        import extract_discharge_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_discharge_history.run(config)
+        df = pd.read_parquet(
+            os.path.join(self.features_dir, "discharge_history_features.parquet")
+        )
+        row = df[df["hadm_id"] == 30].iloc[0]
+        text = row["discharge_history_text"]
+        self.assertIn("Allergies: Penicillin", text)
+        self.assertIn("Allergies: None known", text)
+        # Pre-Allergies text should be stripped
+        self.assertNotIn("Some header", text)
+
+    def test_no_old_separator(self):
+        """New format does not use the old '---' separator."""
+        import extract_discharge_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_discharge_history.run(config)
+        df = pd.read_parquet(
+            os.path.join(self.features_dir, "discharge_history_features.parquet")
+        )
+        row = df[df["hadm_id"] == 30].iloc[0]
+        self.assertNotIn("---", row["discharge_history_text"])
+
+    def test_single_prior_note(self):
+        """Second visit has exactly one prior note with correct header."""
+        import extract_discharge_history
+        config = {
+            "MIMIC_DATA_DIR": self.mimic_dir,
+            "FEATURES_DIR": self.features_dir,
+        }
+        extract_discharge_history.run(config)
+        df = pd.read_parquet(
+            os.path.join(self.features_dir, "discharge_history_features.parquet")
+        )
+        row_20 = df[df["hadm_id"] == 20].iloc[0]
+        text = row_20["discharge_history_text"]
+        self.assertIn("Prior Discharge Summary (2018-03-12):", text)
+        # Should only have the 2018 note, not 2019 (not prior to hadm_id=20)
+        self.assertNotIn("Prior Discharge Summary (2019", text)
+
+
 if __name__ == "__main__":
     unittest.main()
