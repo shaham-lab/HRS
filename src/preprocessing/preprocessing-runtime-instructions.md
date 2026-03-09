@@ -10,9 +10,21 @@ choices, see [DATA_PROCESSING.md](DATA_PROCESSING.md).
 
 ### Python version
 
-Python **3.10 or later** is required.
+Python **3.12** is required (managed via the project's conda environment).
 
-### Required packages
+### Environment setup
+
+The project uses **conda** for environment management. Install
+[Miniconda](https://docs.conda.io/en/latest/miniconda.html) or Anaconda
+if you do not already have it, then create and activate the environment from
+the repository root:
+
+```bash
+conda env create -f environment.yml
+conda activate hrs
+```
+
+The environment installs all required packages, including:
 
 | Package        | Purpose                              |
 | -------------- | ------------------------------------ |
@@ -24,10 +36,10 @@ Python **3.10 or later** is required.
 | `pyyaml`       | Configuration file parsing           |
 | `pyarrow`      | Parquet read/write                   |
 
-Install all dependencies:
+To update an existing environment after changes to `environment.yml`:
 
 ```bash
-pip install -r requirements.txt
+conda env update -f environment.yml --prune
 ```
 
 ### MIMIC-IV data access
@@ -77,7 +89,7 @@ All tables are expected as **`.csv.gz`** (gzip-compressed CSV). Uncompressed
 
 ```
 HRS/
-├── requirements.txt
+├── environment.yml
 ├── src/
 │   └── preprocessing/
 │       ├── preprocessing.yaml                  # Central configuration

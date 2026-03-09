@@ -575,7 +575,7 @@ All file paths, model names, split ratios, batch sizes, window sizes, and thresh
 
 ```
 HRS/
-├── requirements.txt
+├── environment.yml
 ├── src/
 │   └── preprocessing/
 │       ├── preprocessing.yaml                  # Central configuration
