@@ -1,201 +1,166 @@
-# Preprocessing Pipeline for CDSS-ML (MIMIC-IV)
+# Preprocessing Pipeline — CDSS-ML (MIMIC-IV)
 
-This document describes the modular preprocessing pipeline for the Clinical Decision Support System (CDSS) built on MIMIC-IV data.
+This document is a developer reference for the preprocessing pipeline. For runtime instructions and configuration, see `preprocessing-runtime-instructions.md`. For the full architecture specification, see `PREPROCESSING_ARCHITECTURE.md`.
 
 ---
 
 ## Directory Structure
 
 ```
-preprocessing/
-├── preprocessing.yaml              # Central configuration file
-├── preprocessing.md                # This documentation
-├── create_splits.py                # Step 1 – patient-level stratified splits
-├── extract_demographics.py         # Feature: age, gender, height, weight, BMI
-├── extract_diag_history.py         # Feature: prior-visit ICD diagnosis text
-├── extract_discharge_history.py    # Feature: prior-visit discharge summary text
-├── extract_triage_and_complaint.py # Feature: triage structured data + chief complaint
-├── extract_labs.py                 # Feature: lab results (current admission)
-├── extract_radiology.py            # Feature: most-recent radiology note (current admission)
-├── extract_y_data.py               # Labels: Y1 (mortality) and Y2 (30-day readmission)
-├── embed_features.py               # BERT embeddings for all text features
-├── combine_dataset.py              # Merges all features into final dataset
-└── run_pipeline.py                 # Orchestrator with argparse CLI
+HRS/
+├── config/
+│   └── preprocessing.yaml              # Central configuration
+├── src/
+│   └── preprocessing/
+│       ├── run_pipeline.py                     # Orchestrator CLI
+│       ├── preprocessing_utils.py              # Shared utilities
+│       ├── build_lab_panel_config.py           # Step 0
+│       ├── create_splits.py                    # Step 1
+│       ├── extract_demographics.py             # Step 2
+│       ├── extract_diag_history.py             # Step 3
+│       ├── extract_discharge_history.py        # Step 4
+│       ├── extract_triage_and_complaint.py     # Step 5
+│       ├── extract_labs.py                     # Step 6
+│       ├── extract_radiology.py                # Step 7
+│       ├── extract_y_data.py                   # Step 8
+│       ├── embed_features.py                   # Step 9
+│       ├── combine_dataset.py                  # Step 10
+│       └── build_lab_text_lines.py             # Helper — called by extract_labs.py
+└── data/
+    └── preprocessing/
+        ├── data_splits.parquet
+        ├── source_hashes.json
+        ├── features/
+        │   ├── demographics_features.parquet
+        │   ├── diag_history_features.parquet
+        │   ├── discharge_history_features.parquet
+        │   ├── triage_features.parquet
+        │   ├── chief_complaint_features.parquet
+        │   ├── labs_features.parquet
+        │   ├── radiology_features.parquet
+        │   └── embeddings/
+        │       ├── diag_history_embeddings.parquet
+        │       ├── discharge_history_embeddings.parquet
+        │       ├── triage_embeddings.parquet
+        │       ├── chief_complaint_embeddings.parquet
+        │       ├── radiology_embeddings.parquet
+        │       └── lab_{group}_embeddings.parquet  (×13)
+        └── classifications/
+            ├── y_labels.parquet
+            ├── final_cdss_dataset.parquet
+            ├── lab_panel_config.yaml
+            ├── imputation_stats.json
+            └── hadm_linkage_stats.json
 ```
-
-### Generated Artefacts
-
-| Directory                     | Contents                                                                                                     |
-|-------------------------------|--------------------------------------------------------------------------------------------------------------|
-| `data/input/features/`             | Raw feature parquet files (demographics, labs, text)                                                         |
-| `data/input/embeddings/`           | BERT embedding parquet files                                                                                 |
-| `data/input/classifications/`      | Labels (`y_labels.parquet`), splits (`data_splits.parquet`), imputation statistics (`imputation_stats.json`) |
 
 ---
 
-## Configuration (`preprocessing.yaml`)
+## Configuration (`config/preprocessing.yaml`)
 
-| Key                  | Description                                           | Example value                         |
-|----------------------|-------------------------------------------------------|---------------------------------------|
-| `MIMIC_DATA_DIR`     | Path to raw MIMIC-IV CSV/parquet files                | `~/data/physionet.org/files/mimiciv/3.1` |
-| `SPLIT_TRAIN`        | Fraction of patients assigned to train set            | `0.70`                                |
-| `SPLIT_DEV`          | Fraction of patients assigned to dev set              | `0.15`                                |
-| `SPLIT_TEST`         | Fraction of patients assigned to test set             | `0.15`                                |
-| `BERT_MODEL_NAME`    | HuggingFace model identifier                          | `emilyalsentzer/Bio_ClinicalBERT`     |
-| `BERT_MAX_LENGTH`    | Maximum token length for BERT tokenizer               | `512`                                 |
-| `BERT_BATCH_SIZE`    | Batch size used when computing embeddings             | `32`                                  |
-| `BERT_DEVICE`        | Compute device (`cuda` or `cpu`)                      | `cuda`                                |
-| `FEATURES_DIR`       | Output directory for raw feature parquets             | `data/input/features`                 |
-| `EMBEDDINGS_DIR`     | Output directory for embedding parquets               | `data/input/embeddings`               |
-| `CLASSIFICATIONS_DIR`| Output directory for labels and splits                | `data/input/classifications`          |
+All configuration is centralised in `config/preprocessing.yaml`. No module reads this file directly — `run_pipeline.py` loads it and passes the resulting dict to each module's `run()` function.
 
-> **No hardcoded paths, split ratios, or model names appear in any Python script.** All values are read exclusively from `preprocessing.yaml` at runtime, passed in via `run_pipeline.py`.
+| Key | Description | Default |
+|-----|-------------|---------|
+| `MIMIC_DATA_DIR` | Root of MIMIC-IV download | — |
+| `MIMIC_NOTE_DIR` | Root of mimic-iv-note module | `MIMIC_DATA_DIR` |
+| `MIMIC_ED_DIR` | Root of mimic-iv-ed module | `MIMIC_DATA_DIR` |
+| `SPLIT_TRAIN` | Train fraction | `0.80` |
+| `SPLIT_DEV` | Dev fraction | `0.10` |
+| `SPLIT_TEST` | Test fraction | `0.10` |
+| `BERT_MODEL_NAME` | HuggingFace model identifier | `Simonlee711/Clinical_ModernBERT` |
+| `BERT_MAX_LENGTH` | Maximum token length | `8192` |
+| `BERT_BATCH_SIZE` | Embedding batch size | `32` |
+| `BERT_DEVICE` | Inference device | `cuda` |
+| `LAB_ADMISSION_WINDOW` | Hours from admittime for lab extraction; `"full"` = entire admission | `24` |
+| `HADM_LINKAGE_STRATEGY` | How to handle null `hadm_id`: `"drop"` or `"link"` | `"drop"` |
+| `HADM_LINKAGE_TOLERANCE_HOURS` | Tolerance in hours for time-window linkage | `1` |
+| `PREPROCESSING_DIR` | Root output directory | `data/preprocessing` |
+| `FEATURES_DIR` | Output directory for raw feature parquets | `data/preprocessing/features` |
+| `EMBEDDINGS_DIR` | Output directory for embedding parquets | `data/preprocessing/features/embeddings` |
+| `CLASSIFICATIONS_DIR` | Output directory for labels and final dataset | `data/preprocessing/classifications` |
+| `HASH_REGISTRY_PATH` | Path to MD5 hash registry | `data/preprocessing/source_hashes.json` |
 
 ---
 
 ## Module Descriptions
 
-### 1. `create_splits.py` – Patient-level stratified splits
+### Step 0 — `build_lab_panel_config.py`
 
-* **Sources**: `admissions` table, split ratios from config.
-* **Logic**: Groups admissions by `subject_id` to prevent patient-level data leakage. Computes a per-patient outcome rate (`hospital_expire_flag`) and uses it to stratify patients into Train / Dev / Test sets in the configured proportions.
-* **Output**: `data/input/classifications/data_splits.parquet` — columns: `subject_id`, `hadm_id`, `split`.
+Reads `d_labitems`, groups `itemid`s by `(fluid × category)` into 13 named lab groups, and writes `lab_panel_config.yaml` to `CLASSIFICATIONS_DIR`. Must run before `extract_labs.py`.
 
----
+Groups: `blood_gas`, `blood_chemistry`, `blood_hematology`, `urine_chemistry`, `urine_hematology`, `other_body_fluid_chemistry`, `other_body_fluid_hematology`, `ascites`, `pleural`, `csf`, `bone_marrow`, `joint_fluid`, `stool`.
 
-### 2. `extract_demographics.py` – Age, gender, vitals
+### Step 1 — `create_splits.py`
 
-* **Sources**: `patients`, `admissions`, `omr`, `chartevents`, `data_splits.parquet`.
-* **Logic**:
-  * Extracts age, gender, height, weight, BMI.
-  * OMR is preferred; `chartevents` is used as fallback.
-  * Creates binary missingness indicators (`height_missing`, `weight_missing`, `bmi_missing`).
-  * Computes per-stratum (age-bin × gender) mean/std **on train split only** and saves them to `imputation_stats.json`.
-  * Imputes missing height/weight by sampling from `N(mean, std)` using train-derived statistics.
-  * BMI is derived from height/weight when missing, never independently imputed.
-  * No normalisation is applied.
-* **Output**: `data/input/features/demographics_features.parquet` — column `demographic_vec` (array of 8 floats: `[Age, Gender, Height, Weight, BMI, height_missing, weight_missing, bmi_missing]`).
+Patient-level stratified 3-way split (train/dev/test) by `subject_id`. Stratified by patient-level `hospital_expire_flag` rate. Output: `data/preprocessing/data_splits.parquet`.
 
----
+### Step 2 — `extract_demographics.py`
 
-### 3. `extract_diag_history.py` – Prior-visit diagnosis text
+Extracts age, gender, height, weight, BMI. Sources: `patients`, `admissions`, `omr` (preferred), `chartevents` (fallback). Creates missingness flags before imputation. Computes stratum statistics (age-bin × gender) on train split only; saves to `imputation_stats.json`. Implements `HADM_LINKAGE_STRATEGY` for null `hadm_id` in `chartevents`. Output: `demographics_features.parquet` — `demographic_vec` array of 8 floats.
 
-* **Sources**: `diagnoses_icd`, `d_icd_diagnoses`, `admissions`.
-* **Logic**: Concatenates ICD `long_title` values from all admissions that precede the current admission (strictly before `admittime`).
-* **Output**: `data/input/features/diag_history_features.parquet` — columns: `subject_id`, `hadm_id`, `diag_history_text`.
+### Step 3 — `extract_diag_history.py`
 
----
+Prior-visit ICD diagnosis text per admission. Only admissions strictly before current `admittime` are included. Format: dated section headers with one `long_title` per line per visit. Empty string if no prior visits.
 
-### 4. `extract_discharge_history.py` – Prior-visit discharge summaries
+### Step 4 — `extract_discharge_history.py`
 
-* **Sources**: `note` table (discharge type), `admissions`.
-* **Logic**: Retrieves discharge notes from prior admissions only. Removes everything before the first occurrence of `"Allergies:"`.
-* **Output**: `data/input/features/discharge_history_features.parquet` — columns: `subject_id`, `hadm_id`, `discharge_history_text`.
+Prior-visit discharge summary text. Text cleaning removes everything before `"Allergies:"`. Notes concatenated with dated headers in chronological order.
 
----
+### Step 5 — `extract_triage_and_complaint.py`
 
-### 5. `extract_triage_and_complaint.py` – Triage data and chief complaint
+Triage structured fields formatted as a natural-language template. Chief complaint as raw text. `hadm_id` resolved via `edstays` (primary) and intime-based fallback.
 
-* **Sources**: `triage` table, early `chartevents`.
-* **Logic**: Converts triage structured fields to a natural-language template. Extracts chief complaint as raw text.
-* **Output**:
-  * `data/input/features/triage_features.parquet` — columns: `subject_id`, `hadm_id`, `triage_text`.
-  * `data/input/features/chief_complaint_features.parquet` — columns: `subject_id`, `hadm_id`, `chief_complaint_text`.
+### Step 6 — `extract_labs.py`
 
----
+Lab events from the current admission in long format (one row per event). Controlled by `LAB_ADMISSION_WINDOW`. Respects `HADM_LINKAGE_STRATEGY` for null `hadm_id` in `labevents`. Text line format:
 
-### 6. `extract_labs.py` – Lab events (current admission, long format)
+```
+[HH:MM] {label}: {value} {unit} (ref: lower-upper) [ABNORMAL]
+```
 
-* **Sources**: `labevents`, `d_labitems`, `admissions`.
-* **Logic**:
-  * Reads `labevents` in chunks of 500,000 rows for memory efficiency.
-  * Filters out rows with no `hadm_id` (~70% of lab events in MIMIC-IV are outpatient and not linked to an admission).
-  * Filters out rows where both `value` and `valuenum` are null.
-  * Joins `label`, `fluid`, `category` from `d_labitems`. Strips whitespace and removes artifact rows (`fluid` in `["I", "Q", "fluid"]`).
-  * Filters to events within the current admission window (`admittime` ≤ `charttime` ≤ `dischtime`).
-  * Converts each lab event to a chronological natural-language text line:
-    `[HH:MM] {label} ({fluid}/{category}): {value} {unit} (ref: lower-upper) [ABNORMAL] [STAT]`
-    Reference range, abnormal flag, and STAT priority are omitted when not present.
-  * Sorts events chronologically within each admission.
-  * **No aggregation, no pivoting, no wide format.**
-  * Lab embedding is intentionally deferred to training/inference time. The MDP agent selects a subset of `itemid`s, their text lines are concatenated in chronological order, and passed to the language model for encoding.
-* **Output**: `data/input/features/labs_features.parquet` — long format, one row per lab event. Columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line`.
-* **Note**: `labs_features.parquet` is excluded from `final_cdss_dataset.parquet` and joined dynamically at training time.
+`[HH:MM]` is elapsed time since `admittime`. `[ABNORMAL]` is appended when `flag == "abnormal"` OR `valuenum` is outside reference range.
 
----
+### Step 7 — `extract_radiology.py`
 
-### 7. `extract_radiology.py` – Radiology notes (current admission)
+Most recent radiology note during the current admission. Text cleaning removes everything before `"EXAMINATION:"`.
 
-* **Sources**: `note` table (radiology type).
-* **Logic**: Selects the most recent radiology note during the current admission. Removes everything before the first occurrence of `"EXAMINATION:"`.
-* **Output**: `data/input/features/radiology_features.parquet` — columns: `subject_id`, `hadm_id`, `radiology_text`.
+### Step 8 — `extract_y_data.py`
 
----
+Y1: `hospital_expire_flag`. Y2: readmission within 30 days of `dischtime`; NaN for deceased patients.
 
-### 8. `extract_y_data.py` – Labels
+### Step 9 — `embed_features.py`
 
-* **Targets**: Y1 (in-hospital mortality), Y2 (30-day readmission).
-* **Logic**:
-  * Y1: `admissions.hospital_expire_flag`.
-  * Y2: 1 if the patient has a subsequent admission within 30 days of `dischtime`. Patients with `hospital_expire_flag = 1` are excluded from Y2 (set to `NaN`).
-* **Output**: `data/input/classifications/y_labels.parquet`.
+Embeds all text features using `Clinical_ModernBERT` (`Simonlee711/Clinical_ModernBERT`). **Mean pooling** over all non-padding content tokens from the final hidden layer. Empty/null text produces a zero vector. Produces 5 non-lab embedding parquets and 13 lab group embedding parquets (one per group defined in `lab_panel_config.yaml`). All 13 lab group parquets always contain a valid embedding — admissions with no events in a given group receive a zero vector.
 
----
+### Step 10 — `combine_dataset.py`
 
-### 9. `embed_features.py` – BERT sentence embeddings
-
-* **Sources**: text parquets from `data/input/features/`, BERT config from `preprocessing.yaml`.
-* **Logic**:
-  * Loads the model/tokenizer specified by `BERT_MODEL_NAME`.
-  * Falls back to CPU with a warning if `BERT_DEVICE: cuda` is set but CUDA is unavailable.
-  * Embeds text using the `[CLS]` token representation.
-  * Outputs a zero vector for null/empty text.
-  * Processes in batches of `BERT_BATCH_SIZE`.
-* **Output**: one parquet per text feature saved to `data/input/embeddings/`.
-
----
-
-### 10. `combine_dataset.py` – Final dataset assembly
-
-* **Logic**: Left-joins all embedding parquets, demographics, and classifications on (`subject_id`, `hadm_id`). Excludes raw text parquets and `labs_features.parquet` (which is in long format and joined dynamically at training time). Ensures the `split` column is present.
-* **Output**: `data/input/classifications/final_cdss_dataset.parquet`.
-
----
-
-### 11. `run_pipeline.py` – Orchestrator
-
-* Loads all configuration from `preprocessing.yaml`.
-* Exposes a CLI via `argparse`; pass `--all` to run the full pipeline or individual module names to run specific steps.
-* Enforces execution order: `create_splits` → `extract_*` → `embed_features` → `combine_dataset`.
-* Passes the loaded config dict to every module — no module reads `preprocessing.yaml` directly.
+Left-joins all embedding parquets (discovered dynamically from `EMBEDDINGS_DIR`), `demographics_features.parquet`, `y_labels.parquet`, and `data_splits.parquet` on `(subject_id, hadm_id)`. Starts from the admission universe in `data_splits.parquet`. Output: `final_cdss_dataset.parquet` — one row per admission.
 
 ---
 
 ## Running the Pipeline
 
 ```bash
-# Run the full pipeline
-python preprocessing/run_pipeline.py --all
+# Full pipeline
+python src/preprocessing/run_pipeline.py --all
 
-# Run only the split creation step
-python preprocessing/run_pipeline.py --create_splits
+# Individual steps
+python src/preprocessing/run_pipeline.py --create_splits
+python src/preprocessing/run_pipeline.py --extract_demographics --extract_labs
+python src/preprocessing/run_pipeline.py --embed_features
+python src/preprocessing/run_pipeline.py --combine_dataset
 
-# Run only specific extract modules
-python preprocessing/run_pipeline.py --extract_demographics --extract_labs
-
-# Run embedding step
-python preprocessing/run_pipeline.py --embed_features
-
-# Run final combine step
-python preprocessing/run_pipeline.py --combine_dataset
+# Force rerun of a specific module
+python src/preprocessing/run_pipeline.py --extract_labs --force-module extract_labs
 ```
 
 ---
 
 ## Design Principles
 
-1. **No leakage**: imputation statistics are derived exclusively from the train split.
-2. **No hardcoding**: all paths, model names, and hyperparameters live in `preprocessing.yaml`.
-3. **Reproducibility**: imputation statistics are persisted to `imputation_stats.json`.
-4. **Memory safety**: large tables (e.g., `labevents`) are read in configurable chunks.
-5. **Graceful degradation**: CUDA fall-back to CPU; per-stratum fall-back to global statistics.
+1. **No leakage** — imputation statistics derived from train split only; prior-visit features use strictly-before-admittime filter.
+2. **No hardcoding** — all paths, model names, and hyperparameters in `config/preprocessing.yaml`.
+3. **Reproducibility** — imputation statistics persisted to `imputation_stats.json`; source file hashes to `source_hashes.json`.
+4. **Memory safety** — large tables (`labevents`, `chartevents`) read in configurable chunks.
+5. **Graceful degradation** — CUDA falls back to CPU; missing optional sources are logged and skipped.
+

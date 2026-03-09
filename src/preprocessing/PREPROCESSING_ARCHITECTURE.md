@@ -216,7 +216,7 @@ Embeds all 18 text features using Clinical_ModernBERT with mean pooling. For the
 
 ### `combine_dataset.py`
 
-Starts from `data_splits.parquet` as the admission universe. Left-joins `y_labels.parquet`, `demographics_features.parquet`, and all `*.parquet` files discovered in `EMBEDDINGS_DIR`. The 13 lab group embedding parquets are joined as independent nullable columns alongside the 5 non-lab embeddings.
+Starts from `data_splits.parquet` as the admission universe. Left-joins `y_labels.parquet`, `demographics_features.parquet`, and all `*.parquet` files discovered in `EMBEDDINGS_DIR`. The 13 lab group embedding parquets are joined as independent columns alongside the 5 non-lab embeddings. Lab group embedding columns are always populated — admissions with no events in a given group receive a zero vector from embed_features.py, consistent with the zero-vector convention used throughout the pipeline for absent text features.
 
 ---
 
@@ -584,7 +584,7 @@ HRS/
 │       ├── run_pipeline.py                     # Orchestrator CLI
 │       ├── inspect_data.py                     # Read-only diagnostic utility
 │       ├── preprocessing_utils.py              # Shared utilities (hashing, CSV loading)
-│       ├── build_lab_panel_config.py           # Step 0 — generates lab_panel_config.yaml
+│       ├── build_lab_panel_config.py           # Step 0 — generates classifications/lab_panel_config.yaml
 │       ├── create_splits.py                    # Step 1
 │       ├── extract_demographics.py             # Step 2
 │       ├── extract_diag_history.py             # Step 3

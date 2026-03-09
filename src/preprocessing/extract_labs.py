@@ -16,6 +16,10 @@ Expected config keys:
 Optional config keys:
     LAB_ADMISSION_WINDOW – hours from admittime to include (default 24),
                            or "full" to include entire admission
+    HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
+                                   null hadm_id in labevents
+    HADM_LINKAGE_TOLERANCE_HOURS – hours of tolerance for time-window linkage
+                                   (default 1, only used when strategy is "link")
 """
 
 import logging
@@ -110,6 +114,9 @@ def run(config: dict) -> None:
                 f"got {raw_window!r}"
             ) from exc
 
+    hadm_linkage_strategy: str = str(config.get("HADM_LINKAGE_STRATEGY", "drop")).lower()
+    hadm_linkage_tolerance_hours: int = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 1))
+
     # ------------------------------------------------------------------ #
     # Hash-based skip check
     # ------------------------------------------------------------------ #
@@ -174,10 +181,10 @@ def run(config: dict) -> None:
         )
 
     lab_path = lab_gz if os.path.exists(lab_gz) else lab_csv
-    logger.info("Streaming labevents from %s in chunks of %d…",
-                lab_path, _CHUNK_SIZE)
+    logger.info("Streaming labevents from %s…", lab_path)
 
     all_chunks: list[pd.DataFrame] = []
+    i = 0
     for chunk in tqdm(
         pd.read_csv(
             lab_path,
@@ -193,9 +200,60 @@ def run(config: dict) -> None:
         desc="Streaming labevents",
         unit="chunk",
     ):
-        # 1. Filter out rows with no hadm_id (~70% of labevents are outpatient)
+        # 1. Handle rows with no hadm_id per strategy
+        chunk = chunk.copy()
+        null_hadm_mask = chunk["hadm_id"].isna()
+        null_hadm_count = int(null_hadm_mask.sum())
+
+        if null_hadm_count > 0:
+            logger.info(
+                "labevents chunk %d: %d rows (%.1f%%) have null hadm_id — strategy: %s",
+                i, null_hadm_count, 100 * null_hadm_count / len(chunk), hadm_linkage_strategy,
+            )
+
+        if hadm_linkage_strategy == "drop":
+            chunk = chunk[~null_hadm_mask].copy()
+        elif hadm_linkage_strategy == "link" and null_hadm_count > 0:
+            null_rows = chunk[null_hadm_mask].copy()
+            resolved_rows = []
+
+            for _, row in null_rows.iterrows():
+                sid = row["subject_id"]
+                ct = pd.to_datetime(row["charttime"])
+                if pd.isna(ct):
+                    continue
+                candidates = admissions[admissions["subject_id"] == sid].copy()
+                tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
+                matches = candidates[
+                    (candidates["admittime"] - tolerance <= ct) &
+                    (ct <= candidates["dischtime"] + tolerance)
+                ]
+                if len(matches) == 0:
+                    continue  # unresolvable — drop
+                elif len(matches) == 1:
+                    new_row = row.copy()
+                    new_row["hadm_id"] = int(matches.iloc[0]["hadm_id"])
+                    resolved_rows.append(new_row)
+                else:
+                    matches = matches.copy()
+                    matches["_gap"] = (
+                        matches["admittime"].apply(lambda t: abs((t - ct).total_seconds()))
+                    )
+                    best = matches.sort_values("_gap").iloc[0]
+                    new_row = row.copy()
+                    new_row["hadm_id"] = int(best["hadm_id"])
+                    resolved_rows.append(new_row)
+
+            non_null = chunk[~null_hadm_mask].copy()
+            if resolved_rows:
+                resolved_df = pd.DataFrame(resolved_rows)
+                chunk = pd.concat([non_null, resolved_df], ignore_index=True)
+            else:
+                chunk = non_null
+
         chunk = chunk.dropna(subset=["hadm_id"]).copy()
         chunk["hadm_id"] = chunk["hadm_id"].astype(int)
+        i += 1
 
         # 2. Filter out rows where both value and valuenum are null
         chunk = chunk[chunk["value"].notna() | chunk["valuenum"].notna()]
