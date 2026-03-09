@@ -68,6 +68,16 @@ _TEXT_FEATURES = [
     ),
 ]
 
+# Per-feature max token length caps. Applied as min(BERT_MAX_LENGTH, cap) so
+# short features are not padded to the global 8192-token ceiling.
+_MAX_LENGTH_CAP: dict[str, int] = {
+    "diag_history_text":      512,   # ICD label list — short
+    "chief_complaint_text":   64,    # single phrase
+    "triage_text":            256,   # structured vitals template
+    "discharge_history_text": 4096,  # full clinical note — keep long
+    "radiology_text":         1024,  # radiology report — medium
+}
+
 
 def _get_device(requested: str):
     """Return a torch device, falling back to CPU if CUDA is unavailable."""
@@ -83,6 +93,17 @@ def _get_device(requested: str):
     return torch.device("cpu")
 
 
+def _effective_batch_size(base_batch_size: int, effective_max_length: int,
+                           reference_length: int = 512) -> int:
+    """
+    Scale batch size to maintain a roughly constant token budget per GPU step.
+    base_batch_size is calibrated for reference_length tokens.
+    """
+    scale = reference_length / max(effective_max_length, 1)
+    scaled = int(base_batch_size * scale)
+    return max(1, min(scaled, base_batch_size * 8))  # cap at 8× base
+
+
 def _embed_texts(
     texts: list[str],
     tokenizer,
@@ -91,52 +112,59 @@ def _embed_texts(
     max_length: int,
     batch_size: int,
 ) -> np.ndarray:
-    """Return a (N, hidden_size) array using mean pooling over content tokens."""
+    """Return a (N, hidden_size) float32 array using mean pooling."""
     import torch  # type: ignore
 
-    model.eval()
-    all_embeddings: list[np.ndarray] = []
+    all_embeddings: list[torch.Tensor] = []   # keep on GPU until the end
+    empty_indices: list[int] = []
+    global_idx = 0
 
     n_batches = (len(texts) + batch_size - 1) // batch_size
     for start in tqdm(range(0, len(texts), batch_size), total=n_batches,
-                      desc="Embedding batches", unit="batch"):
+                      desc="Embedding batches", unit="batch", leave=False):
         batch_texts = texts[start: start + batch_size]
-        # Replace None/empty with a space so the tokenizer doesn't fail
         batch_texts_safe = [t if isinstance(t, str) and t.strip() else " "
                             for t in batch_texts]
-        empty_flags = [
-            not (isinstance(t, str) and t.strip()) for t in batch_texts
-        ]
+        empty_flags = [not (isinstance(t, str) and t.strip()) for t in batch_texts]
+
+        for i, flag in enumerate(empty_flags):
+            if flag:
+                empty_indices.append(global_idx + i)
+        global_idx += len(batch_texts)
 
         encoded = tokenizer(
             batch_texts_safe,
-            padding=True,
+            padding="longest",       # pad to longest sequence in THIS batch only
             truncation=True,
-            max_length=max_length,
+            max_length=max_length,   # still enforce the hard ceiling
             return_tensors="pt",
         )
-        encoded = {k: v.to(device) for k, v in encoded.items()}
+        encoded = {k: v.to(device, non_blocking=True) for k, v in encoded.items()}
 
         with torch.no_grad():
             outputs = model(**encoded)
 
-        # Mean pooling over all non-padding content tokens in the final hidden layer
         attention_mask = encoded["attention_mask"]
-        token_embeddings = outputs.last_hidden_state  # (batch, seq_len, hidden)
-        # Expand mask to match embedding dimension
-        mask_expanded = attention_mask.unsqueeze(-1).expand(token_embeddings.size()).float()
-        sum_embeddings = torch.sum(token_embeddings * mask_expanded, dim=1)
-        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)
-        mean_embeddings = (sum_embeddings / sum_mask).cpu().numpy()
+        token_embeddings = outputs.last_hidden_state          # (B, L, H)
+        mask_expanded = (
+            attention_mask.unsqueeze(-1)
+            .expand(token_embeddings.size())
+            .to(token_embeddings.dtype)
+        )
+        sum_embeddings = torch.sum(token_embeddings * mask_expanded, dim=1)  # (B, H)
+        sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)           # (B, H)
+        mean_embeddings = sum_embeddings / sum_mask                           # (B, H)
 
-        # Zero-out embeddings for originally empty texts
-        for i, is_empty in enumerate(empty_flags):
-            if is_empty:
-                mean_embeddings[i] = np.zeros_like(mean_embeddings[i])
+        all_embeddings.append(mean_embeddings)   # stays on GPU
 
-        all_embeddings.append(mean_embeddings)
+    # Single GPU → CPU transfer for the entire feature
+    result = torch.cat(all_embeddings, dim=0).cpu().numpy()   # (N, H)
 
-    return np.vstack(all_embeddings)
+    # Zero-out originally empty texts
+    if empty_indices:
+        result[empty_indices, :] = 0.0
+
+    return result
 
 
 def run(config: dict) -> None:
@@ -210,6 +238,7 @@ def run(config: dict) -> None:
     tokenizer = AutoTokenizer.from_pretrained(model_name)  # type: ignore[misc]
     model = BertModel.from_pretrained(model_name, add_pooling_layer=False)  # type: ignore[misc]
     model.to(device)
+    model.eval()  # set once here; _embed_texts no longer calls model.eval()
 
     os.makedirs(embeddings_dir, exist_ok=True)
 
@@ -241,8 +270,17 @@ def run(config: dict) -> None:
                 )
 
             texts: list[str] = [str(t) for t in df[text_col].tolist()]
+            effective_max_length = min(
+                max_length,
+                _MAX_LENGTH_CAP.get(text_col, max_length),
+            )
+            effective_batch_size = _effective_batch_size(batch_size, effective_max_length)
+            logger.info(
+                "  Embedding '%s': %d texts, effective max_length=%d, effective_batch_size=%d",
+                text_col, len(texts), effective_max_length, effective_batch_size,
+            )
             embeddings = _embed_texts(
-                texts, tokenizer, model, device, max_length, batch_size
+                texts, tokenizer, model, device, effective_max_length, effective_batch_size
             )
 
             out_df = df[["subject_id", "hadm_id"]].copy()
@@ -289,6 +327,26 @@ def run(config: dict) -> None:
 
         splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
 
+        # Pre-group labs_df once so each iteration does a dict lookup instead of
+        # scanning the full DataFrame (Bottleneck 6).
+        logger.info("Pre-grouping labs by panel…")
+        itemid_to_group = {
+            itemid: group_name
+            for group_name, itemids in lab_panel_config.items()
+            for itemid in itemids
+        }
+        labs_df["_group"] = labs_df["itemid"].map(itemid_to_group)
+        labs_by_group: dict[str, pd.DataFrame] = {
+            group_name: grp.drop(columns=["_group"])
+            for group_name, grp in labs_df.groupby("_group")
+            if group_name in lab_panel_config
+        }
+        logger.info("  Pre-grouped %d lab rows into %d groups", len(labs_df), len(labs_by_group))
+
+        # Cap lab group sequence length at 2048 — lab text lines are long but
+        # not full clinical-note length.
+        lab_max_length = min(max_length, 2048)
+
         for group_name, itemids in lab_panel_config.items():
             pbar.set_description(f"embed_features — lab_{group_name}_embedding")
             output_filename = f"lab_{group_name}_embeddings.parquet"
@@ -297,8 +355,10 @@ def run(config: dict) -> None:
 
             logger.info("Embedding lab group '%s' (%d itemids)…", group_name, len(itemids))
 
-            # Filter to this group's itemids and aggregate per admission
-            group_df = labs_df[labs_df["itemid"].isin(itemids)]
+            # Use pre-grouped DataFrame instead of re-scanning labs_df each iteration
+            group_df = labs_by_group.get(group_name, pd.DataFrame())
+            if group_df.empty:
+                logger.debug("Lab group '%s' has no rows in labs_features.parquet — all zero vectors.", group_name)
             if not group_df.empty and "charttime" in group_df.columns:
                 group_text = (
                     group_df.sort_values("charttime")
@@ -319,8 +379,9 @@ def run(config: dict) -> None:
 
             texts_group: list[str] = group_text["text"].tolist()
             n_non_empty = int((group_text["text"] != "").sum())
+            lab_batch_size = _effective_batch_size(batch_size, lab_max_length)
             embeddings_group = _embed_texts(
-                texts_group, tokenizer, model, device, max_length, batch_size
+                texts_group, tokenizer, model, device, lab_max_length, lab_batch_size
             )
 
             out_df = group_text[["subject_id", "hadm_id"]].copy()

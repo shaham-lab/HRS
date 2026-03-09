@@ -22,6 +22,8 @@ SPLIT_TEST: 0.10
 # HuggingFace BERT model settings
 BERT_MODEL_NAME: "Simonlee711/Clinical_ModernBERT"
 BERT_MAX_LENGTH: 8192
+# Batch size calibrated for max_length=512 on GPU with ≥8GB VRAM.
+# embed_features.py scales this automatically per feature based on sequence length.
 BERT_BATCH_SIZE: 32
 BERT_DEVICE: "cuda"
 
