@@ -190,7 +190,7 @@ def run(config: dict) -> None:
     # Load model and tokenizer
     # ------------------------------------------------------------------ #
     try:
-        from transformers import AutoModel, AutoTokenizer  # type: ignore
+        from transformers import AutoTokenizer, BertModel  # type: ignore
         from transformers import logging as hf_logging  # type: ignore
     except ImportError as exc:
         raise ImportError(
@@ -208,7 +208,7 @@ def run(config: dict) -> None:
     logger.info("  Total embedding tasks: %d (%d text features + %d lab groups)",
                 total_tasks, n_text_features, n_lab_groups)
     tokenizer = AutoTokenizer.from_pretrained(model_name)  # type: ignore[misc]
-    model = AutoModel.from_pretrained(model_name)  # type: ignore[misc]
+    model = BertModel.from_pretrained(model_name, add_pooling_layer=False)  # type: ignore[misc]
     model.to(device)
 
     os.makedirs(embeddings_dir, exist_ok=True)
