@@ -104,6 +104,32 @@ def _effective_batch_size(base_batch_size: int, effective_max_length: int,
     return max(1, min(scaled, base_batch_size * 8))  # cap at 8× base
 
 
+def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
+    """
+    Return True if a completed embedding parquet exists at `path` and is usable.
+
+    Checks:
+    - File exists
+    - Can be read as a parquet
+    - Has the expected number of rows (matches the input feature file)
+    - Contains the expected embedding column
+    - No null values in the embedding column (a partial write would leave nulls)
+    """
+    if not os.path.exists(path):
+        return False
+    try:
+        df = pd.read_parquet(path)
+    except Exception:
+        return False
+    if len(df) != expected_rows:
+        return False
+    if embedding_col not in df.columns:
+        return False
+    if df[embedding_col].isnull().any():
+        return False
+    return True
+
+
 def _embed_texts(
     texts: list[str],
     tokenizer,
@@ -191,6 +217,7 @@ def run(config: dict) -> None:
     max_length = int(config["BERT_MAX_LENGTH"])
     batch_size = int(config["BERT_BATCH_SIZE"])
     device_str = str(config["BERT_DEVICE"])
+    force_reembed = bool(config.get("BERT_FORCE_REEMBED", False))
 
     # ------------------------------------------------------------------ #
     # Determine total embedding tasks for the top-level progress bar
@@ -213,6 +240,29 @@ def run(config: dict) -> None:
 
     n_lab_groups = len(lab_panel_config) if lab_panel_config_loaded else 0
     total_tasks = n_text_features + n_lab_groups
+
+    # ------------------------------------------------------------------ #
+    # Resume status: fast existence pre-screen for logging + early exit
+    # ------------------------------------------------------------------ #
+    os.makedirs(embeddings_dir, exist_ok=True)
+
+    expected_text_outputs: list[tuple[str, str]] = [
+        (os.path.join(embeddings_dir, output_filename), embedding_col)
+        for (_, _, output_filename, embedding_col) in _TEXT_FEATURES
+    ]
+    n_text_done = sum(1 for (p, _) in expected_text_outputs if os.path.exists(p))
+    n_text_total = len(_TEXT_FEATURES)
+
+    if force_reembed:
+        logger.info("BERT_FORCE_REEMBED=true — per-feature resume checks disabled.")
+    elif n_text_done > 0:
+        logger.info(
+            "Resume mode: %d / %d text feature embeddings already present — "
+            "will verify and skip completed ones.",
+            n_text_done, n_text_total,
+        )
+    else:
+        logger.info("Fresh run: no existing text embedding outputs found.")
 
     # ------------------------------------------------------------------ #
     # Load model and tokenizer
@@ -240,8 +290,6 @@ def run(config: dict) -> None:
     model.to(device)
     model.eval()  # set once here; _embed_texts no longer calls model.eval()
 
-    os.makedirs(embeddings_dir, exist_ok=True)
-
     # ------------------------------------------------------------------ #
     # Embed each standard text feature file
     # ------------------------------------------------------------------ #
@@ -257,11 +305,25 @@ def run(config: dict) -> None:
                 logger.warning(
                     "Feature file not found, skipping: %s", input_path
                 )
+                pbar.update(1)
                 continue
 
             pbar.set_description(f"embed_features — {embedding_col}")
             logger.info("Embedding '%s' from %s…", text_col, input_path)
             df = pd.read_parquet(input_path)
+            output_path = os.path.join(embeddings_dir, output_filename)
+
+            # ── Resume check ──────────────────────────────────────────────
+            if not force_reembed and _output_is_valid(
+                output_path, expected_rows=len(df), embedding_col=embedding_col
+            ):
+                logger.info(
+                    "  [SKIP] %s already complete (%d rows) — resuming from next feature.",
+                    output_filename, len(df),
+                )
+                pbar.update(1)
+                continue
+            # ──────────────────────────────────────────────────────────────
 
             if text_col not in df.columns:
                 raise ValueError(
@@ -286,8 +348,9 @@ def run(config: dict) -> None:
             out_df = df[["subject_id", "hadm_id"]].copy()
             out_df[embedding_col] = list(embeddings)
 
-            output_path = os.path.join(embeddings_dir, output_filename)
-            out_df.to_parquet(output_path, index=False)
+            tmp_path = output_path + ".tmp"
+            out_df.to_parquet(tmp_path, index=False)
+            os.replace(tmp_path, output_path)
             logger.info(
                 "  [%d/%d] %s: %d texts embedded (dim=%d)",
                 pbar.n + 1, total_tasks, embedding_col, len(texts), embeddings.shape[1],
@@ -379,6 +442,19 @@ def run(config: dict) -> None:
 
             texts_group: list[str] = group_text["text"].tolist()
             n_non_empty = int((group_text["text"] != "").sum())
+
+            # ── Resume check ──────────────────────────────────────────────
+            if not force_reembed and _output_is_valid(
+                output_path, expected_rows=len(group_text), embedding_col=embedding_col
+            ):
+                logger.info(
+                    "  [SKIP] %s already complete (%d rows) — resuming from next group.",
+                    output_filename, len(group_text),
+                )
+                pbar.update(1)
+                continue
+            # ──────────────────────────────────────────────────────────────
+
             lab_batch_size = _effective_batch_size(batch_size, lab_max_length)
             embeddings_group = _embed_texts(
                 texts_group, tokenizer, model, device, lab_max_length, lab_batch_size
@@ -386,7 +462,9 @@ def run(config: dict) -> None:
 
             out_df = group_text[["subject_id", "hadm_id"]].copy()
             out_df[embedding_col] = list(embeddings_group)
-            out_df.to_parquet(output_path, index=False)
+            tmp_path = output_path + ".tmp"
+            out_df.to_parquet(tmp_path, index=False)
+            os.replace(tmp_path, output_path)
             logger.info(
                 "  [%d/%d] lab_%s: %d admissions (%d with events, %d zero vectors)",
                 pbar.n + 1, total_tasks, group_name,
