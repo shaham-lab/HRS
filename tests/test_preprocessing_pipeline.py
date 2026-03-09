@@ -26,7 +26,7 @@ class TestCreateSplits(unittest.TestCase):
         self.mimic_dir = os.path.join(self.tmp, "mimic")
         self.hosp_dir = os.path.join(self.mimic_dir, "hosp")
         os.makedirs(self.hosp_dir)
-        self.classifications_dir = os.path.join(self.tmp, "classifications")
+        self.preprocessing_dir = os.path.join(self.tmp, "preprocessing")
 
         # Create a small synthetic admissions table
         admissions = pd.DataFrame({
@@ -50,10 +50,10 @@ class TestCreateSplits(unittest.TestCase):
             "SPLIT_TRAIN": 0.7,
             "SPLIT_DEV": 0.15,
             "SPLIT_TEST": 0.15,
-            "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
         }
         create_splits.run(config)
-        out_path = os.path.join(self.classifications_dir, "data_splits.parquet")
+        out_path = os.path.join(self.preprocessing_dir, "data_splits.parquet")
         self.assertTrue(os.path.exists(out_path))
         df = pd.read_parquet(out_path)
         self.assertIn("subject_id", df.columns)
@@ -69,11 +69,11 @@ class TestCreateSplits(unittest.TestCase):
             "SPLIT_TRAIN": 0.7,
             "SPLIT_DEV": 0.15,
             "SPLIT_TEST": 0.15,
-            "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
         }
         create_splits.run(config)
         df = pd.read_parquet(
-            os.path.join(self.classifications_dir, "data_splits.parquet")
+            os.path.join(self.preprocessing_dir, "data_splits.parquet")
         )
         self.assertEqual(len(df), 20)
         self.assertFalse(df["split"].isna().any())
@@ -86,7 +86,7 @@ class TestCreateSplits(unittest.TestCase):
             "SPLIT_TRAIN": 0.5,
             "SPLIT_DEV": 0.2,
             "SPLIT_TEST": 0.2,  # sums to 0.9
-            "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
         }
         with self.assertRaises(ValueError):
             create_splits.run(config)
@@ -379,9 +379,11 @@ class TestCombineDataset(unittest.TestCase):
         self.features_dir = os.path.join(self.tmp, "features")
         self.embeddings_dir = os.path.join(self.tmp, "embeddings")
         self.classifications_dir = os.path.join(self.tmp, "classifications")
+        self.preprocessing_dir = os.path.join(self.tmp, "preprocessing")
         os.makedirs(self.features_dir)
         os.makedirs(self.embeddings_dir)
         os.makedirs(self.classifications_dir)
+        os.makedirs(self.preprocessing_dir)
 
         splits = pd.DataFrame({
             "subject_id": [1, 2],
@@ -389,7 +391,7 @@ class TestCombineDataset(unittest.TestCase):
             "split": ["train", "dev"],
         })
         splits.to_parquet(
-            os.path.join(self.classifications_dir, "data_splits.parquet"), index=False
+            os.path.join(self.preprocessing_dir, "data_splits.parquet"), index=False
         )
 
         labels = pd.DataFrame({
@@ -423,6 +425,7 @@ class TestCombineDataset(unittest.TestCase):
             "FEATURES_DIR": self.features_dir,
             "EMBEDDINGS_DIR": self.embeddings_dir,
             "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
         }
         combine_dataset.run(config)
         out_path = os.path.join(self.classifications_dir, "final_cdss_dataset.parquet")
@@ -435,6 +438,7 @@ class TestCombineDataset(unittest.TestCase):
             "FEATURES_DIR": self.features_dir,
             "EMBEDDINGS_DIR": self.embeddings_dir,
             "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
         }
         combine_dataset.run(config)
         out = pd.read_parquet(
@@ -628,7 +632,7 @@ class TestHashUtils(unittest.TestCase):
             "SPLIT_TRAIN": 0.7,
             "SPLIT_DEV": 0.15,
             "SPLIT_TEST": 0.15,
-            "CLASSIFICATIONS_DIR": os.path.join(self.tmp, "classifications"),
+            "PREPROCESSING_DIR": os.path.join(self.tmp, "preprocessing"),
             "HASH_REGISTRY_PATH": registry_path,
             "FORCE_RERUN": False,
         }
@@ -1043,7 +1047,9 @@ class TestExtractDemographicsHadmLinkage(unittest.TestCase):
         os.makedirs(self.icu_dir)
         self.features_dir = os.path.join(self.tmp, "features")
         self.classifications_dir = os.path.join(self.tmp, "classifications")
+        self.preprocessing_dir = os.path.join(self.tmp, "preprocessing")
         os.makedirs(self.classifications_dir)
+        os.makedirs(self.preprocessing_dir)
 
         # Minimal admissions
         admissions = pd.DataFrame({
@@ -1068,7 +1074,7 @@ class TestExtractDemographicsHadmLinkage(unittest.TestCase):
             "hadm_id": [10, 20],
             "split": ["train", "dev"],
         })
-        splits.to_parquet(os.path.join(self.classifications_dir, "data_splits.parquet"))
+        splits.to_parquet(os.path.join(self.preprocessing_dir, "data_splits.parquet"))
 
     def tearDown(self):
         import shutil
@@ -1078,6 +1084,7 @@ class TestExtractDemographicsHadmLinkage(unittest.TestCase):
         return {
             "MIMIC_DATA_DIR": self.mimic_dir,
             "FEATURES_DIR": self.features_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
             "CLASSIFICATIONS_DIR": self.classifications_dir,
         }
 

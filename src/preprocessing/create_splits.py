@@ -9,7 +9,7 @@ Expected config keys:
     SPLIT_TRAIN           – fraction for training set
     SPLIT_DEV             – fraction for dev set
     SPLIT_TEST            – fraction for test set
-    CLASSIFICATIONS_DIR   – output directory for splits parquet
+    PREPROCESSING_DIR     – output directory for the splits parquet
 """
 
 import logging
@@ -17,6 +17,7 @@ import os
 
 import pandas as pd
 from sklearn.model_selection import train_test_split
+from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _record_hashes, _sources_unchanged
 
@@ -33,7 +34,7 @@ def run(config: dict) -> None:
         "SPLIT_TRAIN",
         "SPLIT_DEV",
         "SPLIT_TEST",
-        "CLASSIFICATIONS_DIR",
+        "PREPROCESSING_DIR",
     ]
     for key in required_keys:
         if key not in config:
@@ -43,7 +44,7 @@ def run(config: dict) -> None:
     split_train = float(config["SPLIT_TRAIN"])
     split_dev = float(config["SPLIT_DEV"])
     split_test = float(config["SPLIT_TEST"])
-    classifications_dir = config["CLASSIFICATIONS_DIR"]
+    preprocessing_dir = config["PREPROCESSING_DIR"]
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
     if abs(split_train + split_dev + split_test - 1.0) > 1e-6:
@@ -58,16 +59,14 @@ def run(config: dict) -> None:
     source_paths = [p for p in [
         _gz_or_csv(mimic_dir, "hosp", "admissions"),
     ] if os.path.exists(p)]
-    output_paths = [os.path.join(classifications_dir, "data_splits.parquet")]
+    output_paths = [os.path.join(preprocessing_dir, "data_splits.parquet")]
 
     if registry_path and not config.get("FORCE_RERUN", False):
         if _sources_unchanged("create_splits", source_paths,
                                output_paths, registry_path, logger):
             return
 
-    # ------------------------------------------------------------------ #
-    # Load admissions
-    # ------------------------------------------------------------------ #
+    # Resolve admissions path before starting progress bar
     admissions_path = os.path.join(mimic_dir, "hosp", "admissions.csv.gz")
     if not os.path.exists(admissions_path):
         admissions_path = os.path.join(mimic_dir, "hosp", "admissions.csv")
@@ -76,75 +75,92 @@ def run(config: dict) -> None:
             f"admissions table not found in {os.path.join(mimic_dir, 'hosp')}"
         )
 
-    logger.info("Loading admissions from %s", admissions_path)
-    admissions = pd.read_csv(
-        admissions_path,
-        usecols=["subject_id", "hadm_id", "hospital_expire_flag"],
-        dtype={"subject_id": int, "hadm_id": int, "hospital_expire_flag": int},
-    )
-    logger.info("Loaded %d admissions for %d patients",
-                len(admissions), admissions["subject_id"].nunique())
+    steps = [
+        "Load admissions",
+        "Build patient stats",
+        "Split train/devtest",
+        "Split dev/test",
+        "Assign splits",
+        "Save output",
+    ]
+    with tqdm(total=len(steps), desc="create_splits", unit="step") as pbar:
+        # ------------------------------------------------------------------ #
+        # Load admissions
+        # ------------------------------------------------------------------ #
+        logger.info("Loading admissions from %s", admissions_path)
+        admissions = pd.read_csv(
+            admissions_path,
+            usecols=["subject_id", "hadm_id", "hospital_expire_flag"],
+            dtype={"subject_id": int, "hadm_id": int, "hospital_expire_flag": int},
+        )
+        logger.info("Loaded %d admissions for %d patients",
+                    len(admissions), admissions["subject_id"].nunique())
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Build patient-level outcome rate for stratification
-    # ------------------------------------------------------------------ #
-    patient_stats = (
-        admissions.groupby("subject_id")["hospital_expire_flag"]
-        .mean()
-        .reset_index()
-        .rename(columns={"hospital_expire_flag": "outcome_rate"})
-    )
-    # Binary stratification label: 1 if any admission ended in death
-    patient_stats["strat_label"] = (patient_stats["outcome_rate"] > 0).astype(int)
+        # ------------------------------------------------------------------ #
+        # Build patient-level outcome rate for stratification
+        # ------------------------------------------------------------------ #
+        patient_stats = (
+            admissions.groupby("subject_id")["hospital_expire_flag"]
+            .mean()
+            .reset_index()
+            .rename(columns={"hospital_expire_flag": "outcome_rate"})
+        )
+        # Binary stratification label: 1 if any admission ended in death
+        patient_stats["strat_label"] = (patient_stats["outcome_rate"] > 0).astype(int)
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Stratified split: first split off test, then split remainder into train/dev
-    # ------------------------------------------------------------------ #
-    dev_test_fraction = split_dev + split_test
-    train_patients, devtest_patients = train_test_split(
-        patient_stats,
-        test_size=dev_test_fraction,
-        stratify=patient_stats["strat_label"],
-        random_state=42,
-    )
+        # ------------------------------------------------------------------ #
+        # Stratified split: first split off test, then split remainder into train/dev
+        # ------------------------------------------------------------------ #
+        dev_test_fraction = split_dev + split_test
+        train_patients, devtest_patients = train_test_split(
+            patient_stats,
+            test_size=dev_test_fraction,
+            stratify=patient_stats["strat_label"],
+            random_state=42,
+        )
+        pbar.update(1)
 
-    relative_test_size = split_test / dev_test_fraction
-    dev_patients, test_patients = train_test_split(
-        devtest_patients,
-        test_size=relative_test_size,
-        stratify=devtest_patients["strat_label"],
-        random_state=42,
-    )
+        relative_test_size = split_test / dev_test_fraction
+        dev_patients, test_patients = train_test_split(
+            devtest_patients,
+            test_size=relative_test_size,
+            stratify=devtest_patients["strat_label"],
+            random_state=42,
+        )
+        pbar.update(1)
 
-    logger.info(
-        "Patient split – train: %d, dev: %d, test: %d",
-        len(train_patients), len(dev_patients), len(test_patients),
-    )
+        logger.info(
+            "Patient split – train: %d, dev: %d, test: %d",
+            len(train_patients), len(dev_patients), len(test_patients),
+        )
 
-    # ------------------------------------------------------------------ #
-    # Map patients to split labels and join back to admissions
-    # ------------------------------------------------------------------ #
-    train_patients = train_patients[["subject_id"]].copy()
-    train_patients["split"] = "train"
-    dev_patients = dev_patients[["subject_id"]].copy()
-    dev_patients["split"] = "dev"
-    test_patients = test_patients[["subject_id"]].copy()
-    test_patients["split"] = "test"
+        # ------------------------------------------------------------------ #
+        # Map patients to split labels and join back to admissions
+        # ------------------------------------------------------------------ #
+        train_patients = train_patients[["subject_id"]].copy()
+        train_patients["split"] = "train"
+        dev_patients = dev_patients[["subject_id"]].copy()
+        dev_patients["split"] = "dev"
+        test_patients = test_patients[["subject_id"]].copy()
+        test_patients["split"] = "test"
 
-    patient_split = pd.concat([train_patients, dev_patients, test_patients],
-                               ignore_index=True)
+        patient_split = pd.concat([train_patients, dev_patients, test_patients],
+                                   ignore_index=True)
+        splits_df = admissions[["subject_id", "hadm_id"]].merge(
+            patient_split, on="subject_id", how="left"
+        )
+        pbar.update(1)
 
-    splits_df = admissions[["subject_id", "hadm_id"]].merge(
-        patient_split, on="subject_id", how="left"
-    )
-
-    # ------------------------------------------------------------------ #
-    # Save output
-    # ------------------------------------------------------------------ #
-    os.makedirs(classifications_dir, exist_ok=True)
-    output_path = os.path.join(classifications_dir, "data_splits.parquet")
-    splits_df.to_parquet(output_path, index=False)
-    logger.info("Saved splits to %s  (shape=%s)", output_path, splits_df.shape)
+        # ------------------------------------------------------------------ #
+        # Save output
+        # ------------------------------------------------------------------ #
+        os.makedirs(preprocessing_dir, exist_ok=True)
+        output_path = os.path.join(preprocessing_dir, "data_splits.parquet")
+        splits_df.to_parquet(output_path, index=False)
+        logger.info("Saved splits to %s  (shape=%s)", output_path, splits_df.shape)
+        pbar.update(1)
 
     if registry_path:
         _record_hashes("create_splits", source_paths, registry_path)

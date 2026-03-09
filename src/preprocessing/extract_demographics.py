@@ -14,7 +14,8 @@ No normalisation is applied.
 Expected config keys:
     MIMIC_DATA_DIR       – root directory containing MIMIC-IV tables
     FEATURES_DIR         – output directory for feature parquets
-    CLASSIFICATIONS_DIR  – directory containing data_splits.parquet
+    PREPROCESSING_DIR    – directory containing data_splits.parquet
+    CLASSIFICATIONS_DIR  – output directory for hadm_linkage_stats.json
 
 Optional config keys:
     HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
@@ -186,7 +187,7 @@ def _extract_chart_vitals(
     path = gz if os.path.exists(gz) else csv
 
     _CHART_CHUNK_SIZE = 1_000_000
-    logger.info("Streaming chartevents from %s in chunks of %d…", path, _CHART_CHUNK_SIZE)
+    logger.info("Streaming chartevents from %s…", path)
     height_chunks: list[pd.DataFrame] = []
     weight_chunks: list[pd.DataFrame] = []
 
@@ -287,9 +288,6 @@ def _extract_chart_vitals(
             w_chunk.loc[lbs_mask, "valuenum"] = w_chunk.loc[lbs_mask, "valuenum"] * 0.453592
             w_chunk = w_chunk[w_chunk["valuenum"] > 0]
             weight_chunks.append(w_chunk)
-
-        if (i + 1) % 10 == 0:
-            logger.info("  Processed %d chunks…", i + 1)
 
     if total_null_hadm > 0:
         logger.info(
@@ -437,6 +435,7 @@ def run(config: dict) -> None:
     required_keys = [
         "MIMIC_DATA_DIR",
         "FEATURES_DIR",
+        "PREPROCESSING_DIR",
         "CLASSIFICATIONS_DIR",
     ]
     for key in required_keys:
@@ -445,6 +444,7 @@ def run(config: dict) -> None:
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
+    preprocessing_dir = config["PREPROCESSING_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]
     registry_path = config.get("HASH_REGISTRY_PATH", "")
     hadm_linkage_strategy = config.get("HADM_LINKAGE_STRATEGY", "drop").lower()
@@ -469,7 +469,7 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Load splits
     # ------------------------------------------------------------------ #
-    splits_path = os.path.join(classifications_dir, "data_splits.parquet")
+    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
     if not os.path.exists(splits_path):
         raise FileNotFoundError(
             f"data_splits.parquet not found at {splits_path}. "

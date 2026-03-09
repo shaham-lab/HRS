@@ -111,29 +111,30 @@ HRS/
 │       └── preprocessing_utils.py
 │
 └── data/
-    ├── features/                               # Generated artefacts (git-ignored)
-    │   ├── demographics_features.parquet
-    │   ├── diag_history_features.parquet
-    │   ├── discharge_history_features.parquet
-    │   ├── triage_features.parquet
-    │   ├── chief_complaint_features.parquet
-    │   ├── labs_features.parquet
-    │   ├── radiology_features.parquet
-    │   └── embeddings/
-    │       ├── diag_history_embeddings.parquet
-    │       ├── discharge_history_embeddings.parquet
-    │       ├── triage_embeddings.parquet
-    │       ├── chief_complaint_embeddings.parquet
-    │       ├── radiology_embeddings.parquet
-    │       └── lab_{group}_embeddings.parquet  # ×13, e.g. lab_blood_chemistry_embeddings.parquet
-    └── classifications/
+    └── preprocessing/                          # Generated artefacts (git-ignored)
         ├── data_splits.parquet
-        ├── y_labels.parquet
-        ├── imputation_stats.json
         ├── source_hashes.json
-        ├── lab_panel_config.yaml
-        ├── hadm_linkage_stats.json
-        └── final_cdss_dataset.parquet
+        ├── features/
+        │   ├── demographics_features.parquet
+        │   ├── diag_history_features.parquet
+        │   ├── discharge_history_features.parquet
+        │   ├── triage_features.parquet
+        │   ├── chief_complaint_features.parquet
+        │   ├── labs_features.parquet
+        │   ├── radiology_features.parquet
+        │   └── embeddings/
+        │       ├── diag_history_embeddings.parquet
+        │       ├── discharge_history_embeddings.parquet
+        │       ├── triage_embeddings.parquet
+        │       ├── chief_complaint_embeddings.parquet
+        │       ├── radiology_embeddings.parquet
+        │       └── lab_{group}_embeddings.parquet  # ×13, e.g. lab_blood_chemistry_embeddings.parquet
+        └── classifications/
+            ├── y_labels.parquet
+            ├── imputation_stats.json
+            ├── lab_panel_config.yaml
+            ├── hadm_linkage_stats.json
+            └── final_cdss_dataset.parquet
 ```
 
 ---
@@ -156,10 +157,11 @@ from this file.
 | `BERT_MAX_LENGTH`     | `int`   | Maximum token length passed to the BERT tokenizer.                                                                                                                                               | `8192`                                           |
 | `BERT_BATCH_SIZE`     | `int`   | Number of text samples per inference batch.                                                                                                                                                      | `32`                                             |
 | `BERT_DEVICE`         | `str`   | Inference device: `"cuda"` or `"cpu"`. Falls back to CPU automatically if CUDA is unavailable.                                                                                                   | `"cuda"`                                         |
-| `FEATURES_DIR`        | `str`   | Output directory for raw feature parquets.                                                                                                                                                       | `"data/features"`                                |
-| `EMBEDDINGS_DIR`      | `str`   | Output directory for BERT embedding parquets.                                                                                                                                                    | `"data/features/embeddings"`                     |
-| `CLASSIFICATIONS_DIR` | `str`   | Output directory for label parquets, split files, and JSON artefacts.                                                                                                                            | `"data/classifications"`                         |
-| `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"data/classifications/source_hashes.json"`      |
+| `PREPROCESSING_DIR`   | `str`   | Root output directory; `data_splits.parquet` and `source_hashes.json` are written here.                                                                                                         | `"data/preprocessing"`                           |
+| `FEATURES_DIR`        | `str`   | Output directory for raw feature parquets.                                                                                                                                                       | `"data/preprocessing/features"`                  |
+| `EMBEDDINGS_DIR`      | `str`   | Output directory for BERT embedding parquets.                                                                                                                                                    | `"data/preprocessing/features/embeddings"`       |
+| `CLASSIFICATIONS_DIR` | `str`   | Output directory for label parquets and JSON artefacts.                                                                                                                                          | `"data/preprocessing/classifications"`           |
+| `HASH_REGISTRY_PATH`  | `str`   | Path to the JSON file that stores MD5 hashes of source files for incremental-run detection.                                                                                                      | `"data/preprocessing/source_hashes.json"`        |
 | `HADM_LINKAGE_STRATEGY` | `str` | How to handle records with null `hadm_id`. `"drop"` excludes them (default); `"link"` attempts time-window linkage using `charttime` and admission windows.                                    | `"drop"`                                         |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | `int` | Hours of tolerance outside `admittime`/`dischtime` used when `HADM_LINKAGE_STRATEGY` is `"link"`. Ignored when strategy is `"drop"`.                                                   | `1`                                              |
 | `LAB_ADMISSION_WINDOW` | `int` or `"full"` | Hours from `admittime` to include in `labs_features.parquet`. Integer: include events within this many hours of `admittime`. `"full"`: include all events within the full admission. | `24`                                             |
@@ -297,28 +299,28 @@ python src/preprocessing/inspect_data.py --config /path/to/preprocessing.yaml
 
 ## 7. Output files reference
 
-| File                                   | Location                 | Format  | Produced by                    | Description                                                                                                                                 |
-| -------------------------------------- | ------------------------ | ------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
-| `data_splits.parquet`                  | `data/classifications/` | Parquet | `create_splits`                | One row per admission with `split` column (`train`/`dev`/`test`)                                                                            |
-| `demographics_features.parquet`        | `data/features/`        | Parquet | `extract_demographics`         | One row per admission; `demographic_vec` array column (8 floats)                                                                            |
-| `diag_history_features.parquet`        | `data/features/`        | Parquet | `extract_diag_history`         | One row per admission; `diag_history_text` string column                                                                                    |
-| `discharge_history_features.parquet`   | `data/features/`        | Parquet | `extract_discharge_history`    | One row per admission; `discharge_history_text` string column                                                                               |
-| `triage_features.parquet`              | `data/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `triage_text` string column                                                                                          |
-| `chief_complaint_features.parquet`     | `data/features/`        | Parquet | `extract_triage_and_complaint` | One row per admission; `chief_complaint_text` string column                                                                                 |
-| `labs_features.parquet`                | `data/features/`        | Parquet | `extract_labs`                 | Long format — one row per lab event; columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line` |
-| `radiology_features.parquet`           | `data/features/`        | Parquet | `extract_radiology`            | One row per admission; `radiology_text` string column                                                                                       |
-| `y_labels.parquet`                     | `data/classifications/` | Parquet | `extract_y_data`               | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
-| `imputation_stats.json`                | `data/classifications/` | JSON    | `extract_demographics`         | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
-| `source_hashes.json`                   | `data/classifications/` | JSON    | all modules                    | MD5 hashes of source files per module; drives incremental-run skipping                                                                      |
-| `lab_panel_config.yaml`                | `data/classifications/` | YAML    | `build_lab_panel_config`       | Defines the 13 lab group names and their constituent itemids, derived from `d_labitems`                                                     |
-| `hadm_linkage_stats.json`              | `data/classifications/` | JSON    | all modules                    | Per-module counts of null hadm_id records: dropped, linked, ambiguous-resolved, unresolvable                                               |
-| `diag_history_embeddings.parquet`      | `data/features/embeddings/`      | Parquet | `embed_features`               | One row per admission; `diag_history_embedding` array column                                                                                |
-| `discharge_history_embeddings.parquet` | `data/features/embeddings/`      | Parquet | `embed_features`               | One row per admission; `discharge_history_embedding` array column                                                                           |
-| `triage_embeddings.parquet`            | `data/features/embeddings/`      | Parquet | `embed_features`               | One row per admission; `triage_embedding` array column                                                                                      |
-| `chief_complaint_embeddings.parquet`   | `data/features/embeddings/`      | Parquet | `embed_features`               | One row per admission; `chief_complaint_embedding` array column                                                                             |
-| `radiology_embeddings.parquet`         | `data/features/embeddings/`      | Parquet | `embed_features`               | One row per admission; `radiology_embedding` array column                                                                                   |
-| `lab_{group}_embeddings.parquet` (×13) | `data/features/embeddings/`      | Parquet | `embed_features`               | One row per admission per lab group; `lab_{group}_embedding` array column (768 floats); zero vector for admissions with no events in that group |
-| `final_cdss_dataset.parquet`           | `data/classifications/` | Parquet | `combine_dataset`              | One row per admission; all features and labels joined. Includes demographics, all 5 non-lab embedding columns, and all 13 lab group embedding columns as independent columns. `labs_features.parquet` (long-format raw event data) is excluded — it is superseded by the 13 per-group embedding parquets. The 13 lab group embeddings are discovered and joined automatically by `combine_dataset.py` via dynamic parquet discovery in `EMBEDDINGS_DIR`. |
+| File                                   | Location                          | Format  | Produced by                    | Description                                                                                                                                 |
+| -------------------------------------- | --------------------------------- | ------- | ------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------------- |
+| `data_splits.parquet`                  | `data/preprocessing/`             | Parquet | `create_splits`                | One row per admission with `split` column (`train`/`dev`/`test`)                                                                            |
+| `source_hashes.json`                   | `data/preprocessing/`             | JSON    | all modules                    | MD5 hashes of source files per module; drives incremental-run skipping                                                                      |
+| `demographics_features.parquet`        | `data/preprocessing/features/`    | Parquet | `extract_demographics`         | One row per admission; `demographic_vec` array column (8 floats)                                                                            |
+| `diag_history_features.parquet`        | `data/preprocessing/features/`    | Parquet | `extract_diag_history`         | One row per admission; `diag_history_text` string column                                                                                    |
+| `discharge_history_features.parquet`   | `data/preprocessing/features/`    | Parquet | `extract_discharge_history`    | One row per admission; `discharge_history_text` string column                                                                               |
+| `triage_features.parquet`              | `data/preprocessing/features/`    | Parquet | `extract_triage_and_complaint` | One row per admission; `triage_text` string column                                                                                          |
+| `chief_complaint_features.parquet`     | `data/preprocessing/features/`    | Parquet | `extract_triage_and_complaint` | One row per admission; `chief_complaint_text` string column                                                                                 |
+| `labs_features.parquet`                | `data/preprocessing/features/`    | Parquet | `extract_labs`                 | Long format — one row per lab event; columns: `subject_id`, `hadm_id`, `charttime`, `itemid`, `label`, `fluid`, `category`, `lab_text_line` |
+| `radiology_features.parquet`           | `data/preprocessing/features/`    | Parquet | `extract_radiology`            | One row per admission; `radiology_text` string column                                                                                       |
+| `diag_history_embeddings.parquet`      | `data/preprocessing/features/embeddings/` | Parquet | `embed_features`      | One row per admission; `diag_history_embedding` array column                                                                                |
+| `discharge_history_embeddings.parquet` | `data/preprocessing/features/embeddings/` | Parquet | `embed_features`      | One row per admission; `discharge_history_embedding` array column                                                                           |
+| `triage_embeddings.parquet`            | `data/preprocessing/features/embeddings/` | Parquet | `embed_features`      | One row per admission; `triage_embedding` array column                                                                                      |
+| `chief_complaint_embeddings.parquet`   | `data/preprocessing/features/embeddings/` | Parquet | `embed_features`      | One row per admission; `chief_complaint_embedding` array column                                                                             |
+| `radiology_embeddings.parquet`         | `data/preprocessing/features/embeddings/` | Parquet | `embed_features`      | One row per admission; `radiology_embedding` array column                                                                                   |
+| `lab_{group}_embeddings.parquet` (×13) | `data/preprocessing/features/embeddings/` | Parquet | `embed_features`      | One row per admission per lab group; `lab_{group}_embedding` array column (768 floats); zero vector for admissions with no events in that group |
+| `y_labels.parquet`                     | `data/preprocessing/classifications/` | Parquet | `extract_y_data`          | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
+| `imputation_stats.json`                | `data/preprocessing/classifications/` | JSON    | `extract_demographics`    | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
+| `lab_panel_config.yaml`                | `data/preprocessing/classifications/` | YAML    | `build_lab_panel_config`  | Defines the 13 lab group names and their constituent itemids, derived from `d_labitems`                                                     |
+| `hadm_linkage_stats.json`              | `data/preprocessing/classifications/` | JSON    | all modules               | Per-module counts of null hadm_id records: dropped, linked, ambiguous-resolved, unresolvable                                               |
+| `final_cdss_dataset.parquet`           | `data/preprocessing/classifications/` | Parquet | `combine_dataset`         | One row per admission; all features and labels joined. Includes demographics, all 5 non-lab embedding columns, and all 13 lab group embedding columns as independent columns. `labs_features.parquet` (long-format raw event data) is excluded — it is superseded by the 13 per-group embedding parquets. The 13 lab group embeddings are discovered and joined automatically by `combine_dataset.py` via dynamic parquet discovery in `EMBEDDINGS_DIR`. |
 
 ---
 

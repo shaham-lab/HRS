@@ -17,8 +17,8 @@ Empty / null text → zero vector of the same embedding dimension.
 Expected config keys:
     FEATURES_DIR      – directory containing raw text feature parquets
     EMBEDDINGS_DIR    – output directory for embedding parquets
-    CLASSIFICATIONS_DIR – directory containing lab_panel_config.yaml and
-                          data_splits.parquet
+    CLASSIFICATIONS_DIR – directory containing lab_panel_config.yaml
+    PREPROCESSING_DIR – directory containing data_splits.parquet
     BERT_MODEL_NAME   – HuggingFace model identifier
     BERT_MAX_LENGTH   – maximum token length
     BERT_BATCH_SIZE   – batch size for embedding inference
@@ -145,6 +145,7 @@ def run(config: dict) -> None:
         "FEATURES_DIR",
         "EMBEDDINGS_DIR",
         "CLASSIFICATIONS_DIR",
+        "PREPROCESSING_DIR",
         "BERT_MODEL_NAME",
         "BERT_MAX_LENGTH",
         "BERT_BATCH_SIZE",
@@ -157,6 +158,7 @@ def run(config: dict) -> None:
     features_dir = str(config["FEATURES_DIR"])
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
     classifications_dir = str(config["CLASSIFICATIONS_DIR"])
+    preprocessing_dir = str(config["PREPROCESSING_DIR"])
     model_name = str(config["BERT_MODEL_NAME"])
     max_length = int(config["BERT_MAX_LENGTH"])
     batch_size = int(config["BERT_BATCH_SIZE"])
@@ -255,7 +257,7 @@ def run(config: dict) -> None:
     logger.info("Loading labs_features.parquet for lab group embeddings…")
     labs_df = pd.read_parquet(labs_path)
 
-    splits_path = os.path.join(classifications_dir, "data_splits.parquet")
+    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
     if not os.path.exists(splits_path):
         logger.warning(
             "data_splits.parquet not found at %s — lab group embeddings skipped. "

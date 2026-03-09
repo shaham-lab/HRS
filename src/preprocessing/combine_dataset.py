@@ -2,9 +2,10 @@
 combine_dataset.py – Merge all features into the final CDSS dataset.
 
 Reads:
-  • input/embeddings/   – all embedding parquets
-  • input/features/     – demographics_features.parquet
-  • input/classifications/ – y_labels.parquet, data_splits.parquet
+  • data/preprocessing/embeddings/   – all embedding parquets
+  • data/preprocessing/features/     – demographics_features.parquet
+  • data/preprocessing/              – data_splits.parquet
+  • data/preprocessing/classifications/ – y_labels.parquet
 
 Performs a left join on (subject_id, hadm_id), starting from the admissions
 universe defined by data_splits.parquet. Raw text parquets from features/ are
@@ -13,7 +14,8 @@ excluded. Missing feature values appear as nulls.
 Expected config keys:
     FEATURES_DIR          – directory containing raw feature parquets
     EMBEDDINGS_DIR        – directory containing embedding parquets
-    CLASSIFICATIONS_DIR   – directory containing labels and splits
+    CLASSIFICATIONS_DIR   – directory containing labels
+    PREPROCESSING_DIR     – directory containing data_splits.parquet
 """
 
 import logging
@@ -43,6 +45,7 @@ def run(config: dict) -> None:
         "FEATURES_DIR",
         "EMBEDDINGS_DIR",
         "CLASSIFICATIONS_DIR",
+        "PREPROCESSING_DIR",
     ]
     for key in required_keys:
         if key not in config:
@@ -51,11 +54,12 @@ def run(config: dict) -> None:
     features_dir = str(config["FEATURES_DIR"])
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
     classifications_dir = str(config["CLASSIFICATIONS_DIR"])
+    preprocessing_dir = str(config["PREPROCESSING_DIR"])
 
     # ------------------------------------------------------------------ #
     # Start from splits (defines the admission universe)
     # ------------------------------------------------------------------ #
-    splits_path = os.path.join(classifications_dir, "data_splits.parquet")
+    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
     if not os.path.exists(splits_path):
         raise FileNotFoundError(
             f"data_splits.parquet not found at {splits_path}. "

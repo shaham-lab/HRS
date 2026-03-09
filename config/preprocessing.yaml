@@ -41,9 +41,10 @@ HADM_LINKAGE_TOLERANCE_HOURS: 1
 LAB_ADMISSION_WINDOW: 24
 
 # Output directory roots (relative to repository root)
-FEATURES_DIR: "data/features"
-EMBEDDINGS_DIR: "data/features/embeddings"
-CLASSIFICATIONS_DIR: "data/classifications"
+PREPROCESSING_DIR: "data/preprocessing"
+FEATURES_DIR: "data/preprocessing/features"
+EMBEDDINGS_DIR: "data/preprocessing/features/embeddings"
+CLASSIFICATIONS_DIR: "data/preprocessing/classifications"
 
 # Path to the source-file hash registry (used to skip unchanged modules).
-HASH_REGISTRY_PATH: "data/classifications/source_hashes.json"
+HASH_REGISTRY_PATH: "data/preprocessing/source_hashes.json"

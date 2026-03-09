@@ -21,7 +21,6 @@ import os
 import sys
 
 import yaml
-from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -32,7 +31,7 @@ _CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
 
 _PATH_KEYS = {
     "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
-    "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+    "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
     "HASH_REGISTRY_PATH",
 }
 
@@ -219,7 +218,7 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     # Execute modules in order
     # ------------------------------------------------------------------ #
-    for module_name in tqdm(modules_to_run, desc="Pipeline", unit="module"):
+    for module_name in modules_to_run:
         config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
         _run_module(module_name, config)
 

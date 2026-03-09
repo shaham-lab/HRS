@@ -25,7 +25,7 @@ _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 _CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
 _PATH_KEYS = {
     "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
-    "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+    "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
     "HASH_REGISTRY_PATH",
 }
 

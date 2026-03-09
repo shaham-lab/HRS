@@ -293,22 +293,21 @@ def run(config: dict) -> None:
         else:
             _CHART_CHUNK_SIZE = 1_000_000
             chart_path = chart_gz if os.path.exists(chart_gz) else chart_csv
-            logger.info(
-                "Streaming chartevents from %s in chunks of %d…",
-                chart_path, _CHART_CHUNK_SIZE,
-            )
+            logger.info("Streaming chartevents from %s…", chart_path)
             chunks: list[pd.DataFrame] = []
-            for i, chunk in enumerate(pd.read_csv(
-                chart_path,
-                usecols=["subject_id", "hadm_id", "itemid", "value"],
-                dtype={"subject_id": int, "hadm_id": float, "itemid": int},
-                chunksize=_CHART_CHUNK_SIZE,
-            )):
+            for chunk in tqdm(
+                pd.read_csv(
+                    chart_path,
+                    usecols=["subject_id", "hadm_id", "itemid", "value"],
+                    dtype={"subject_id": int, "hadm_id": float, "itemid": int},
+                    chunksize=_CHART_CHUNK_SIZE,
+                ),
+                desc="Streaming chartevents",
+                unit="chunk",
+            ):
                 sub = chunk[chunk["itemid"] == _CHIEF_COMPLAINT_ITEMID]
                 if not sub.empty:
                     chunks.append(sub)
-                if (i + 1) % 10 == 0:
-                    logger.info("  Processed %d chunks…", i + 1)
 
             if chunks:
                 cc = pd.concat(chunks, ignore_index=True)
