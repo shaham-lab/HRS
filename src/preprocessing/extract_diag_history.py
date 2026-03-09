@@ -19,6 +19,11 @@ Output format:
 Expected config keys:
     MIMIC_DATA_DIR  – root directory containing MIMIC-IV tables
     FEATURES_DIR    – output directory for feature parquets
+
+Optional config keys:
+    HADM_LINKAGE_STRATEGY – "drop" (default); null hadm_id records are always
+                             dropped in this module (link strategy not applicable
+                             as these tables lack charttime at the row level)
 """
 
 import logging
@@ -97,8 +102,18 @@ def run(config: dict) -> None:
         os.path.join(hosp_dir, "diagnoses_icd.csv.gz"),
         os.path.join(hosp_dir, "diagnoses_icd.csv"),
         usecols=["subject_id", "hadm_id", "icd_code", "icd_version"],
-        dtype={"subject_id": int, "hadm_id": int},
+        dtype={"subject_id": int, "hadm_id": float},
     )
+    null_hadm_count = diagnoses["hadm_id"].isna().sum()
+    if null_hadm_count > 0:
+        logger.info(
+            "%s: %d rows (%.1f%%) have null hadm_id — dropping (strategy: %s)",
+            "diagnoses_icd", null_hadm_count,
+            100 * null_hadm_count / len(diagnoses),
+            config.get("HADM_LINKAGE_STRATEGY", "drop"),
+        )
+    diagnoses = diagnoses.dropna(subset=["hadm_id"])
+    diagnoses["hadm_id"] = diagnoses["hadm_id"].astype(int)
 
     logger.info("Loading d_icd_diagnoses…")
     d_icd = _load_csv(

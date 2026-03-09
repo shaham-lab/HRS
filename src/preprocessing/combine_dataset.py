@@ -9,7 +9,9 @@ Reads:
 
 Performs a left join on (subject_id, hadm_id), starting from the admissions
 universe defined by data_splits.parquet. Raw text parquets from features/ are
-excluded. Missing feature values appear as nulls.
+excluded. Non-lab feature values are null for admissions where that feature
+is absent. Lab group embedding columns are always populated — admissions with
+no events in a given lab group receive a zero vector from embed_features.py.
 
 Expected config keys:
     FEATURES_DIR          – directory containing raw feature parquets

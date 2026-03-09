@@ -21,6 +21,11 @@ Expected config keys:
     MIMIC_NOTE_DIR  – (optional) root of the mimic-iv-note module; discharge
                       notes are looked up under <MIMIC_NOTE_DIR>/note/ first
     HASH_REGISTRY_PATH – (optional) path to the source-file hash registry
+
+Optional config keys:
+    HADM_LINKAGE_STRATEGY – "drop" (default); null hadm_id records are always
+                             dropped in this module (link strategy not applicable
+                             as these tables lack charttime at the row level)
 """
 
 import logging
@@ -121,6 +126,14 @@ def run(config: dict) -> None:
     )
 
     notes["hadm_id"] = notes["hadm_id"].astype("Int64")
+    null_hadm_count = notes["hadm_id"].isna().sum()
+    if null_hadm_count > 0:
+        logger.info(
+            "%s: %d rows (%.1f%%) have null hadm_id — dropping (strategy: %s)",
+            "discharge notes", null_hadm_count,
+            100 * null_hadm_count / len(notes),
+            config.get("HADM_LINKAGE_STRATEGY", "drop"),
+        )
     notes = notes.dropna(subset=["hadm_id"])
     notes["hadm_id"] = notes["hadm_id"].astype(int)
     tqdm.pandas(desc="Cleaning discharge notes")
