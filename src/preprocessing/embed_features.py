@@ -165,6 +165,28 @@ def run(config: dict) -> None:
     device_str = str(config["BERT_DEVICE"])
 
     # ------------------------------------------------------------------ #
+    # Determine total embedding tasks for the top-level progress bar
+    # ------------------------------------------------------------------ #
+    n_text_features = len([f for f in _TEXT_FEATURES
+                            if os.path.exists(os.path.join(features_dir, f[0]))])
+
+    # Peek at lab_panel_config to count lab group tasks (before loading model)
+    lab_panel_config_path = os.path.join(classifications_dir, "lab_panel_config.yaml")
+    lab_panel_config_loaded = False
+    lab_panel_config: dict[str, list[int]] = {}
+    if os.path.exists(lab_panel_config_path):
+        try:
+            import yaml  # type: ignore
+            with open(lab_panel_config_path, encoding="utf-8") as fh:
+                lab_panel_config = yaml.safe_load(fh)
+            lab_panel_config_loaded = True
+        except Exception:
+            pass
+
+    n_lab_groups = len(lab_panel_config) if lab_panel_config_loaded else 0
+    total_tasks = n_text_features + n_lab_groups
+
+    # ------------------------------------------------------------------ #
     # Load model and tokenizer
     # ------------------------------------------------------------------ #
     try:
@@ -176,7 +198,12 @@ def run(config: dict) -> None:
         ) from exc
 
     device = _get_device(device_str)
-    logger.info("Loading BERT model '%s' on device '%s'…", model_name, device)
+    logger.info("Loading BERT model: %s", model_name)
+    logger.info("  Device: %s", device)
+    logger.info("  Max token length: %d", max_length)
+    logger.info("  Batch size: %d", batch_size)
+    logger.info("  Total embedding tasks: %d (%d text features + %d lab groups)",
+                total_tasks, n_text_features, n_lab_groups)
     tokenizer = AutoTokenizer.from_pretrained(model_name)  # type: ignore[misc]
     model = AutoModel.from_pretrained(model_name)  # type: ignore[misc]
     model.to(device)
@@ -186,125 +213,119 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Embed each standard text feature file
     # ------------------------------------------------------------------ #
-    for (
-        input_filename,
-        text_col,
-        output_filename,
-        embedding_col,
-    ) in tqdm(_TEXT_FEATURES, desc="Text feature files", unit="file"):
-        input_path = os.path.join(features_dir, input_filename)
-        if not os.path.exists(input_path):
+    with tqdm(total=total_tasks, desc="embed_features", unit="feature", dynamic_ncols=True) as pbar:
+        for (
+            input_filename,
+            text_col,
+            output_filename,
+            embedding_col,
+        ) in _TEXT_FEATURES:
+            input_path = os.path.join(features_dir, input_filename)
+            if not os.path.exists(input_path):
+                logger.warning(
+                    "Feature file not found, skipping: %s", input_path
+                )
+                continue
+
+            pbar.set_description(f"embed_features — {embedding_col}")
+            logger.info("Embedding '%s' from %s…", text_col, input_path)
+            df = pd.read_parquet(input_path)
+
+            if text_col not in df.columns:
+                raise ValueError(
+                    f"Expected column '{text_col}' not found in {input_path}. "
+                    f"Available columns: {list(df.columns)}"
+                )
+
+            texts: list[str] = [str(t) for t in df[text_col].tolist()]
+            embeddings = _embed_texts(
+                texts, tokenizer, model, device, max_length, batch_size
+            )
+
+            out_df = df[["subject_id", "hadm_id"]].copy()
+            out_df[embedding_col] = list(embeddings)
+
+            output_path = os.path.join(embeddings_dir, output_filename)
+            out_df.to_parquet(output_path, index=False)
+            logger.info(
+                "  [%d/%d] %s: %d texts embedded (dim=%d)",
+                pbar.n + 1, total_tasks, embedding_col, len(texts), embeddings.shape[1],
+            )
+            pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Embed 13 lab group features using lab_panel_config.yaml
+        # ------------------------------------------------------------------ #
+        if not lab_panel_config_loaded:
             logger.warning(
-                "Feature file not found, skipping: %s", input_path
+                "lab_panel_config.yaml not found at %s — lab group embeddings skipped. "
+                "Run build_lab_panel_config.py first.",
+                lab_panel_config_path,
             )
-            continue
+            return
 
-        logger.info("Embedding '%s' from %s…", text_col, input_path)
-        df = pd.read_parquet(input_path)
+        labs_path = os.path.join(features_dir, "labs_features.parquet")
+        if not os.path.exists(labs_path):
+            logger.warning(
+                "labs_features.parquet not found at %s — lab group embeddings skipped.",
+                labs_path,
+            )
+            return
 
-        if text_col not in df.columns:
-            raise ValueError(
-                f"Expected column '{text_col}' not found in {input_path}. "
-                f"Available columns: {list(df.columns)}"
+        logger.info("Loading labs_features.parquet for lab group embeddings…")
+        labs_df = pd.read_parquet(labs_path)
+
+        splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
+        if not os.path.exists(splits_path):
+            logger.warning(
+                "data_splits.parquet not found at %s — lab group embeddings skipped. "
+                "Run create_splits.py first.",
+                splits_path,
+            )
+            return
+
+        splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
+
+        for group_name, itemids in lab_panel_config.items():
+            pbar.set_description(f"embed_features — lab_{group_name}_embedding")
+            output_filename = f"lab_{group_name}_embeddings.parquet"
+            output_path = os.path.join(embeddings_dir, output_filename)
+            embedding_col = f"lab_{group_name}_embedding"
+
+            logger.info("Embedding lab group '%s' (%d itemids)…", group_name, len(itemids))
+
+            # Filter to this group's itemids and aggregate per admission
+            group_df = labs_df[labs_df["itemid"].isin(itemids)]
+            if not group_df.empty and "charttime" in group_df.columns:
+                group_text = (
+                    group_df.sort_values("charttime")
+                    .groupby(["subject_id", "hadm_id"])["lab_text_line"]
+                    .apply(lambda lines: "\n".join(lines))
+                    .reset_index()
+                    .rename(columns={"lab_text_line": "text"})
+                )
+            else:
+                group_text = pd.DataFrame(columns=["subject_id", "hadm_id", "text"])
+
+            # Left-join to full admission universe so admissions with no events
+            # in this group get an empty string → zero vector
+            group_text = splits_df.merge(
+                group_text, on=["subject_id", "hadm_id"], how="left"
+            )
+            group_text["text"] = group_text["text"].fillna("")
+
+            texts_group: list[str] = group_text["text"].tolist()
+            n_non_empty = int((group_text["text"] != "").sum())
+            embeddings_group = _embed_texts(
+                texts_group, tokenizer, model, device, max_length, batch_size
             )
 
-        texts: list[str] = [str(t) for t in df[text_col].tolist()]
-        embeddings = _embed_texts(
-            texts, tokenizer, model, device, max_length, batch_size
-        )
-
-        out_df = df[["subject_id", "hadm_id"]].copy()
-        out_df[embedding_col] = list(embeddings)
-
-        output_path = os.path.join(embeddings_dir, output_filename)
-        out_df.to_parquet(output_path, index=False)
-        logger.info(
-            "Saved embeddings to %s  (shape=%s, embedding_dim=%d)",
-            output_path, out_df.shape, embeddings.shape[1],
-        )
-
-    # ------------------------------------------------------------------ #
-    # Embed 13 lab group features using lab_panel_config.yaml
-    # ------------------------------------------------------------------ #
-    lab_panel_config_path = os.path.join(classifications_dir, "lab_panel_config.yaml")
-    if not os.path.exists(lab_panel_config_path):
-        logger.warning(
-            "lab_panel_config.yaml not found at %s — lab group embeddings skipped. "
-            "Run build_lab_panel_config.py first.",
-            lab_panel_config_path,
-        )
-        return
-
-    try:
-        import yaml  # type: ignore
-    except ImportError as exc:
-        raise ImportError(
-            "The 'pyyaml' package is required for reading lab_panel_config.yaml. "
-            "Install it with: pip install pyyaml"
-        ) from exc
-
-    with open(lab_panel_config_path, encoding="utf-8") as fh:
-        lab_panel_config: dict[str, list[int]] = yaml.safe_load(fh)
-
-    labs_path = os.path.join(features_dir, "labs_features.parquet")
-    if not os.path.exists(labs_path):
-        logger.warning(
-            "labs_features.parquet not found at %s — lab group embeddings skipped.",
-            labs_path,
-        )
-        return
-
-    logger.info("Loading labs_features.parquet for lab group embeddings…")
-    labs_df = pd.read_parquet(labs_path)
-
-    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
-    if not os.path.exists(splits_path):
-        logger.warning(
-            "data_splits.parquet not found at %s — lab group embeddings skipped. "
-            "Run create_splits.py first.",
-            splits_path,
-        )
-        return
-
-    splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
-
-    for group_name, itemids in tqdm(lab_panel_config.items(),
-                                    desc="Lab group embeddings", unit="group"):
-        output_filename = f"lab_{group_name}_embeddings.parquet"
-        output_path = os.path.join(embeddings_dir, output_filename)
-        embedding_col = f"lab_{group_name}_embedding"
-
-        logger.info("Embedding lab group '%s' (%d itemids)…", group_name, len(itemids))
-
-        # Filter to this group's itemids and aggregate per admission
-        group_df = labs_df[labs_df["itemid"].isin(itemids)]
-        if not group_df.empty and "charttime" in group_df.columns:
-            group_text = (
-                group_df.sort_values("charttime")
-                .groupby(["subject_id", "hadm_id"])["lab_text_line"]
-                .apply(lambda lines: "\n".join(lines))
-                .reset_index()
-                .rename(columns={"lab_text_line": "text"})
+            out_df = group_text[["subject_id", "hadm_id"]].copy()
+            out_df[embedding_col] = list(embeddings_group)
+            out_df.to_parquet(output_path, index=False)
+            logger.info(
+                "  [%d/%d] lab_%s: %d admissions (%d with events, %d zero vectors)",
+                pbar.n + 1, total_tasks, group_name,
+                len(texts_group), n_non_empty, len(texts_group) - n_non_empty,
             )
-        else:
-            group_text = pd.DataFrame(columns=["subject_id", "hadm_id", "text"])
-
-        # Left-join to full admission universe so admissions with no events
-        # in this group get an empty string → zero vector
-        group_text = splits_df.merge(
-            group_text, on=["subject_id", "hadm_id"], how="left"
-        )
-        group_text["text"] = group_text["text"].fillna("")
-
-        texts_group: list[str] = group_text["text"].tolist()
-        embeddings_group = _embed_texts(
-            texts_group, tokenizer, model, device, max_length, batch_size
-        )
-
-        out_df = group_text[["subject_id", "hadm_id"]].copy()
-        out_df[embedding_col] = list(embeddings_group)
-        out_df.to_parquet(output_path, index=False)
-        logger.info(
-            "Saved %s embeddings to %s  (shape=%s, embedding_dim=%d)",
-            group_name, output_path, out_df.shape, embeddings_group.shape[1],
-        )
+            pbar.update(1)

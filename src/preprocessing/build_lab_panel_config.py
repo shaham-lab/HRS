@@ -72,6 +72,8 @@ def run(config: dict) -> None:
     classifications_dir = config["CLASSIFICATIONS_DIR"]
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
+    logger.info("Building lab panel config from d_labitems…")
+
     # ------------------------------------------------------------------ #
     # Hash-based skip check
     # ------------------------------------------------------------------ #
@@ -134,10 +136,12 @@ def run(config: dict) -> None:
     for group_name in groups:
         groups[group_name].sort()
 
-    logger.info("Lab panel config: %d groups, total %d itemids",
+    logger.info("Lab panel config: %d groups, %d total itemids",
                 len(groups), sum(len(v) for v in groups.values()))
-    for group_name, items in sorted(groups.items()):
-        logger.info("  %s: %d itemids", group_name, len(items))
+    logger.info("  %-45s  %s", "Group", "Item count")
+    logger.info("  " + "-" * 55)
+    for group_name in sorted(groups):
+        logger.info("  %-45s  %d", group_name, len(groups[group_name]))
 
     # ------------------------------------------------------------------ #
     # Write output
@@ -146,7 +150,7 @@ def run(config: dict) -> None:
     output_path = os.path.join(classifications_dir, "lab_panel_config.yaml")
     with open(output_path, "w", encoding="utf-8") as fh:
         yaml.dump(groups, fh, default_flow_style=False, sort_keys=True)
-    logger.info("Saved lab panel config to %s", output_path)
+    logger.info("Saved lab panel config → %s", output_path)
 
     if registry_path:
         _record_hashes("build_lab_panel_config", source_paths, registry_path)

@@ -49,10 +49,11 @@ def run(config: dict) -> None:
             return
 
     steps = ["Load admissions", "Compute Y1 (mortality)", "Compute Y2 (readmission)", "Save output"]
-    with tqdm(total=len(steps), desc="extract_y_data", unit="step") as pbar:
+    with tqdm(total=len(steps), desc="extract_y_data", unit="step", dynamic_ncols=True) as pbar:
         # ------------------------------------------------------------------ #
         # Load admissions
         # ------------------------------------------------------------------ #
+        pbar.set_description("extract_y_data — loading admissions")
         logger.info("Loading admissions…")
         admissions = _load_csv(
             os.path.join(hosp_dir, "admissions.csv.gz"),
@@ -62,19 +63,24 @@ def run(config: dict) -> None:
             parse_dates=["admittime", "dischtime"],
             dtype={"subject_id": int, "hadm_id": int, "hospital_expire_flag": int},
         )
-        logger.info("Loaded %d admissions", len(admissions))
+        logger.info("  Loaded %d admissions for %d patients",
+                    len(admissions), admissions["subject_id"].nunique())
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Y1 – in-hospital mortality
         # ------------------------------------------------------------------ #
+        pbar.set_description("extract_y_data — computing Y1 (mortality)")
         labels = admissions[["subject_id", "hadm_id", "hospital_expire_flag"]].copy()
         labels = labels.rename(columns={"hospital_expire_flag": "y1_mortality"})
+        logger.info("  Y1 positive rate: %.2f%%  (%d deceased admissions)",
+                    100 * labels["y1_mortality"].mean(), labels["y1_mortality"].sum())
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Y2 – 30-day readmission
         # ------------------------------------------------------------------ #
+        pbar.set_description("extract_y_data — computing Y2 (30-day readmission)")
         logger.info("Computing 30-day readmission labels…")
 
         # Self-join on subject_id to find subsequent admissions
@@ -104,20 +110,20 @@ def run(config: dict) -> None:
         died_mask = labels["y1_mortality"] == 1
         labels.loc[died_mask, "y2_readmission"] = float("nan")
 
-        logger.info(
-            "Y1 positive rate: %.3f  |  Y2 positive rate (excl. deaths): %.3f",
-            labels["y1_mortality"].mean(),
-            labels.loc[~died_mask, "y2_readmission"].mean(),
-        )
+        logger.info("  Y2 positive rate (excl. deaths): %.2f%%  (%d readmitted)",
+                    100 * labels.loc[~died_mask, "y2_readmission"].mean(),
+                    int(labels.loc[~died_mask, "y2_readmission"].sum()))
+        logger.info("  Y2 excluded (deceased): %d admissions", int(died_mask.sum()))
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Save output
         # ------------------------------------------------------------------ #
+        pbar.set_description("extract_y_data — saving y_labels.parquet")
         os.makedirs(classifications_dir, exist_ok=True)
         output_path = os.path.join(classifications_dir, "y_labels.parquet")
         labels.to_parquet(output_path, index=False)
-        logger.info("Saved Y labels to %s  (shape=%s)", output_path, labels.shape)
+        logger.info("  Saved %d label rows to %s", len(labels), output_path)
         pbar.update(1)
 
     if registry_path:

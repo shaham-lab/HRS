@@ -118,95 +118,121 @@ def run(config: dict) -> None:
             f"{note_dir}/note/, {mimic_dir}/note/, and {mimic_dir}/hosp/"
         )
 
-    notes = pd.read_csv(
-        note_path,
-        usecols=["subject_id", "hadm_id", "charttime", "text"],
-        parse_dates=["charttime"],
-        dtype={"subject_id": int, "hadm_id": float},
-    )
-
-    notes["hadm_id"] = notes["hadm_id"].astype("Int64")
-    null_hadm_count = notes["hadm_id"].isna().sum()
-    if null_hadm_count > 0:
-        logger.info(
-            "%s: %d rows (%.1f%%) have null hadm_id — dropping (strategy: %s)",
-            "discharge notes", null_hadm_count,
-            100 * null_hadm_count / len(notes),
-            config.get("HADM_LINKAGE_STRATEGY", "drop"),
+    steps = [
+        "Load discharge notes",
+        "Clean note text",
+        "Load admissions",
+        "Build prior-visit text per admission",
+        "Save discharge_history_features.parquet",
+    ]
+    with tqdm(total=len(steps), desc="extract_discharge_history", unit="step", dynamic_ncols=True) as pbar:
+        pbar.set_description("extract_discharge_history — loading discharge notes")
+        notes = pd.read_csv(
+            note_path,
+            usecols=["subject_id", "hadm_id", "charttime", "text"],
+            parse_dates=["charttime"],
+            dtype={"subject_id": int, "hadm_id": float},
         )
-    notes = notes.dropna(subset=["hadm_id"])
-    notes["hadm_id"] = notes["hadm_id"].astype(int)
-    tqdm.pandas(desc="Cleaning discharge notes")
-    notes["text"] = notes["text"].progress_apply(_clean_note)
 
-    logger.info("Loaded %d discharge notes", len(notes))
+        notes["hadm_id"] = notes["hadm_id"].astype("Int64")
+        n_null_hadm = int(notes["hadm_id"].isna().sum())
+        null_hadm_count = n_null_hadm
+        if null_hadm_count > 0:
+            logger.info(
+                "%s: %d rows (%.1f%%) have null hadm_id — dropping (strategy: %s)",
+                "discharge notes", null_hadm_count,
+                100 * null_hadm_count / len(notes),
+                config.get("HADM_LINKAGE_STRATEGY", "drop"),
+            )
+        notes = notes.dropna(subset=["hadm_id"])
+        notes["hadm_id"] = notes["hadm_id"].astype(int)
+        logger.info("  Loaded %d discharge notes for %d admissions",
+                    len(notes), notes["hadm_id"].nunique())
+        if n_null_hadm:
+            logger.info("  Dropped %d notes with null hadm_id (%.1f%%)",
+                        n_null_hadm, 100 * n_null_hadm / (len(notes) + n_null_hadm))
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Load admissions
-    # ------------------------------------------------------------------ #
-    admissions = _load_csv(
-        os.path.join(hosp_dir, "admissions.csv.gz"),
-        os.path.join(hosp_dir, "admissions.csv"),
-        usecols=["subject_id", "hadm_id", "admittime"],
-        parse_dates=["admittime"],
-        dtype={"subject_id": int, "hadm_id": int},
-    )
+        # ------------------------------------------------------------------ #
+        # Clean note text
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_discharge_history — cleaning note text")
+        tqdm.pandas(desc="Cleaning discharge notes")
+        notes["text"] = notes["text"].progress_apply(_clean_note)
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Attach note admission time
-    # ------------------------------------------------------------------ #
-    notes_with_time = notes.merge(
-        admissions[["subject_id", "hadm_id", "admittime"]].rename(
-            columns={"hadm_id": "note_hadm_id", "admittime": "note_admittime"}
-        ),
-        left_on=["subject_id", "hadm_id"],
-        right_on=["subject_id", "note_hadm_id"],
-        how="left",
-    )
+        # ------------------------------------------------------------------ #
+        # Load admissions
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_discharge_history — loading admissions")
+        admissions = _load_csv(
+            os.path.join(hosp_dir, "admissions.csv.gz"),
+            os.path.join(hosp_dir, "admissions.csv"),
+            usecols=["subject_id", "hadm_id", "admittime"],
+            parse_dates=["admittime"],
+            dtype={"subject_id": int, "hadm_id": int},
+        )
+        logger.info("  Loaded %d admissions", len(admissions))
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # For each admission, concatenate notes from prior admissions only
-    # ------------------------------------------------------------------ #
-    logger.info(
-        "Building prior-visit discharge text for %d admissions…", len(admissions)
-    )
-    merged = admissions.merge(
-        notes_with_time[["subject_id", "note_hadm_id", "note_admittime", "text"]],
-        on="subject_id",
-        how="left",
-    )
-    prior_mask = merged["note_admittime"] < merged["admittime"]
-    prior = merged[prior_mask]
-
-    discharge_text = (
-        prior.sort_values("note_admittime")
-        .assign(
-            _header=lambda df: df["note_admittime"].apply(
-                lambda t: f"Prior Discharge Summary ({pd.to_datetime(t).strftime('%Y-%m-%d')}):"
+        # ------------------------------------------------------------------ #
+        # Attach note admission time
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_discharge_history — building prior-visit text")
+        notes_with_time = notes.merge(
+            admissions[["subject_id", "hadm_id", "admittime"]].rename(
+                columns={"hadm_id": "note_hadm_id", "admittime": "note_admittime"}
             ),
-            _entry=lambda df: df["_header"] + "\n" + df["text"],
+            left_on=["subject_id", "hadm_id"],
+            right_on=["subject_id", "note_hadm_id"],
+            how="left",
         )
-        .groupby(["subject_id", "hadm_id"])["_entry"]
-        .apply(lambda entries: "\n\n".join(e for e in entries if e))
-        .reset_index()
-        .rename(columns={"_entry": "discharge_history_text"})
-    )
 
-    out_df = admissions[["subject_id", "hadm_id"]].merge(
-        discharge_text, on=["subject_id", "hadm_id"], how="left"
-    )
-    out_df["discharge_history_text"] = out_df["discharge_history_text"].fillna("")
+        # ------------------------------------------------------------------ #
+        # For each admission, concatenate notes from prior admissions only
+        # ------------------------------------------------------------------ #
+        logger.info(
+            "Building prior-visit discharge text for %d admissions…", len(admissions)
+        )
+        merged = admissions.merge(
+            notes_with_time[["subject_id", "note_hadm_id", "note_admittime", "text"]],
+            on="subject_id",
+            how="left",
+        )
+        prior_mask = merged["note_admittime"] < merged["admittime"]
+        prior = merged[prior_mask]
 
-    # ------------------------------------------------------------------ #
-    # Save output
-    # ------------------------------------------------------------------ #
-    os.makedirs(features_dir, exist_ok=True)
-    output_path = os.path.join(features_dir, "discharge_history_features.parquet")
-    out_df.to_parquet(output_path, index=False)
-    logger.info(
-        "Saved discharge history features to %s  (shape=%s)",
-        output_path, out_df.shape,
-    )
+        discharge_text = (
+            prior.sort_values("note_admittime")
+            .assign(
+                _header=lambda df: df["note_admittime"].apply(
+                    lambda t: f"Prior Discharge Summary ({pd.to_datetime(t).strftime('%Y-%m-%d')}):"
+                ),
+                _entry=lambda df: df["_header"] + "\n" + df["text"],
+            )
+            .groupby(["subject_id", "hadm_id"])["_entry"]
+            .apply(lambda entries: "\n\n".join(e for e in entries if e))
+            .reset_index()
+            .rename(columns={"_entry": "discharge_history_text"})
+        )
+
+        out_df = admissions[["subject_id", "hadm_id"]].merge(
+            discharge_text, on=["subject_id", "hadm_id"], how="left"
+        )
+        out_df["discharge_history_text"] = out_df["discharge_history_text"].fillna("")
+        logger.info("  Built discharge history for %d admissions (%d with prior notes)",
+                    len(out_df), int((out_df["discharge_history_text"] != "").sum()))
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Save output
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_discharge_history — saving discharge_history_features.parquet")
+        os.makedirs(features_dir, exist_ok=True)
+        output_path = os.path.join(features_dir, "discharge_history_features.parquet")
+        out_df.to_parquet(output_path, index=False)
+        logger.info("  Saved %d rows to %s", len(out_df), output_path)
+        pbar.update(1)
 
     if registry_path:
         _record_hashes("extract_discharge_history", source_paths, registry_path)

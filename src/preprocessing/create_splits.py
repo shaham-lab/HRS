@@ -83,23 +83,25 @@ def run(config: dict) -> None:
         "Assign splits",
         "Save output",
     ]
-    with tqdm(total=len(steps), desc="create_splits", unit="step") as pbar:
+    with tqdm(total=len(steps), desc="create_splits", unit="step", dynamic_ncols=True) as pbar:
         # ------------------------------------------------------------------ #
         # Load admissions
         # ------------------------------------------------------------------ #
+        pbar.set_description("create_splits — loading admissions")
         logger.info("Loading admissions from %s", admissions_path)
         admissions = pd.read_csv(
             admissions_path,
             usecols=["subject_id", "hadm_id", "hospital_expire_flag"],
             dtype={"subject_id": int, "hadm_id": int, "hospital_expire_flag": int},
         )
-        logger.info("Loaded %d admissions for %d patients",
+        logger.info("  Loaded %d admissions for %d unique patients",
                     len(admissions), admissions["subject_id"].nunique())
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Build patient-level outcome rate for stratification
         # ------------------------------------------------------------------ #
+        pbar.set_description("create_splits — computing patient outcome rates")
         patient_stats = (
             admissions.groupby("subject_id")["hospital_expire_flag"]
             .mean()
@@ -113,6 +115,7 @@ def run(config: dict) -> None:
         # ------------------------------------------------------------------ #
         # Stratified split: first split off test, then split remainder into train/dev
         # ------------------------------------------------------------------ #
+        pbar.set_description("create_splits — stratified train/devtest split")
         dev_test_fraction = split_dev + split_test
         train_patients, devtest_patients = train_test_split(
             patient_stats,
@@ -122,6 +125,7 @@ def run(config: dict) -> None:
         )
         pbar.update(1)
 
+        pbar.set_description("create_splits — stratified dev/test split")
         relative_test_size = split_test / dev_test_fraction
         dev_patients, test_patients = train_test_split(
             devtest_patients,
@@ -129,16 +133,14 @@ def run(config: dict) -> None:
             stratify=devtest_patients["strat_label"],
             random_state=42,
         )
+        logger.info("  Patient counts — train: %d  dev: %d  test: %d",
+                    len(train_patients), len(dev_patients), len(test_patients))
         pbar.update(1)
-
-        logger.info(
-            "Patient split – train: %d, dev: %d, test: %d",
-            len(train_patients), len(dev_patients), len(test_patients),
-        )
 
         # ------------------------------------------------------------------ #
         # Map patients to split labels and join back to admissions
         # ------------------------------------------------------------------ #
+        pbar.set_description("create_splits — assigning split labels to admissions")
         train_patients = train_patients[["subject_id"]].copy()
         train_patients["split"] = "train"
         dev_patients = dev_patients[["subject_id"]].copy()
@@ -156,10 +158,13 @@ def run(config: dict) -> None:
         # ------------------------------------------------------------------ #
         # Save output
         # ------------------------------------------------------------------ #
+        pbar.set_description("create_splits — saving data_splits.parquet")
         os.makedirs(preprocessing_dir, exist_ok=True)
         output_path = os.path.join(preprocessing_dir, "data_splits.parquet")
         splits_df.to_parquet(output_path, index=False)
-        logger.info("Saved splits to %s  (shape=%s)", output_path, splits_df.shape)
+        logger.info("  Saved %d rows (%d admissions, %d patients) to %s",
+                    len(splits_df), splits_df["hadm_id"].nunique(),
+                    splits_df["subject_id"].nunique(), output_path)
         pbar.update(1)
 
     if registry_path:

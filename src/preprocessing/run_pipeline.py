@@ -19,6 +19,7 @@ import argparse
 import logging
 import os
 import sys
+import time
 
 import yaml
 
@@ -80,13 +81,18 @@ def _import_module(name: str):
     return module
 
 
-def _run_module(name: str, config: dict) -> None:
-    logger.info("=" * 60)
-    logger.info("Running module: %s", name)
-    logger.info("=" * 60)
+def _run_module(name: str, config: dict, idx: int, total: int) -> float:
+    """Run a single module and return elapsed seconds."""
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("  STEP %d/%d — %s", idx, total, name)
+    logger.info("=" * 70)
+    t0 = time.time()
     module = _import_module(name)
     module.run(config)
-    logger.info("Module '%s' completed successfully.", name)
+    elapsed = time.time() - t0
+    logger.info("  STEP %d/%d — %s completed in %.1fs", idx, total, name, elapsed)
+    return elapsed
 
 
 def main() -> None:
@@ -216,13 +222,31 @@ def main() -> None:
         sys.exit(0)
 
     # ------------------------------------------------------------------ #
+    # Print plan before execution
+    # ------------------------------------------------------------------ #
+    logger.info("")
+    logger.info("Pipeline plan — %d module(s) to run:", len(modules_to_run))
+    for idx, name in enumerate(modules_to_run, start=1):
+        logger.info("  %d. %s", idx, name)
+    logger.info("")
+
+    # ------------------------------------------------------------------ #
     # Execute modules in order
     # ------------------------------------------------------------------ #
-    for module_name in modules_to_run:
-        config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
-        _run_module(module_name, config)
+    t_pipeline_start = time.time()
+    n = len(modules_to_run)
 
-    logger.info("Pipeline finished. Modules run: %s", modules_to_run)
+    for idx, module_name in enumerate(modules_to_run, start=1):
+        config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
+        _run_module(module_name, config, idx, n)
+
+    total_elapsed = time.time() - t_pipeline_start
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("  PIPELINE COMPLETE")
+    logger.info("  Modules run : %s", modules_to_run)
+    logger.info("  Total time  : %.1fs (%.1f min)", total_elapsed, total_elapsed / 60)
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

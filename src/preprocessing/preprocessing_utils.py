@@ -78,7 +78,7 @@ def _sources_unchanged(
     # Check all outputs exist
     for p in output_paths:
         if not os.path.exists(p):
-            logger.info("[%s] Output missing: %s — will rerun.", module_name, p)
+            logger.info("[%s] Output not found (%s) — will run.", module_name, os.path.basename(p))
             return False
 
     # Check all sources exist
@@ -96,11 +96,12 @@ def _sources_unchanged(
         stored_hash = stored.get(p)
         if stored_hash != current_hash:
             logger.info(
-                "[%s] Source changed (or first run): %s — will rerun.", module_name, p
+                "[%s] Source file changed (%s) — will rerun.", module_name, os.path.basename(p)
             )
             return False
 
-    logger.info("[%s] All sources unchanged and outputs exist — skipping.", module_name)
+    output_names = [os.path.basename(p) for p in output_paths]
+    logger.info("[%s] Skipping — outputs up to date: %s", module_name, ", ".join(output_names))
     return True
 
 
