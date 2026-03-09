@@ -191,11 +191,14 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     try:
         from transformers import AutoModel, AutoTokenizer  # type: ignore
+        from transformers import logging as hf_logging  # type: ignore
     except ImportError as exc:
         raise ImportError(
             "The 'transformers' package is required for embed_features.py. "
             "Install it with: pip install transformers torch"
         ) from exc
+
+    hf_logging.set_verbosity_error()
 
     device = _get_device(device_str)
     logger.info("Loading BERT model: %s", model_name)
