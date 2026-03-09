@@ -29,6 +29,7 @@ import os
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
@@ -200,12 +201,16 @@ def _extract_chart_vitals(
     adm_for_link["admittime"] = pd.to_datetime(adm_for_link["admittime"])
 
     # Fix 2 CRITICAL: apply unit conversion and range filtering within each chunk
-    for i, chunk in enumerate(pd.read_csv(
-        path,
-        usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
-        dtype={"subject_id": int, "hadm_id": float, "itemid": int},
-        parse_dates=["charttime"],
-        chunksize=_CHART_CHUNK_SIZE,
+    for i, chunk in enumerate(tqdm(
+        pd.read_csv(
+            path,
+            usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
+            dtype={"subject_id": int, "hadm_id": float, "itemid": int},
+            parse_dates=["charttime"],
+            chunksize=_CHART_CHUNK_SIZE,
+        ),
+        desc="Streaming chartevents",
+        unit="chunk",
     )):
         null_hadm = chunk["hadm_id"].isna().sum()
         if null_hadm > 0:

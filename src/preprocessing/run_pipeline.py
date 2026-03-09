@@ -11,8 +11,8 @@ Usage examples:
     python preprocessing/run_pipeline.py --embed_features
     python preprocessing/run_pipeline.py --combine_dataset
 
-All configuration is loaded from preprocessing.yaml (located in the same
-directory as this script). No module reads preprocessing.yaml directly.
+All configuration is loaded from config/preprocessing.yaml (located in the
+repository root). No module reads preprocessing.yaml directly.
 """
 
 import argparse
@@ -21,11 +21,13 @@ import os
 import sys
 
 import yaml
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+_CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
 
 
 _PATH_KEYS = {
@@ -156,7 +158,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         default=_CONFIG_PATH,
-        help=f"Path to preprocessing.yaml (default: {_CONFIG_PATH})",
+        help=f"Path to config/preprocessing.yaml (default: {_CONFIG_PATH})",
     )
     parser.add_argument(
         "--force",
@@ -217,7 +219,7 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     # Execute modules in order
     # ------------------------------------------------------------------ #
-    for module_name in modules_to_run:
+    for module_name in tqdm(modules_to_run, desc="Pipeline", unit="module"):
         config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
         _run_module(module_name, config)
 

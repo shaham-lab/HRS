@@ -21,7 +21,8 @@ pd.set_option("display.width", 120)
 pd.set_option("display.float_format", "{:.2f}".format)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+_CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
 _PATH_KEYS = {
     "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
     "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",

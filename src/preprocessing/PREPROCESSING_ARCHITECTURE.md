@@ -506,7 +506,7 @@ The 13 lab group embeddings are discovered dynamically by scanning `EMBEDDINGS_D
 
 ## 10. Configuration Reference
 
-All configuration is centralised in `preprocessing.yaml`. No module reads this file directly — `run_pipeline.py` loads it and passes the resulting dict to each module's `run()` function.
+All configuration is centralised in `config/preprocessing.yaml` (repository root). No module reads this file directly — `run_pipeline.py` loads it and passes the resulting dict to each module's `run()` function.
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
@@ -523,10 +523,10 @@ All configuration is centralised in `preprocessing.yaml`. No module reads this f
 | `LAB_ADMISSION_WINDOW` | int or `"full"` | `24` | Hours of lab events to include from `admittime`; `"full"` = entire admission |
 | `HADM_LINKAGE_STRATEGY` | str | `"drop"` | How to handle null `hadm_id` records: `"drop"` or `"link"` |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | int | `1` | Tolerance in hours for time-window linkage (only used when strategy is `"link"`) |
-| `FEATURES_DIR` | str | `data/input/features` | Output directory for raw feature parquets |
-| `EMBEDDINGS_DIR` | str | `data/input/embeddings` | Output directory for embedding parquets |
-| `CLASSIFICATIONS_DIR` | str | `data/input/classifications` | Output directory for labels, splits, and JSON artefacts |
-| `HASH_REGISTRY_PATH` | str | `data/input/classifications/source_hashes.json` | Path to MD5 hash registry for incremental run detection |
+| `FEATURES_DIR` | str | `data/features` | Output directory for raw feature parquets |
+| `EMBEDDINGS_DIR` | str | `data/features/embeddings` | Output directory for embedding parquets |
+| `CLASSIFICATIONS_DIR` | str | `data/classifications` | Output directory for labels, splits, and JSON artefacts |
+| `HASH_REGISTRY_PATH` | str | `data/classifications/source_hashes.json` | Path to MD5 hash registry for incremental run detection |
 
 ---
 
@@ -544,7 +544,7 @@ All configuration is centralised in `preprocessing.yaml`. No module reads this f
 
 ### No hardcoding
 
-All file paths, model names, split ratios, batch sizes, window sizes, and thresholds are read from `preprocessing.yaml`. No pipeline module contains a hardcoded path or tunable parameter.
+All file paths, model names, split ratios, batch sizes, window sizes, and thresholds are read from `config/preprocessing.yaml`. No pipeline module contains a hardcoded path or tunable parameter.
 
 ### Reproducibility
 
@@ -576,9 +576,10 @@ All file paths, model names, split ratios, batch sizes, window sizes, and thresh
 ```
 HRS/
 ├── environment.yml
+├── config/
+│   └── preprocessing.yaml              # Central preprocessing configuration
 ├── src/
 │   └── preprocessing/
-│       ├── preprocessing.yaml                  # Central configuration
 │       ├── run_pipeline.py                     # Orchestrator CLI
 │       ├── inspect_data.py                     # Read-only diagnostic utility
 │       ├── preprocessing_utils.py              # Shared utilities (hashing, CSV loading)
@@ -596,40 +597,39 @@ HRS/
 │       └── build_lab_text_lines.py             # Helper — called by extract_labs.py
 │
 └── data/
-    └── input/                                  # Generated artefacts (git-ignored)
-        ├── features/
-        │   ├── demographics_features.parquet
-        │   ├── diag_history_features.parquet
-        │   ├── discharge_history_features.parquet
-        │   ├── triage_features.parquet
-        │   ├── chief_complaint_features.parquet
-        │   ├── labs_features.parquet           # Long format — input to embed_features
-        │   └── radiology_features.parquet
-        ├── embeddings/
-        │   ├── diag_history_embeddings.parquet
-        │   ├── discharge_history_embeddings.parquet
-        │   ├── triage_embeddings.parquet
-        │   ├── chief_complaint_embeddings.parquet
-        │   ├── radiology_embeddings.parquet
-        │   ├── lab_blood_gas_embeddings.parquet
-        │   ├── lab_blood_chemistry_embeddings.parquet
-        │   ├── lab_blood_hematology_embeddings.parquet
-        │   ├── lab_urine_chemistry_embeddings.parquet
-        │   ├── lab_urine_hematology_embeddings.parquet
-        │   ├── lab_other_body_fluid_chemistry_embeddings.parquet
-        │   ├── lab_other_body_fluid_hematology_embeddings.parquet
-        │   ├── lab_ascites_embeddings.parquet
-        │   ├── lab_pleural_embeddings.parquet
-        │   ├── lab_csf_embeddings.parquet
-        │   ├── lab_bone_marrow_embeddings.parquet
-        │   ├── lab_joint_fluid_embeddings.parquet
-        │   └── lab_stool_embeddings.parquet
-        └── classifications/
-            ├── data_splits.parquet
-            ├── y_labels.parquet
-            ├── final_cdss_dataset.parquet
-            ├── lab_panel_config.yaml
-            ├── imputation_stats.json
-            ├── source_hashes.json
-            └── hadm_linkage_stats.json
+    ├── features/                               # Generated artefacts (git-ignored)
+    │   ├── demographics_features.parquet
+    │   ├── diag_history_features.parquet
+    │   ├── discharge_history_features.parquet
+    │   ├── triage_features.parquet
+    │   ├── chief_complaint_features.parquet
+    │   ├── labs_features.parquet               # Long format — input to embed_features
+    │   ├── radiology_features.parquet
+    │   └── embeddings/
+    │       ├── diag_history_embeddings.parquet
+    │       ├── discharge_history_embeddings.parquet
+    │       ├── triage_embeddings.parquet
+    │       ├── chief_complaint_embeddings.parquet
+    │       ├── radiology_embeddings.parquet
+    │       ├── lab_blood_gas_embeddings.parquet
+    │       ├── lab_blood_chemistry_embeddings.parquet
+    │       ├── lab_blood_hematology_embeddings.parquet
+    │       ├── lab_urine_chemistry_embeddings.parquet
+    │       ├── lab_urine_hematology_embeddings.parquet
+    │       ├── lab_other_body_fluid_chemistry_embeddings.parquet
+    │       ├── lab_other_body_fluid_hematology_embeddings.parquet
+    │       ├── lab_ascites_embeddings.parquet
+    │       ├── lab_pleural_embeddings.parquet
+    │       ├── lab_csf_embeddings.parquet
+    │       ├── lab_bone_marrow_embeddings.parquet
+    │       ├── lab_joint_fluid_embeddings.parquet
+    │       └── lab_stool_embeddings.parquet
+    └── classifications/
+        ├── data_splits.parquet
+        ├── y_labels.parquet
+        ├── final_cdss_dataset.parquet
+        ├── lab_panel_config.yaml
+        ├── imputation_stats.json
+        ├── source_hashes.json
+        └── hadm_linkage_stats.json
 ```

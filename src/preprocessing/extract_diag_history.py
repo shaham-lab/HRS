@@ -25,6 +25,7 @@ import logging
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
@@ -148,9 +149,10 @@ def run(config: dict) -> None:
     prior = merged[prior_mask]
 
     # Build structured text block per admission
+    tqdm.pandas(desc="Formatting diag history")
     diag_text = (
         prior.groupby(["subject_id", "hadm_id"])
-        .apply(lambda grp: _format_diag_history(grp))
+        .progress_apply(lambda grp: _format_diag_history(grp))
         .reset_index()
         .rename(columns={0: "diag_history_text"})
     )

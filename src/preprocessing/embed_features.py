@@ -30,6 +30,7 @@ import os
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -96,7 +97,9 @@ def _embed_texts(
     model.eval()
     all_embeddings: list[np.ndarray] = []
 
-    for start in range(0, len(texts), batch_size):
+    n_batches = (len(texts) + batch_size - 1) // batch_size
+    for start in tqdm(range(0, len(texts), batch_size), total=n_batches,
+                      desc="Embedding batches", unit="batch"):
         batch_texts = texts[start: start + batch_size]
         # Replace None/empty with a space so the tokenizer doesn't fail
         batch_texts_safe = [t if isinstance(t, str) and t.strip() else " "
@@ -132,11 +135,6 @@ def _embed_texts(
                 mean_embeddings[i] = np.zeros_like(mean_embeddings[i])
 
         all_embeddings.append(mean_embeddings)
-
-        if (start // batch_size + 1) % 10 == 0:
-            logger.info(
-                "  Embedded %d / %d texts…", start + len(batch_texts), len(texts)
-            )
 
     return np.vstack(all_embeddings)
 
@@ -191,7 +189,7 @@ def run(config: dict) -> None:
         text_col,
         output_filename,
         embedding_col,
-    ) in _TEXT_FEATURES:
+    ) in tqdm(_TEXT_FEATURES, desc="Text feature files", unit="file"):
         input_path = os.path.join(features_dir, input_filename)
         if not os.path.exists(input_path):
             logger.warning(
@@ -268,7 +266,8 @@ def run(config: dict) -> None:
 
     splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
 
-    for group_name, itemids in lab_panel_config.items():
+    for group_name, itemids in tqdm(lab_panel_config.items(),
+                                    desc="Lab group embeddings", unit="group"):
         output_filename = f"lab_{group_name}_embeddings.parquet"
         output_path = os.path.join(embeddings_dir, output_filename)
         embedding_col = f"lab_{group_name}_embedding"

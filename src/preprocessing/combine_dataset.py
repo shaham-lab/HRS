@@ -20,6 +20,7 @@ import logging
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 logger = logging.getLogger(__name__)
 
@@ -79,7 +80,7 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Merge selected feature parquets
     # ------------------------------------------------------------------ #
-    for filename in _FEATURES_TO_INCLUDE:
+    for filename in tqdm(_FEATURES_TO_INCLUDE, desc="Merging features", unit="file"):
         path = str(os.path.join(features_dir, filename))
         if not os.path.exists(path):
             logger.warning("Feature file not found, skipping: %s", path)
@@ -95,7 +96,7 @@ def run(config: dict) -> None:
         embedding_files = sorted(
             f for f in os.listdir(embeddings_dir) if f.endswith(".parquet")
         )
-        for filename in embedding_files:
+        for filename in tqdm(embedding_files, desc="Merging embeddings", unit="file"):
             path = str(os.path.join(embeddings_dir, filename))
             logger.info("Merging embedding file: %s", filename)
             emb_df = pd.read_parquet(path)

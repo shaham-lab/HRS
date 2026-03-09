@@ -29,6 +29,7 @@ import os
 
 import pandas as pd
 import yaml
+from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
@@ -107,7 +108,8 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     groups: dict[str, list[int]] = {}
 
-    for _, row in d_labitems.iterrows():
+    for _, row in tqdm(d_labitems.iterrows(), total=len(d_labitems),
+                       desc="Assigning lab groups", unit="item"):
         fluid = str(row["fluid"]).strip()
         category = str(row["category"]).strip()
         itemid = int(row["itemid"])

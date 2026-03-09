@@ -27,6 +27,7 @@ import logging
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 from preprocessing_utils import (
     _gz_or_csv,
@@ -122,7 +123,8 @@ def run(config: dict) -> None:
     notes["hadm_id"] = notes["hadm_id"].astype("Int64")
     notes = notes.dropna(subset=["hadm_id"])
     notes["hadm_id"] = notes["hadm_id"].astype(int)
-    notes["text"] = notes["text"].apply(_clean_note)
+    tqdm.pandas(desc="Cleaning discharge notes")
+    notes["text"] = notes["text"].progress_apply(_clean_note)
 
     logger.info("Loaded %d discharge notes", len(notes))
 

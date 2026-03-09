@@ -29,6 +29,7 @@ import logging
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
@@ -251,7 +252,8 @@ def run(config: dict) -> None:
             acuity=_fmt(row.get("acuity")),
         )
 
-    triage["triage_text"] = triage.apply(_build_triage_text, axis=1)
+    tqdm.pandas(desc="Building triage text")
+    triage["triage_text"] = triage.progress_apply(_build_triage_text, axis=1)
 
     triage_out = (
         triage[["subject_id", "hadm_id", "triage_text"]]

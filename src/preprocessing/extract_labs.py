@@ -22,6 +22,7 @@ import logging
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
@@ -177,7 +178,7 @@ def run(config: dict) -> None:
                 lab_path, _CHUNK_SIZE)
 
     all_chunks: list[pd.DataFrame] = []
-    for i, chunk in enumerate(
+    for chunk in tqdm(
         pd.read_csv(
             lab_path,
             usecols=[
@@ -188,7 +189,9 @@ def run(config: dict) -> None:
             dtype={"subject_id": int, "hadm_id": float, "itemid": int},
             parse_dates=["charttime"],
             chunksize=_CHUNK_SIZE,
-        )
+        ),
+        desc="Streaming labevents",
+        unit="chunk",
     ):
         # 1. Filter out rows with no hadm_id (~70% of labevents are outpatient)
         chunk = chunk.dropna(subset=["hadm_id"]).copy()
@@ -207,9 +210,6 @@ def run(config: dict) -> None:
 
         if not chunk.empty:
             all_chunks.append(chunk)
-
-        if (i + 1) % 10 == 0:
-            logger.info("  Processed %d chunks…", i + 1)
 
     if not all_chunks:
         logger.warning("No lab events found – saving empty labs feature file")
@@ -251,7 +251,8 @@ def run(config: dict) -> None:
     # Build chronological text line per event
     # ------------------------------------------------------------------ #
     logger.info("Building lab text lines…")
-    labs["lab_text_line"] = labs.apply(_build_lab_text_line, axis=1)
+    tqdm.pandas(desc="Building lab text lines")
+    labs["lab_text_line"] = labs.progress_apply(_build_lab_text_line, axis=1)
 
     # ------------------------------------------------------------------ #
     # Sort chronologically within each admission
