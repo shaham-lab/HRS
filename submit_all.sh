@@ -32,9 +32,13 @@ echo ""
 echo "Checking pipeline state..."
 echo ""
 
+set +e
 EMBED_STATUS_OUTPUT=$(python src/preprocessing/check_embed_status.py \
-    --config "$CONFIG" 2>&1) || true
+    --config "$CONFIG" 2>&1)
 EMBED_STATUS_CODE=$?
+set -e
+
+
 
 echo "$EMBED_STATUS_OUTPUT"
 echo ""

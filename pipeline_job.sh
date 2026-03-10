@@ -3,14 +3,14 @@
 #SBATCH --output=logs/hrs_preprocessing_%j.out
 #SBATCH --error=logs/hrs_preprocessing_%j.err
 #SBATCH --partition=L4-12h
-#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
-#SBATCH --mem=32G
+#SBATCH --mem=64G
 #SBATCH --mail-user=eli.kazum@biu.ac.il
 #SBATCH --mail-type=END,FAIL
 
 echo "Host: $(hostname)"
 echo "Job ID: $SLURM_JOB_ID"
+echo "GPUs: $SLURM_GPUS"
 echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
 echo "Start: $(date)"
 
