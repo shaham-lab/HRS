@@ -29,6 +29,9 @@ BERT_DEVICE: "cuda"
 # Set to true to force re-embedding of all features even if output parquets exist.
 # Normally false — embed_features.py resumes from the last completed feature.
 BERT_FORCE_REEMBED: false
+# Maximum GPUs to use. null = use all GPUs SLURM allocates (recommended).
+# Set to 1 to force single-GPU mode for debugging.
+BERT_MAX_GPUS: null
 
 # Strategy for handling records with null hadm_id.
 # "drop" (default): exclude records with null hadm_id; log count per module.

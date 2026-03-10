@@ -76,30 +76,58 @@ _MAX_LENGTH_CAP: dict[str, int] = {
     "triage_text":            256,   # structured vitals template
     "discharge_history_text": 4096,  # full clinical note — keep long
     "radiology_text":         1024,  # radiology report — medium
+    # lab groups: capped at _LAB_MAX_LENGTH, applied in _worker
 }
+_LAB_MAX_LENGTH = 2048
+_REFERENCE_LENGTH = 512   # batch size is calibrated for this sequence length
 
 
 def _get_device(requested: str):
     """Return a torch device, falling back to CPU if CUDA is unavailable."""
     import torch  # type: ignore
 
+    slurm_job = os.environ.get("SLURM_JOB_ID", "")
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+    if slurm_job:
+        logger.info("SLURM job %s — CUDA_VISIBLE_DEVICES=%s", slurm_job, cuda_visible)
+
     if requested == "cuda":
         if torch.cuda.is_available():
             return torch.device("cuda")
-        logger.warning(
-            "CUDA requested but not available – falling back to CPU."
-        )
+        logger.warning("CUDA requested but not available — falling back to CPU.")
         return torch.device("cpu")
     return torch.device("cpu")
 
 
-def _effective_batch_size(base_batch_size: int, effective_max_length: int,
-                           reference_length: int = 512) -> int:
+def _get_available_gpus(max_gpus: int | None = None) -> list[str]:
+    """Return list of available CUDA device strings e.g. ['cuda:0', 'cuda:1']."""
+    import torch  # type: ignore
+
+    if not torch.cuda.is_available():
+        logger.warning("No CUDA GPUs available — falling back to CPU.")
+        return ["cpu"]
+
+    n = torch.cuda.device_count()
+    if max_gpus is not None:
+        n = min(n, max_gpus)
+
+    devices = [f"cuda:{i}" for i in range(n)]
+    for i, d in enumerate(devices):
+        logger.info(
+            "  GPU %d: %s — %s (capability sm_%d%d)",
+            i, d,
+            torch.cuda.get_device_name(i),
+            *torch.cuda.get_device_capability(i),
+        )
+    return devices
+
+
+def _effective_batch_size(base_batch_size: int, effective_max_length: int) -> int:
     """
     Scale batch size to maintain a roughly constant token budget per GPU step.
-    base_batch_size is calibrated for reference_length tokens.
+    base_batch_size is calibrated for _REFERENCE_LENGTH tokens.
     """
-    scale = reference_length / max(effective_max_length, 1)
+    scale = _REFERENCE_LENGTH / max(effective_max_length, 1)
     scaled = int(base_batch_size * scale)
     return max(1, min(scaled, base_batch_size * 8))  # cap at 8× base
 
@@ -193,235 +221,71 @@ def _embed_texts(
     return result
 
 
-def run(config: dict) -> None:
-    """Embed all text features and save embedding parquets."""
-    required_keys = [
-        "FEATURES_DIR",
-        "EMBEDDINGS_DIR",
-        "CLASSIFICATIONS_DIR",
-        "PREPROCESSING_DIR",
-        "BERT_MODEL_NAME",
-        "BERT_MAX_LENGTH",
-        "BERT_BATCH_SIZE",
-        "BERT_DEVICE",
-    ]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+def _build_feature_tasks(
+    config: dict,
+    lab_panel_config: dict,
+    labs_df,      # pd.DataFrame | None
+    splits_df,    # pd.DataFrame
+) -> list[dict]:
+    """
+    Build the full list of feature task dicts (up to 18).
+    Loads all input text on the main process once.
+    Each dict contains everything a worker needs to embed one feature.
+    """
+    import yaml  # type: ignore
 
     features_dir = str(config["FEATURES_DIR"])
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
-    classifications_dir = str(config["CLASSIFICATIONS_DIR"])
-    preprocessing_dir = str(config["PREPROCESSING_DIR"])
-    model_name = str(config["BERT_MODEL_NAME"])
-    max_length = int(config["BERT_MAX_LENGTH"])
-    batch_size = int(config["BERT_BATCH_SIZE"])
-    device_str = str(config["BERT_DEVICE"])
-    force_reembed = bool(config.get("BERT_FORCE_REEMBED", False))
+    tasks = []
 
-    # ------------------------------------------------------------------ #
-    # Determine total embedding tasks for the top-level progress bar
-    # ------------------------------------------------------------------ #
-    n_text_features = len([f for f in _TEXT_FEATURES
-                            if os.path.exists(os.path.join(features_dir, f[0]))])
+    # --- 5 text features ---
+    for (input_filename, text_col, output_filename, embedding_col) in _TEXT_FEATURES:
+        input_path = os.path.join(features_dir, input_filename)
+        if not os.path.exists(input_path):
+            logger.warning("Input not found, skipping: %s", input_path)
+            continue
+        df = pd.read_parquet(input_path)
+        if text_col not in df.columns:
+            logger.warning("Column '%s' not found in %s, skipping.", text_col, input_path)
+            continue
+        tasks.append({
+            "kind":          "text",
+            "text_col":      text_col,
+            "output_path":   os.path.join(embeddings_dir, output_filename),
+            "embedding_col": embedding_col,
+            "texts":         [str(t) for t in df[text_col].tolist()],
+            "subject_hadm":  df[["subject_id", "hadm_id"]].copy(),
+        })
+        logger.info("  Loaded %d texts for '%s'", len(df), text_col)
 
-    # Peek at lab_panel_config to count lab group tasks (before loading model)
-    lab_panel_config_path = os.path.join(classifications_dir, "lab_panel_config.yaml")
-    lab_panel_config_loaded = False
-    lab_panel_config: dict[str, list[int]] = {}
-    if os.path.exists(lab_panel_config_path):
-        try:
-            import yaml  # type: ignore
-            with open(lab_panel_config_path, encoding="utf-8") as fh:
-                lab_panel_config = yaml.safe_load(fh)
-            lab_panel_config_loaded = True
-        except Exception:
-            pass
-
-    n_lab_groups = len(lab_panel_config) if lab_panel_config_loaded else 0
-    total_tasks = n_text_features + n_lab_groups
-
-    # ------------------------------------------------------------------ #
-    # Resume status: fast existence pre-screen for logging + early exit
-    # ------------------------------------------------------------------ #
-    os.makedirs(embeddings_dir, exist_ok=True)
-
-    expected_text_outputs: list[tuple[str, str]] = [
-        (os.path.join(embeddings_dir, output_filename), embedding_col)
-        for (_, _, output_filename, embedding_col) in _TEXT_FEATURES
-    ]
-    n_text_done = sum(1 for (p, _) in expected_text_outputs if os.path.exists(p))
-    n_text_total = len(_TEXT_FEATURES)
-
-    if force_reembed:
-        logger.info("BERT_FORCE_REEMBED=true — per-feature resume checks disabled.")
-    elif n_text_done > 0:
-        logger.info(
-            "Resume mode: %d / %d text feature embeddings already present — "
-            "will verify and skip completed ones.",
-            n_text_done, n_text_total,
-        )
-    else:
-        logger.info("Fresh run: no existing text embedding outputs found.")
-
-    # ------------------------------------------------------------------ #
-    # Load model and tokenizer
-    # ------------------------------------------------------------------ #
-    try:
-        from transformers import AutoTokenizer, BertModel  # type: ignore
-        from transformers import logging as hf_logging  # type: ignore
-    except ImportError as exc:
-        raise ImportError(
-            "The 'transformers' package is required for embed_features.py. "
-            "Install it with: pip install transformers torch"
-        ) from exc
-
-    hf_logging.set_verbosity_error()
-
-    device = _get_device(device_str)
-    logger.info("Loading BERT model: %s", model_name)
-    logger.info("  Device: %s", device)
-    logger.info("  Max token length: %d", max_length)
-    logger.info("  Batch size: %d", batch_size)
-    logger.info("  Total embedding tasks: %d (%d text features + %d lab groups)",
-                total_tasks, n_text_features, n_lab_groups)
-    tokenizer = AutoTokenizer.from_pretrained(model_name)  # type: ignore[misc]
-    model = BertModel.from_pretrained(model_name, add_pooling_layer=False)  # type: ignore[misc]
-    model.to(device)
-    model.eval()  # set once here; _embed_texts no longer calls model.eval()
-
-    # ------------------------------------------------------------------ #
-    # Embed each standard text feature file
-    # ------------------------------------------------------------------ #
-    with tqdm(total=total_tasks, desc="embed_features", unit="feature", dynamic_ncols=True) as pbar:
-        for (
-            input_filename,
-            text_col,
-            output_filename,
-            embedding_col,
-        ) in _TEXT_FEATURES:
-            input_path = os.path.join(features_dir, input_filename)
-            if not os.path.exists(input_path):
-                logger.warning(
-                    "Feature file not found, skipping: %s", input_path
-                )
-                pbar.update(1)
-                continue
-
-            pbar.set_description(f"embed_features — {embedding_col}")
-            logger.info("Embedding '%s' from %s…", text_col, input_path)
-            df = pd.read_parquet(input_path)
-            output_path = os.path.join(embeddings_dir, output_filename)
-
-            # ── Resume check ──────────────────────────────────────────────
-            if not force_reembed and _output_is_valid(
-                output_path, expected_rows=len(df), embedding_col=embedding_col
-            ):
-                logger.info(
-                    "  [SKIP] %s already complete (%d rows) — resuming from next feature.",
-                    output_filename, len(df),
-                )
-                pbar.update(1)
-                continue
-            # ──────────────────────────────────────────────────────────────
-
-            if text_col not in df.columns:
-                raise ValueError(
-                    f"Expected column '{text_col}' not found in {input_path}. "
-                    f"Available columns: {list(df.columns)}"
-                )
-
-            texts: list[str] = [str(t) for t in df[text_col].tolist()]
-            effective_max_length = min(
-                max_length,
-                _MAX_LENGTH_CAP.get(text_col, max_length),
-            )
-            effective_batch_size = _effective_batch_size(batch_size, effective_max_length)
-            logger.info(
-                "  Embedding '%s': %d texts, effective max_length=%d, effective_batch_size=%d",
-                text_col, len(texts), effective_max_length, effective_batch_size,
-            )
-            embeddings = _embed_texts(
-                texts, tokenizer, model, device, effective_max_length, effective_batch_size
-            )
-
-            out_df = df[["subject_id", "hadm_id"]].copy()
-            out_df[embedding_col] = list(embeddings)
-
-            tmp_path = output_path + ".tmp"
-            out_df.to_parquet(tmp_path, index=False)
-            os.replace(tmp_path, output_path)
-            logger.info(
-                "  [%d/%d] %s: %d texts embedded (dim=%d)",
-                pbar.n + 1, total_tasks, embedding_col, len(texts), embeddings.shape[1],
-            )
-            pbar.update(1)
-
-        # ------------------------------------------------------------------ #
-        # Embed 13 lab group features using lab_panel_config.yaml
-        # ------------------------------------------------------------------ #
-        if not lab_panel_config_loaded:
-            logger.warning(
-                "lab_panel_config.yaml not found at %s — lab group embeddings skipped. "
-                "Run build_lab_panel_config.py first.",
-                lab_panel_config_path,
-            )
-            return
-
-        labs_path = os.path.join(features_dir, "labs_features.parquet")
-        if not os.path.exists(labs_path):
-            logger.warning(
-                "labs_features.parquet not found at %s — lab group embeddings skipped.",
-                labs_path,
-            )
-            return
-
-        logger.info("Loading labs_features.parquet for lab group embeddings…")
-        labs_df = pd.read_parquet(labs_path)
-
-        splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
-        if not os.path.exists(splits_path):
-            logger.warning(
-                "data_splits.parquet not found at %s — lab group embeddings skipped. "
-                "Run create_splits.py first.",
-                splits_path,
-            )
-            return
-
-        splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
-
-        # Pre-group labs_df once so each iteration does a dict lookup instead of
-        # scanning the full DataFrame (Bottleneck 6).
-        logger.info("Pre-grouping labs by panel…")
+    # --- 13 lab group features ---
+    if labs_df is not None and lab_panel_config:
+        logger.info("Pre-grouping labs by panel (one scan for all %d groups)…",
+                    len(lab_panel_config))
         itemid_to_group = {
-            itemid: group_name
-            for group_name, itemids in lab_panel_config.items()
+            itemid: gname
+            for gname, itemids in lab_panel_config.items()
             for itemid in itemids
         }
-        labs_df["_group"] = labs_df["itemid"].map(itemid_to_group)
-        labs_by_group: dict[str, pd.DataFrame] = {
-            group_name: grp.drop(columns=["_group"])
-            for group_name, grp in labs_df.groupby("_group")
-            if group_name in lab_panel_config
+        labs_copy = labs_df.copy()
+        labs_copy["_group"] = labs_copy["itemid"].map(itemid_to_group)
+        labs_by_group = {
+            gname: grp.drop(columns=["_group"])
+            for gname, grp in labs_copy.groupby("_group")
+            if gname in lab_panel_config
         }
-        logger.info("  Pre-grouped %d lab rows into %d groups", len(labs_df), len(labs_by_group))
+        logger.info(
+            "  Pre-grouped %d lab rows into %d groups",
+            len(labs_df), len(labs_by_group),
+        )
 
-        # Cap lab group sequence length at 2048 — lab text lines are long but
-        # not full clinical-note length.
-        lab_max_length = min(max_length, 2048)
-
-        for group_name, itemids in lab_panel_config.items():
-            pbar.set_description(f"embed_features — lab_{group_name}_embedding")
-            output_filename = f"lab_{group_name}_embeddings.parquet"
-            output_path = os.path.join(embeddings_dir, output_filename)
+        for group_name in lab_panel_config:
             embedding_col = f"lab_{group_name}_embedding"
-
-            logger.info("Embedding lab group '%s' (%d itemids)…", group_name, len(itemids))
-
-            # Use pre-grouped DataFrame instead of re-scanning labs_df each iteration
+            output_path = os.path.join(
+                embeddings_dir, f"lab_{group_name}_embeddings.parquet"
+            )
             group_df = labs_by_group.get(group_name, pd.DataFrame())
-            if group_df.empty:
-                logger.debug("Lab group '%s' has no rows in labs_features.parquet — all zero vectors.", group_name)
+
             if not group_df.empty and "charttime" in group_df.columns:
                 group_text = (
                     group_df.sort_values("charttime")
@@ -433,41 +297,301 @@ def run(config: dict) -> None:
             else:
                 group_text = pd.DataFrame(columns=["subject_id", "hadm_id", "text"])
 
-            # Left-join to full admission universe so admissions with no events
-            # in this group get an empty string → zero vector
             group_text = splits_df.merge(
                 group_text, on=["subject_id", "hadm_id"], how="left"
             )
             group_text["text"] = group_text["text"].fillna("")
 
-            texts_group: list[str] = group_text["text"].tolist()
-            n_non_empty = int((group_text["text"] != "").sum())
+            n_with_events = int((group_text["text"] != "").sum())
+            logger.info(
+                "  lab_%s: %d admissions (%d with events, %d zero vectors)",
+                group_name, len(group_text),
+                n_with_events, len(group_text) - n_with_events,
+            )
+            tasks.append({
+                "kind":          "lab",
+                "text_col":      "",
+                "output_path":   output_path,
+                "embedding_col": embedding_col,
+                "texts":         group_text["text"].tolist(),
+                "subject_hadm":  group_text[["subject_id", "hadm_id"]].copy(),
+            })
 
-            # ── Resume check ──────────────────────────────────────────────
-            if not force_reembed and _output_is_valid(
-                output_path, expected_rows=len(group_text), embedding_col=embedding_col
-            ):
-                logger.info(
-                    "  [SKIP] %s already complete (%d rows) — resuming from next group.",
-                    output_filename, len(group_text),
-                )
-                pbar.update(1)
-                continue
-            # ──────────────────────────────────────────────────────────────
+    return tasks
 
-            lab_batch_size = _effective_batch_size(batch_size, lab_max_length)
-            embeddings_group = _embed_texts(
-                texts_group, tokenizer, model, device, lab_max_length, lab_batch_size
+
+def _worker(
+    rank: int,
+    device_str: str,
+    feature_tasks: list[dict],
+    config: dict,
+    result_queue,
+) -> None:
+    """
+    Worker process: loads BERT on `device_str`, embeds its assigned features,
+    writes output parquets. One worker per GPU, spawned by torch.multiprocessing.
+    """
+    import torch  # type: ignore
+    from transformers import AutoTokenizer, BertModel  # type: ignore
+    from transformers import logging as hf_logging     # type: ignore
+
+    hf_logging.set_verbosity_error()
+
+    worker_logger = logging.getLogger(f"embed_features.worker{rank}")
+
+    model_name    = str(config["BERT_MODEL_NAME"])
+    max_length    = int(config["BERT_MAX_LENGTH"])
+    batch_size    = int(config["BERT_BATCH_SIZE"])
+    force_reembed = bool(config.get("BERT_FORCE_REEMBED", False))
+
+    device = torch.device(device_str)
+    worker_logger.info(
+        "[GPU %d | %s] Loading model '%s'…", rank, device_str, model_name
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    model = BertModel.from_pretrained(model_name, add_pooling_layer=False)
+    model.to(device)
+    model.eval()
+    worker_logger.info(
+        "[GPU %d | %s] Model ready. Processing %d feature(s).",
+        rank, device_str, len(feature_tasks),
+    )
+
+    completed: list[str] = []
+    failed: list[tuple[str, str]] = []
+
+    for task in feature_tasks:
+        output_path   = task["output_path"]
+        embedding_col = task["embedding_col"]
+        texts         = task["texts"]
+        subject_hadm  = task["subject_hadm"]
+
+        # --- Resume check ---
+        if not force_reembed and _output_is_valid(
+            output_path, expected_rows=len(texts), embedding_col=embedding_col
+        ):
+            worker_logger.info(
+                "[GPU %d] [SKIP] %s already complete (%d rows).",
+                rank, os.path.basename(output_path), len(texts),
+            )
+            completed.append(output_path)
+            continue
+
+        # --- Effective max_length and batch size ---
+        if task["kind"] == "lab":
+            effective_max_length = min(max_length, _LAB_MAX_LENGTH)
+        else:
+            effective_max_length = min(
+                max_length,
+                _MAX_LENGTH_CAP.get(task["text_col"], max_length),
+            )
+        effective_batch_size = _effective_batch_size(batch_size, effective_max_length)
+
+        n_with_text = sum(1 for t in texts if isinstance(t, str) and t.strip())
+        worker_logger.info(
+            "[GPU %d] Embedding %s: %d texts (%d non-empty) "
+            "max_length=%d batch_size=%d",
+            rank, embedding_col, len(texts), n_with_text,
+            effective_max_length, effective_batch_size,
+        )
+
+        try:
+            embeddings = _embed_texts(
+                texts, tokenizer, model, device,
+                effective_max_length, effective_batch_size,
             )
 
-            out_df = group_text[["subject_id", "hadm_id"]].copy()
-            out_df[embedding_col] = list(embeddings_group)
+            out_df = subject_hadm.copy()
+            out_df[embedding_col] = list(embeddings)
+
+            # Atomic write via temp file — safe against mid-write kill signals
             tmp_path = output_path + ".tmp"
             out_df.to_parquet(tmp_path, index=False)
             os.replace(tmp_path, output_path)
-            logger.info(
-                "  [%d/%d] lab_%s: %d admissions (%d with events, %d zero vectors)",
-                pbar.n + 1, total_tasks, group_name,
-                len(texts_group), n_non_empty, len(texts_group) - n_non_empty,
+
+            worker_logger.info(
+                "[GPU %d] Saved %s (%d rows, dim=%d)",
+                rank, os.path.basename(output_path),
+                len(out_df), embeddings.shape[1],
             )
-            pbar.update(1)
+            completed.append(output_path)
+
+        except Exception as exc:  # noqa: BLE001
+            worker_logger.error(
+                "[GPU %d] FAILED — %s: %s", rank, embedding_col, exc
+            )
+            failed.append((output_path, str(exc)))
+
+    result_queue.put({"rank": rank, "completed": completed, "failed": failed})
+
+
+def run(config: dict) -> None:
+    """Embed all text features using all available GPUs in parallel."""
+    import torch  # type: ignore
+    import yaml   # type: ignore
+
+    required_keys = [
+        "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+        "PREPROCESSING_DIR", "BERT_MODEL_NAME", "BERT_MAX_LENGTH",
+        "BERT_BATCH_SIZE", "BERT_DEVICE",
+    ]
+    for key in required_keys:
+        if key not in config:
+            raise KeyError(f"Missing required config key: '{key}'")
+
+    features_dir        = str(config["FEATURES_DIR"])
+    embeddings_dir      = str(config["EMBEDDINGS_DIR"])
+    classifications_dir = str(config["CLASSIFICATIONS_DIR"])
+    preprocessing_dir   = str(config["PREPROCESSING_DIR"])
+    device_str          = str(config["BERT_DEVICE"])
+    max_gpus            = config.get("BERT_MAX_GPUS", None)
+    if max_gpus is not None:
+        max_gpus = int(max_gpus)
+
+    os.makedirs(embeddings_dir, exist_ok=True)
+
+    # ------------------------------------------------------------------ #
+    # Detect GPUs
+    # ------------------------------------------------------------------ #
+    slurm_job = os.environ.get("SLURM_JOB_ID", "")
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", "<unset>")
+    if slurm_job:
+        logger.info(
+            "SLURM job %s — CUDA_VISIBLE_DEVICES=%s", slurm_job, cuda_visible
+        )
+
+    if device_str == "cuda" and torch.cuda.is_available():
+        devices = _get_available_gpus(max_gpus)
+        logger.info("Using %d GPU(s) for parallel embedding.", len(devices))
+    else:
+        devices = ["cpu"]
+        logger.info("CPU mode.")
+
+    n_gpus = len(devices)
+
+    # ------------------------------------------------------------------ #
+    # Load input data on main process (once)
+    # ------------------------------------------------------------------ #
+    lab_panel_config: dict = {}
+    labs_df = None
+
+    lab_panel_config_path = os.path.join(classifications_dir, "lab_panel_config.yaml")
+    if os.path.exists(lab_panel_config_path):
+        with open(lab_panel_config_path, encoding="utf-8") as fh:
+            lab_panel_config = yaml.safe_load(fh)
+        labs_path = os.path.join(features_dir, "labs_features.parquet")
+        if os.path.exists(labs_path):
+            logger.info("Loading labs_features.parquet…")
+            labs_df = pd.read_parquet(labs_path)
+            logger.info("  Loaded %d lab rows", len(labs_df))
+        else:
+            logger.warning("labs_features.parquet not found — lab embeddings skipped.")
+    else:
+        logger.warning("lab_panel_config.yaml not found — lab embeddings skipped.")
+
+    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
+    splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
+
+    logger.info("Building feature task list…")
+    all_tasks = _build_feature_tasks(config, lab_panel_config, labs_df, splits_df)
+    logger.info("Total features to embed: %d across %d GPU(s)", len(all_tasks), n_gpus)
+
+    # ------------------------------------------------------------------ #
+    # Partition tasks round-robin across GPUs
+    # ------------------------------------------------------------------ #
+    partitions: list[list[dict]] = [[] for _ in range(n_gpus)]
+    for i, task in enumerate(all_tasks):
+        partitions[i % n_gpus].append(task)
+
+    logger.info("Feature assignment:")
+    for i, (device, partition) in enumerate(zip(devices, partitions)):
+        logger.info(
+            "  GPU %d (%s): %d features — %s",
+            i, device, len(partition),
+            ", ".join(t["embedding_col"] for t in partition),
+        )
+
+    # ------------------------------------------------------------------ #
+    # Run workers
+    # ------------------------------------------------------------------ #
+    if n_gpus == 1:
+        # Single device — run in current process, no spawn overhead
+        import queue
+        result_queue: queue.SimpleQueue = queue.SimpleQueue()
+        _worker(0, devices[0], partitions[0], config, result_queue)
+        results = [result_queue.get()]
+    else:
+        import torch.multiprocessing as mp
+        ctx = mp.get_context("spawn")   # required for CUDA
+        result_queue_mp = ctx.Queue()
+
+        processes = []
+        for rank, (device, partition) in enumerate(zip(devices, partitions)):
+            p = ctx.Process(
+                target=_worker,
+                args=(rank, device, partition, config, result_queue_mp),
+                name=f"embed-worker-{rank}",
+            )
+            p.start()
+            logger.info(
+                "Spawned worker %d on %s (pid=%d)", rank, device, p.pid
+            )
+            processes.append(p)
+
+        for p in processes:
+            p.join()
+
+        results = [result_queue_mp.get() for _ in processes]
+
+    # ------------------------------------------------------------------ #
+    # Summary
+    # ------------------------------------------------------------------ #
+    total_completed = sum(len(r["completed"]) for r in results)
+    total_failed    = sum(len(r["failed"])    for r in results)
+
+    logger.info("")
+    logger.info(
+        "Embedding complete: %d succeeded, %d failed",
+        total_completed, total_failed,
+    )
+    for r in sorted(results, key=lambda x: x["rank"]):
+        rank = r["rank"]
+        for path in r["completed"]:
+            logger.info("  [GPU %d] OK   %s", rank, os.path.basename(path))
+        for path, err in r["failed"]:
+            logger.error("  [GPU %d] FAIL %s — %s", rank, os.path.basename(path), err)
+
+    if total_failed > 0:
+        raise RuntimeError(
+            f"{total_failed} embedding task(s) failed. "
+            "Check the log above. Re-run embed_job.sh — "
+            "completed features will be skipped automatically."
+        )
+
+
+def main() -> None:
+    """CLI entry point: python embed_features.py --config config/preprocessing.yaml"""
+    import argparse
+    import yaml  # type: ignore
+
+    parser = argparse.ArgumentParser(description="Embed CDSS text features using BERT.")
+    parser.add_argument(
+        "--config",
+        default="config/preprocessing.yaml",
+        help="Path to preprocessing.yaml (default: config/preprocessing.yaml)",
+    )
+    args = parser.parse_args()
+
+    with open(args.config, encoding="utf-8") as fh:
+        config = yaml.safe_load(fh)
+
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+    run(config)
+
+
+if __name__ == "__main__":
+    main()
