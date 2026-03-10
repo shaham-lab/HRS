@@ -180,6 +180,27 @@ def main() -> None:
             "Example: --force-module extract_demographics extract_labs"
         ),
     )
+    parser.add_argument(
+        "--modules",
+        dest="modules",
+        nargs="+",
+        metavar="MODULE",
+        help=(
+            "Run only the specified module(s) by name, in pipeline order. "
+            "Example: --modules combine_dataset"
+        ),
+    )
+    parser.add_argument(
+        "--skip-modules",
+        dest="skip_modules",
+        nargs="+",
+        default=[],
+        metavar="MODULE",
+        help=(
+            "Skip specific modules even if they are in the run order. "
+            "Example: --skip-modules embed_features"
+        ),
+    )
 
     args = parser.parse_args()
 
@@ -211,6 +232,13 @@ def main() -> None:
 
     if args.all:
         modules_to_run = _FULL_ORDER
+    elif getattr(args, "modules", None):
+        invalid = [m for m in args.modules if m not in _FULL_ORDER]
+        if invalid:
+            parser.error(
+                f"Unknown module(s): {invalid}. Valid modules: {_FULL_ORDER}"
+            )
+        modules_to_run = [m for m in _FULL_ORDER if m in args.modules]
     else:
         modules_to_run = [
             name for name in _FULL_ORDER
@@ -235,9 +263,17 @@ def main() -> None:
     # ------------------------------------------------------------------ #
     t_pipeline_start = time.time()
     n = len(modules_to_run)
+    skip_modules = args.skip_modules or []
+    force_modules = args.force_modules or []
 
     for idx, module_name in enumerate(modules_to_run, start=1):
-        config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
+        if module_name in skip_modules:
+            logger.info(
+                "  STEP %d/%d — %s SKIPPED (--skip-modules)",
+                idx, n, module_name,
+            )
+            continue
+        config["FORCE_RERUN"] = args.force or (module_name in force_modules)
         _run_module(module_name, config, idx, n)
 
     total_elapsed = time.time() - t_pipeline_start
