@@ -570,11 +570,21 @@ def run(config: dict) -> None:
 
 
 def main() -> None:
-    """CLI entry point: python embed_features.py --config config/preprocessing.yaml"""
+    """
+    CLI entry point for running embed_features standalone.
+
+    Usage:
+        python src/preprocessing/embed_features.py --config config/preprocessing.yaml
+
+    This allows embed_features to be submitted as a dedicated SLURM job
+    (embed_job.sh) independently of run_pipeline.py.
+    """
     import argparse
     import yaml  # type: ignore
 
-    parser = argparse.ArgumentParser(description="Embed CDSS text features using BERT.")
+    parser = argparse.ArgumentParser(
+        description="Embed CDSS text features using BERT.",
+    )
     parser.add_argument(
         "--config",
         default="config/preprocessing.yaml",
@@ -582,14 +592,31 @@ def main() -> None:
     )
     args = parser.parse_args()
 
-    with open(args.config, encoding="utf-8") as fh:
-        config = yaml.safe_load(fh)
-
+    # Set up logging in the same format as run_pipeline.py
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+    # Load config and expand ~ in path values
+    if not os.path.exists(args.config):
+        raise FileNotFoundError(
+            f"Configuration file not found: {args.config}"
+        )
+    with open(args.config, "r", encoding="utf-8") as fh:
+        config: dict = yaml.safe_load(fh)
+
+    _PATH_KEYS = {
+        "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
+        "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR",
+        "CLASSIFICATIONS_DIR", "HASH_REGISTRY_PATH",
+    }
+    for key in _PATH_KEYS:
+        if key in config and isinstance(config[key], str):
+            config[key] = os.path.expanduser(config[key])
+
+    logger.info("Loaded configuration from %s", args.config)
     run(config)
 
 
