@@ -3,7 +3,6 @@
 #SBATCH --output=logs/hrs_combine_%j.out
 #SBATCH --error=logs/hrs_combine_%j.err
 #SBATCH --partition=L4-12h
-#SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=32G
 #SBATCH --mail-user=eli.kazum@biu.ac.il

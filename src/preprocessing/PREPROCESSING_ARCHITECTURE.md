@@ -217,11 +217,11 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 HRS/
 ├── config/
 │   └── preprocessing.yaml              # All configuration — single source of truth
-├── pipeline_job.sh                     # SLURM: preprocessing (no GPU, 64G)
-├── embed_job.sh                        # SLURM: one embed slice (2× L4 GPU, 64G)
-├── combine_job.sh                      # SLURM: combine (1 GPU, 32G)
-├── submit_all.sh                       # Auto-submit with state detection
 ├── src/preprocessing/
+│   ├── pipeline_job.sh                 # SLURM: preprocessing (no GPU, 64G)
+│   ├── embed_job.sh                    # SLURM: one embed slice (2× L4 GPU, 64G)
+│   ├── combine_job.sh                  # SLURM: combine (no GPU, 32G)
+│   ├── submit_all.sh                   # Auto-submit with state detection
 │   ├── run_pipeline.py                 # Orchestrator CLI
 │   ├── check_embed_status.py           # State detection for submit_all.sh
 │   ├── preprocessing_utils.py          # Shared utilities
@@ -234,7 +234,7 @@ HRS/
 │   ├── extract_labs.py                 # Step 6
 │   ├── extract_radiology.py            # Step 7
 │   ├── extract_y_data.py               # Step 8
-│   ├── embed_features.py               # Step 9 — accepts --slice-index / --n-slices
+│   ├── embed_features.py               # Step 9 — accepts --slice-index
 │   ├── combine_dataset.py              # Step 10
 │   └── build_lab_text_lines.py         # Helper for extract_labs
 └── data/preprocessing/                 # Generated artefacts (git-ignored)
@@ -271,17 +271,20 @@ HRS/
 
 ### Scripts
 
+All four scripts live in `src/preprocessing/` alongside the Python modules they invoke.
+
 | Script | GPUs | RAM | Purpose |
 |--------|------|-----|---------|
 | `pipeline_job.sh` | 0 | 64G | Steps 0–8 (CPU only) |
-| `embed_job.sh` | 2 | 64G | One admission slice — takes `--slice-index N --n-slices 7` |
-| `combine_job.sh` | 1 | 32G | Step 10 — combine only |
+| `embed_job.sh` | 2 | 64G | One admission slice — takes `--slice-index N` (passed by `submit_all.sh`) |
+| `combine_job.sh` | 0 | 32G | Step 10 — combine only (CPU) |
 | `submit_all.sh` | — | — | Detects state, submits all pending slices chained via `--dependency=afterok` |
 
 ### Auto-submit State Detection and Job Chaining
 
 ```bash
-bash submit_all.sh
+cd ~/Python/HRS
+bash src/preprocessing/submit_all.sh
 ```
 
 `check_embed_status.py` scans embedding parquets for total row count, determines which slices are complete, and exits with:

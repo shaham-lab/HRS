@@ -456,7 +456,7 @@ python embed_features.py --config config/preprocessing.yaml \
 ```
 
 - `BERT_SLICE_SIZE_PER_GPU` (config key): admissions per GPU per job. Default: `20000`. This is the single knob for tuning time-window fit.
-- `--slice-index` (CLI arg, also `BERT_SLICE_INDEX` in config): 0-based index of the slice this job processes. `submit_all.sh` sets this per job automatically.
+- `--slice-index` (CLI arg, also `BERT_SLICE_INDEX` in config): 0-based index of the slice this job processes. `src/preprocessing/submit_all.sh` sets this per job automatically.
 - `n_slices` is never passed manually — it is always computed as `ceil(total_admissions / (BERT_SLICE_SIZE_PER_GPU × n_gpus))`.
 
 #### Slice Computation
