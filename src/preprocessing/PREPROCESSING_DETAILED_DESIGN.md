@@ -500,54 +500,72 @@ Slices always run sequentially (chained via `--dependency=afterok`) — this ens
 
 ### Multi-GPU Execution Within a Slice
 
-Each embed SLURM job processes one slice using 2 GPUs. The slice's `hadm_ids` are split evenly between the two workers.
+Each embed SLURM job processes one slice using 2 GPUs. The slice's `hadm_ids` are split evenly between the two workers. Both workers run **in parallel** — each writes to its own per-worker temporary parquets, which the main process merges after both complete. This avoids concurrent writes to shared files while achieving true GPU parallelism (~2× throughput vs sequential execution).
 
 ```
 Main process (one slice: ~40k admissions)
 ├── Load all input parquets, filter to slice_hadm_ids
 ├── Split slice into GPU-0 half and GPU-1 half (~20k each)
-├── Apply LPT load balancing across 18 features per GPU half (22 currently)
+├── LPT-order 18 features within each worker (most expensive first)
 │
-├── Worker 0 (cuda:0) — embeds its feature × hadm_id assignments
-└── Worker 1 (cuda:1) — embeds its feature × hadm_id assignments
-         │
-         └── Both workers append results to shared output parquets
-             (sequential per-feature writes, no concurrent file access)
+├── spawn Worker 0 (cuda:0) ─────────────────────────────────┐
+│     embeds 18 features for hadm_ids[0:20k]                 │ parallel
+└── spawn Worker 1 (cuda:1) ─────────────────────────────────┘
+      embeds 18 features for hadm_ids[20k:40k]
+              │
+              │  both write to per-worker temp parquets:
+              │    discharge_history_embeddings.worker0.parquet
+              │    discharge_history_embeddings.worker1.parquet
+              │    ...
+              ▼
+        main process joins after both workers complete
+              │
+              ▼
+        merge worker parquets → discharge_history_embeddings.parquet
+                               → lab_blood_chemistry_embeddings.parquet
+                               → ... (18 output parquets)
 ```
 
-`torch.multiprocessing.get_context("spawn")` is required for CUDA. Single-GPU path runs in-process.
+**Per-worker temporary parquets:** Each worker writes to
+`{output_path}.worker{rank}` (e.g. `discharge_history_embeddings.parquet.worker0`).
+After both workers finish, the main process reads each pair, concatenates them,
+and writes the merged result to the final output path atomically via
+`{output_path}.tmp` → `os.replace()`. Per-worker temp files are deleted after
+successful merge.
+
+**Resume behaviour with parallel workers:** Feature-level and record-level
+resume operate on the final merged output parquet, not the per-worker temps.
+If a job is killed mid-merge, the per-worker temps are still present on restart
+and the merge is re-run. If a job is killed mid-embedding, the incomplete
+per-worker temps are detected (row count < expected) and that worker
+re-embeds from scratch for that feature.
+
+`torch.multiprocessing.get_context("spawn")` is required for CUDA.
+Single-GPU path runs in-process with no temporary files.
 
 ---
 
 ### GPU Load Balancing
 
-**Problem:** Naive round-robin assignment based on feature order can concentrate large features on the same GPU. For example, `diag_history` (546k texts × 512 tokens) and `blood_chemistry` (371k texts × 2,048 tokens) landing on GPU 0 causes GPU 0 to run for ~11 hours while GPU 1 finishes in ~2 hours.
+**Purpose:** Since both workers process the same 18 features (on different admission halves), LPT is used to order features **within each worker** so the most expensive features start first. This gives better progress visibility in logs and ensures the GPU is never idle waiting for a trivially short feature at the end.
 
-**Solution — Longest Processing Time (LPT) scheduling:**
+**Cost estimate per feature per worker:** `cost = len(worker_texts) × max_length_cap`
 
-1. Estimate each feature's compute cost for this slice: `cost = len(slice_texts) × max_length_cap`
-2. Sort all 18 features by cost **descending**
-3. Assign features to GPUs using **greedy interleaving** — each feature goes to the GPU with the lowest accumulated cost so far
-
+**Ordering within each worker:**
 ```
-sorted features (by cost, high → low):
-  discharge_history (40k × 4096)  → GPU 0  (cost: 164M)
-  blood_hematology  (38k × 2048)  → GPU 1  (cost:  78M)
-  blood_chemistry   (37k × 2048)  → GPU 0  (running: 240M) → GPU 1 lower → GPU 1
-  diag_history      (40k × 512)   → GPU 0  (running: 184M) → GPU 0
-  ...
+worker_tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
 ```
 
-**Implementation in `run()`:**
+Example ordering for a 20k-admission worker half:
 ```
-tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
-gpu_loads = [0] * n_gpus
-gpu_tasks = [[] for _ in range(n_gpus)]
-for task in tasks:
-    g = gpu_loads.index(min(gpu_loads))
-    gpu_tasks[g].append(task)
-    gpu_loads[g] += len(task["texts"]) * task["max_length"]
+discharge_history  (20k × 4096)  cost: 82M   → processed first
+lab_blood_chemistry (20k × 2048) cost: 41M
+lab_blood_hematology (20k × 2048) cost: 41M
+...
+chief_complaint    (20k × 64)    cost: 1.3M  → processed last
 ```
+
+Both workers process features in the same LPT order, so their logs are directly comparable.
 
 ---
 
@@ -588,14 +606,28 @@ For each feature in each slice:
 ```
 import fastparquet as fp
 
-# First write for this feature (no prior rows at all)
-fp.write(output_path, df_batch, compression="snappy")
+worker_path = output_path + f".worker{rank}"
 
-# Append — adds a new row group to the existing file
-fp.write(output_path, df_batch, compression="snappy", append=True)
+# First write for this worker/feature
+fp.write(worker_path, df_batch, compression="snappy")
+
+# Subsequent checkpoint appends within the same worker
+fp.write(worker_path, df_batch, compression="snappy", append=True)
 ```
 
-`fastparquet` append mode adds row groups to the existing parquet file without reading the full file. The result is a valid multi-row-group parquet readable by `pandas`/`pyarrow`.
+Each worker appends only to its own `{output_path}.worker{rank}` file.
+After both workers finish, the main process merges the two per-worker files:
+```
+df = pd.concat([
+    pd.read_parquet(output_path + ".worker0"),
+    pd.read_parquet(output_path + ".worker1"),
+])
+# atomic write to final path
+df.to_parquet(tmp_path)
+os.replace(tmp_path, output_path)
+```
+`fastparquet` append mode adds row groups without reading the full file.
+The merged result is a valid parquet readable by `pandas`/`pyarrow`.
 
 **Checkpoint interval:** `BERT_CHECKPOINT_INTERVAL` — rows between appends. Default: 10,000. Too small → high I/O overhead. Too large → large re-work on kill (at most `BERT_CHECKPOINT_INTERVAL` rows lost per interruption).
 
@@ -714,7 +746,7 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `pipeline_job` | ~45 GB | `extract_discharge_history` loading 331k notes |
 | `embed_job` main process (per slice) | ~8 GB | Loading slice-filtered feature parquets + subset of 16.8M lab rows |
 | `embed_job` per GPU worker | ~2.5 GB | Model weights (570 MB) + embedding accumulation + batch buffers |
-| `embed_job` total (2 GPUs, one slice) | ~13 GB | — |
+| `embed_job` total (2 GPUs, one slice) | ~13 GB | Both workers run simultaneously; per-worker temp parquets add ~1 GB each |
 | `combine_job` | ~8 GB | Loading all 18 embedding parquets simultaneously |
 
 All embed SLURM jobs allocated 64 GB for safe headroom. The main-process memory footprint is substantially lower per slice than for the full dataset, since feature parquets are filtered to `slice_hadm_ids` before spawning workers.

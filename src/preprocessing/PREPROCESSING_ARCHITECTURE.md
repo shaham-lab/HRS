@@ -136,7 +136,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F19 are 
 | Phase | Jobs | Time per job | Total |
 |-------|------|-------------|-------|
 | Preprocessing (steps 0–8) | 1 | ~18 min | ~18 min |
-| Embedding (step 9, 14 slices) | 14 | ≤12 hrs | ≤168 hrs wall, runs sequentially |
+| Embedding (step 9, 14 slices) | 14 | ≤6 hrs | ≤84 hrs wall, runs sequentially (2 GPUs parallel within each job) |
 | Combine (step 10) | 1 | ~1 min | ~1 min |
 
 ---
@@ -171,7 +171,7 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 
 **Performance:** Per-feature token length caps (64–4,096) prevent padding short texts to 8,192 tokens. Batch size auto-scales inversely with sequence length.
 
-**Multi-GPU within a job:** 18 features partitioned across 2 GPUs using Longest Processing Time (LPT) scheduling — features sorted by estimated compute cost and greedily assigned to the GPU with the lowest accumulated load. Each GPU worker loads its own model copy.
+**Multi-GPU within a job:** The slice's admissions are split evenly between 2 GPU workers (~20k each). Both workers run **in parallel** — each embeds all 18 features for its own admission half, writing to per-worker temporary parquets. The main process merges the per-worker parquets into the shared output parquets after both workers complete. LPT ordering within each worker (features sorted by estimated compute cost descending) ensures the most expensive features start first for better progress visibility. Each GPU worker loads its own model copy.
 
 **Admission-slice batching:** The full admission corpus is divided into slices based on `BERT_SLICE_SIZE_PER_GPU` (default: 20,000 admissions per GPU). With 2 GPUs, each slice covers 40,000 admissions, giving **14 slices** for 546,028 admissions. Each slice runs as a separate SLURM job (≤12h). Slices run sequentially and append their results into the same output parquets via `fastparquet` append mode. Adjusting `BERT_SLICE_SIZE_PER_GPU` is the only knob needed to fit different partition time limits.
 
