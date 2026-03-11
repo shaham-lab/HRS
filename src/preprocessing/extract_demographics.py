@@ -234,12 +234,15 @@ def _extract_chart_vitals(
                     if candidates.empty:
                         unresolvable_count += 1
                         continue
-                    window_mask = (
-                        (candidates["admittime"] - tolerance <= ct) &
-                        (ct <= candidates["dischtime"] + tolerance)
-                        if "dischtime" in candidates.columns
-                        else (candidates["admittime"] - tolerance <= ct)
-                    )
+                    admittime_dt = pd.to_datetime(candidates["admittime"])
+                    if "dischtime" in candidates.columns:
+                        dischtime_dt = pd.to_datetime(candidates["dischtime"])
+                        window_mask = (
+                            (admittime_dt - tolerance <= ct) &
+                            (ct <= dischtime_dt + tolerance)
+                        )
+                    else:
+                        window_mask = (admittime_dt - tolerance <= ct)
                     matches = candidates[window_mask]
                     if len(matches) == 0:
                         unresolvable_count += 1
@@ -251,8 +254,9 @@ def _extract_chart_vitals(
                     else:
                         # Multiple matches: pick the one whose admittime is closest to charttime
                         matches = matches.copy()
-                        matches["_hadm_link_gap"] = (matches["admittime"] - ct).abs()
-                        best = matches.sort_values("_hadm_link_gap").iloc[0]
+                        matches["_hadm_link_gap"] = (pd.to_datetime(matches["admittime"]) - ct).abs()
+                        best_idx = matches["_hadm_link_gap"].idxmin()
+                        best = matches.loc[best_idx]
                         ambiguous_resolved_count += 1
                         new_row = row.copy()
                         new_row["hadm_id"] = float(best["hadm_id"])
@@ -375,7 +379,7 @@ def _compute_imputation_stats(
 
     stats: dict[str, dict[str, float]] = {}
     for stratum, grp in train_df.groupby("stratum"):
-        stats[stratum] = {
+        stats[str(stratum)] = {
             "height_cm_mean": float(grp["height_cm"].mean()),
             "height_cm_std":  float(grp["height_cm"].std()),
             "weight_kg_mean": float(grp["weight_kg"].mean()),
