@@ -460,7 +460,10 @@ def _worker(
                     effective_max_length, effective_batch_size,
                 )
 
-                batch_sh[embedding_col] = list(embeddings)
+                batch_sh[embedding_col] = [
+                    np.asarray(emb, dtype=np.float32)
+                    for emb in embeddings
+                ]
 
                 # Atomic first write; subsequent writes use fastparquet append.
                 if is_first_write:
