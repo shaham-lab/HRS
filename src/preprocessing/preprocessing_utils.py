@@ -62,24 +62,25 @@ def _link_hadm_for_row(
     and handles string/NaT inputs gracefully, making this helper reusable
     regardless of how the calling DataFrame was loaded.
     """
-    ct = pd.to_datetime(row["charttime"])
+    ct = cast(pd.Timestamp, pd.to_datetime(row["charttime"]))
     candidates = admissions_df[admissions_df["subject_id"] == row["subject_id"]].copy()
     if candidates.empty:
         return None
-    admit_times = pd.to_datetime(candidates["admittime"])
+    admit_times = cast(pd.Series, pd.to_datetime(candidates["admittime"]))
     if "dischtime" in candidates.columns:
-        disch_times = pd.to_datetime(candidates["dischtime"])
+        disch_times = cast(pd.Series, pd.to_datetime(candidates["dischtime"]))
         window_mask = (admit_times - tolerance <= ct) & (ct <= disch_times + tolerance)
     else:
         window_mask = (admit_times - tolerance <= ct)
-    matches = candidates[window_mask]
+    matches = cast(pd.DataFrame, candidates[window_mask])
     if len(matches) == 0:
         return None
     if len(matches) == 1:
         return float(matches.iloc[0]["hadm_id"])
     # Multiple matches: pick the one whose admittime is closest to charttime
     matches = matches.copy()
-    matches["_gap"] = (pd.to_datetime(matches["admittime"]) - ct).abs()
+    admit_dt = cast(pd.Series, pd.to_datetime(matches["admittime"]))
+    matches["_gap"] = cast(pd.Series, admit_dt - ct).abs()
     best_idx = matches["_gap"].idxmin()
     return float(matches.loc[best_idx, "hadm_id"])
 
@@ -117,7 +118,7 @@ def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
         return False
     try:
         df = pd.read_parquet(path)
-    except Exception:  # noqa: BLE001
+    except Exception:  # noqa: BLE001  # noinspection PyBroadException
         return False
     if len(df) != expected_rows:
         return False
