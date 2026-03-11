@@ -90,8 +90,8 @@ if [[ $EMBED_STATUS_CODE -eq 2 ]]; then
     echo "Decision: submitting full pipeline (preprocessing + embed slices + combine)."
     echo ""
 
-    PREPROCESS_JOB=$(sbatch --parsable pipeline_job.sh)
-    echo "  [1/3] Preprocessing : job $PREPROCESS_JOB (pipeline_job.sh)"
+    PREPROCESS_JOB=$(sbatch --parsable src/preprocessing/pipeline_job.sh)
+    echo "  [1/3] Preprocessing : job $PREPROCESS_JOB (src/preprocessing/pipeline_job.sh)"
     CURRENT_DEP="$PREPROCESS_JOB"
 fi
 
@@ -102,11 +102,11 @@ if [[ $EMBED_STATUS_CODE -eq 1 || $EMBED_STATUS_CODE -eq 2 ]]; then
         if [[ -n "$CURRENT_DEP" ]]; then
             EMBED_JOB=$(sbatch --parsable \
                 --dependency=afterok:"$CURRENT_DEP" \
-                embed_job.sh "$i")
-            echo "    embed slice $i : job $EMBED_JOB (embed_job.sh $i, depends on $CURRENT_DEP)"
+                src/preprocessing/embed_job.sh "$i")
+            echo "    embed slice $i : job $EMBED_JOB (src/preprocessing/embed_job.sh $i, depends on $CURRENT_DEP)"
         else
-            EMBED_JOB=$(sbatch --parsable embed_job.sh "$i")
-            echo "    embed slice $i : job $EMBED_JOB (embed_job.sh $i)"
+            EMBED_JOB=$(sbatch --parsable src/preprocessing/embed_job.sh "$i")
+            echo "    embed slice $i : job $EMBED_JOB (src/preprocessing/embed_job.sh $i)"
         fi
         CURRENT_DEP="$EMBED_JOB"
     done
@@ -116,11 +116,11 @@ fi
 if [[ -n "$CURRENT_DEP" ]]; then
     COMBINE_JOB=$(sbatch --parsable \
         --dependency=afterok:"$CURRENT_DEP" \
-        combine_job.sh)
-    echo "  Combine : job $COMBINE_JOB (combine_job.sh, depends on $CURRENT_DEP)"
+        src/preprocessing/combine_job.sh)
+    echo "  Combine : job $COMBINE_JOB (src/preprocessing/combine_job.sh, depends on $CURRENT_DEP)"
 else
-    COMBINE_JOB=$(sbatch --parsable combine_job.sh)
-    echo "  Combine : job $COMBINE_JOB (combine_job.sh)"
+    COMBINE_JOB=$(sbatch --parsable src/preprocessing/combine_job.sh)
+    echo "  Combine : job $COMBINE_JOB (src/preprocessing/combine_job.sh)"
 fi
 
 echo ""
