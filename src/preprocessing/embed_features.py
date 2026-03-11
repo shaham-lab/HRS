@@ -126,10 +126,11 @@ def _effective_batch_size(base_batch_size: int, effective_max_length: int) -> in
     """
     Scale batch size to maintain a roughly constant token budget per GPU step.
     base_batch_size is calibrated for _REFERENCE_LENGTH tokens.
+    Never exceeds 4× base to avoid OOM on short-capped features.
+    Uses float division so caps larger than _REFERENCE_LENGTH get fractional scale.
     """
-    scale = _REFERENCE_LENGTH / max(effective_max_length, 1)
-    scaled = int(base_batch_size * scale)
-    return max(1, min(scaled, base_batch_size * 8))  # cap at 8× base
+    scaled = int(base_batch_size * _REFERENCE_LENGTH / max(effective_max_length, 1))
+    return max(1, min(scaled, base_batch_size * 4))  # cap at 4× base
 
 
 def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
@@ -379,7 +380,17 @@ def _worker(
 
         slice_hadm_ids = set(subject_hadm["hadm_id"].tolist())
 
-        # --- Effective max_length and batch size (needed for cost estimate below) ---
+        # Fix 6 — cleanup stale .tmp on force-reembed
+        if force_reembed:
+            tmp_path = output_path + ".tmp"
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+                worker_logger.info(
+                    "[GPU %d] FORCE_REEMBED: removed stale .tmp for %s",
+                    rank, embedding_col,
+                )
+
+        # --- Effective max_length and batch size ---
         if task["kind"] == "lab":
             effective_max_length = min(max_length, _LAB_MAX_LENGTH)
         else:
@@ -396,7 +407,7 @@ def _worker(
         if os.path.exists(output_path) and not force_reembed:
             try:
                 existing = pd.read_parquet(output_path, columns=["hadm_id"])
-                already_done = set(existing["hadm_id"].tolist())
+                already_done = set(existing["hadm_id"].tolist()) & slice_hadm_ids
             except Exception:
                 already_done = set()
 
@@ -606,7 +617,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
         logger.info("  %2d. %s (%d texts)", i, t["embedding_col"], len(t["texts"]))
 
     # ------------------------------------------------------------------ #
-    # Add max_length to each task (used for LPT cost estimate)
+    # Add max_length to each task (used for cost estimates below)
     # ------------------------------------------------------------------ #
     global_max_length = int(config.get("BERT_MAX_LENGTH", 8192))
     for task in all_tasks:
@@ -619,33 +630,74 @@ def run(config: dict, slice_index: int | None = None) -> None:
             )
 
     # ------------------------------------------------------------------ #
-    # LPT scheduling — assign features to GPUs by greedy load balancing
+    # Step A — Split slice admissions evenly between GPU workers
     # ------------------------------------------------------------------ #
-    # Sort by estimated cost (texts × max_length) descending, then greedily
-    # assign each feature to the GPU with the lowest accumulated cost.
-    all_tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
-    gpu_loads: list[int] = [0] * n_gpus
-    partitions: list[list[dict]] = [[] for _ in range(n_gpus)]
-    for task in all_tasks:
-        g = gpu_loads.index(min(gpu_loads))
-        partitions[g].append(task)
-        gpu_loads[g] += len(task["texts"]) * task["max_length"]
+    # Each worker processes ALL 18 features for its own subset of admissions,
+    # cutting per-worker memory usage to ~1/n_gpus of the full slice.
+    # Workers run sequentially below (see Step C) to prevent concurrent writes
+    # to the shared output parquets.
+    all_hadm_in_slice = sorted(slice_hadm_ids)   # deterministic order
+    n_hadm = len(all_hadm_in_slice)
+    gpu_hadm_ids: list[set] = []
+    for g in range(n_gpus):
+        start_g = g * n_hadm // n_gpus
+        end_g   = (g + 1) * n_hadm // n_gpus
+        gpu_hadm_ids.append(set(all_hadm_in_slice[start_g:end_g]))
 
-    logger.info("Feature assignment (LPT scheduling):")
-    for i, (device, partition, load) in enumerate(zip(devices, partitions, gpu_loads)):
+    logger.info(
+        "Slice %d split: %s",
+        slice_index,
+        " | ".join(
+            f"GPU {g}: {len(ids)} admissions" for g, ids in enumerate(gpu_hadm_ids)
+        ),
+    )
+
+    # ------------------------------------------------------------------ #
+    # Step B — Build per-GPU task lists
+    # ------------------------------------------------------------------ #
+    # All 18 features for each worker, but texts/subject_hadm filtered to
+    # that worker's hadm_id subset; sorted by cost descending within each
+    # worker (LPT ordering for better progress visibility).
+    partitions: list[list[dict]] = []
+    for g in range(n_gpus):
+        worker_hadm_ids = gpu_hadm_ids[g]
+        worker_tasks = []
+        for task in all_tasks:
+            mask = task["subject_hadm"]["hadm_id"].isin(worker_hadm_ids).values
+            worker_sh    = task["subject_hadm"][mask].reset_index(drop=True)
+            worker_texts = [t for t, m in zip(task["texts"], mask) if m]
+            worker_tasks.append({
+                **task,
+                "texts":        worker_texts,
+                "subject_hadm": worker_sh,
+            })
+        # LPT ordering within worker: most expensive features first
+        worker_tasks.sort(
+            key=lambda t: len(t["texts"]) * t["max_length"], reverse=True
+        )
+        partitions.append(worker_tasks)
+
+    logger.info("Worker task plans (LPT-ordered within each worker):")
+    for g, (device, worker_tasks) in enumerate(zip(devices, partitions)):
+        total_cost = sum(len(t["texts"]) * t["max_length"] for t in worker_tasks)
         logger.info(
-            "  GPU %d (%s): %d features, estimated cost %d — %s",
-            i, device, len(partition), load,
-            ", ".join(t["embedding_col"] for t in partition),
+            "  GPU %d (%s): %d admissions, %d features, cost %d — %s",
+            g, device, len(gpu_hadm_ids[g]), len(worker_tasks), total_cost,
+            ", ".join(t["embedding_col"] for t in worker_tasks),
         )
 
     # ------------------------------------------------------------------ #
-    # Run workers
+    # Step C — Run workers sequentially to prevent concurrent parquet writes
     # ------------------------------------------------------------------ #
-    if n_gpus == 1:
-        # Single device — run in current process, no spawn overhead
-        import queue
-        result_queue: queue.SimpleQueue = queue.SimpleQueue()
+    # Worker N appends its hadm_id subset to the shared output parquets.
+    # Worker N+1 runs AFTER worker N completes; the 3-level resume in
+    # _worker detects which hadm_ids are already written and skips them,
+    # so worker N+1 appends only its own rows.
+    import queue
+    result_queue: queue.SimpleQueue = queue.SimpleQueue()
+
+    if n_gpus == 1 or not torch.cuda.is_available():
+        # Single device or CPU-only: run directly in this process
         _worker(0, devices[0], partitions[0], config, result_queue, slice_index)
         results = [result_queue.get()]
     else:
@@ -653,7 +705,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
         ctx = mp.get_context("spawn")   # required for CUDA
         result_queue_mp = ctx.Queue()
 
-        processes = []
+        results = []
         for rank, (device, partition) in enumerate(zip(devices, partitions)):
             p = ctx.Process(
                 target=_worker,
@@ -662,14 +714,16 @@ def run(config: dict, slice_index: int | None = None) -> None:
             )
             p.start()
             logger.info(
-                "Spawned worker %d on %s (pid=%d)", rank, device, p.pid
+                "Spawned worker %d on %s (pid=%d) — %d admissions, %d features",
+                rank, device, p.pid, len(gpu_hadm_ids[rank]), len(partition),
             )
-            processes.append(p)
-
-        for p in processes:
-            p.join()
-
-        results = [result_queue_mp.get() for _ in processes]
+            p.join()   # ← wait before starting next worker (safe sequential writes)
+            result = result_queue_mp.get()
+            results.append(result)
+            logger.info(
+                "Worker %d complete: %d succeeded, %d failed",
+                rank, len(result["completed"]), len(result["failed"]),
+            )
 
     # ------------------------------------------------------------------ #
     # Summary

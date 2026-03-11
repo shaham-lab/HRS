@@ -25,9 +25,38 @@ mkdir -p logs
 
 CONFIG="config/preprocessing.yaml"
 
-# Total number of embed slices: ceil(546028 / (20000 * 2)) = 14
-N_SLICES=14
-LAST_SLICE=$(( N_SLICES - 1 ))   # 13
+# Compute the number of embed slice jobs dynamically from config and
+# data_splits.parquet.  Falls back to config-only estimate if the parquet
+# does not yet exist (status code 2 path — pipeline hasn't run yet).
+N_SLICES=$(python3 - <<'PYEOF'
+import math, sys, os
+import yaml
+
+with open("config/preprocessing.yaml") as f:
+    cfg = yaml.safe_load(f)
+
+slice_size = int(cfg.get("BERT_SLICE_SIZE_PER_GPU", 20000))
+n_gpus     = int(cfg.get("BERT_MAX_GPUS", 2) or 2)
+
+splits_path = os.path.join(str(cfg.get("PREPROCESSING_DIR", "data/preprocessing")),
+                           "data_splits.parquet")
+if os.path.exists(splits_path):
+    import pandas as pd
+    total = pd.read_parquet(splits_path, columns=["hadm_id"])["hadm_id"].nunique()
+else:
+    # Pipeline hasn't run yet — use known dataset size
+    total = 546028
+
+print(math.ceil(total / (slice_size * n_gpus)))
+PYEOF
+)
+
+if [ -z "$N_SLICES" ] || [ "$N_SLICES" -lt 1 ]; then
+    echo "ERROR: could not compute N_SLICES" >&2
+    exit 1
+fi
+
+LAST_SLICE=$(( N_SLICES - 1 ))
 
 echo "============================================================"
 echo "  CDSS Preprocessing Pipeline — Auto-Submit"

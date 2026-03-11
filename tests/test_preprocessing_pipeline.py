@@ -1545,59 +1545,62 @@ class TestEmbedFeaturesSlicing(unittest.TestCase):
         # No embeddings written
         self.assertEqual(os.listdir(self.embeddings_dir), [])
 
-    def test_lpt_assigns_all_tasks(self):
-        """LPT scheduling assigns every task to exactly one GPU."""
-        # Simulate 6 tasks with varying costs across 2 GPUs
+    def test_hadm_id_split_disjoint_and_complete(self):
+        """Hadm_id split between workers is disjoint and covers all admissions."""
+        all_hadm = sorted(range(1000, 1100))  # 100 admissions
+        n_gpus = 2
+        n = len(all_hadm)
+        gpu_hadm = []
+        for g in range(n_gpus):
+            start = g * n // n_gpus
+            end = (g + 1) * n // n_gpus
+            gpu_hadm.append(set(all_hadm[start:end]))
+
+        # Disjoint
+        self.assertEqual(gpu_hadm[0] & gpu_hadm[1], set(),
+                         "Worker hadm_id sets overlap")
+        # Complete coverage
+        self.assertEqual(gpu_hadm[0] | gpu_hadm[1], set(all_hadm),
+                         "Split does not cover all admissions")
+        # Roughly equal sizes
+        self.assertAlmostEqual(len(gpu_hadm[0]), len(gpu_hadm[1]), delta=1,
+                               msg="Split halves differ by more than 1")
+
+    def test_within_worker_lpt_ordering(self):
+        """Tasks within a worker are sorted by estimated cost in descending order."""
         tasks = [
-            {"embedding_col": f"feat_{i}", "texts": ["x"] * (10 * (6 - i)),
-             "max_length": 512}
-            for i in range(6)
+            {"embedding_col": f"feat_{i}", "texts": ["x"] * (i * 10), "max_length": 512}
+            for i in range(1, 6)
         ]
-        n_gpus = 2
-        tasks_sorted = sorted(tasks, key=lambda t: len(t["texts"]) * t["max_length"],
-                              reverse=True)
-        gpu_loads = [0] * n_gpus
-        partitions: list = [[] for _ in range(n_gpus)]
-        for task in tasks_sorted:
-            g = gpu_loads.index(min(gpu_loads))
-            partitions[g].append(task)
-            gpu_loads[g] += len(task["texts"]) * task["max_length"]
+        tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
+        costs = [len(t["texts"]) * t["max_length"] for t in tasks]
+        self.assertEqual(costs, sorted(costs, reverse=True),
+                         "Tasks not sorted descending by cost within worker")
 
-        all_assigned = [t for p in partitions for t in p]
-        self.assertEqual(len(all_assigned), len(tasks),
-                         "Some tasks not assigned by LPT")
+    def test_effective_batch_size_capped_at_4x_base(self):
+        """_effective_batch_size never exceeds 4x base_batch_size and matches spec table."""
+        import embed_features
 
-        for t in tasks:
-            self.assertIn(t, all_assigned, f"Task {t['embedding_col']} not assigned")
+        base = 32
+        for cap in [64, 128, 256, 512, 1024, 2048, 4096]:
+            result = embed_features._effective_batch_size(base, cap)
+            self.assertLessEqual(result, base * 4,
+                                 f"Batch size exceeds 4x base for cap={cap}")
+            self.assertGreaterEqual(result, 1)
 
-    def test_lpt_balances_load(self):
-        """LPT scheduling produces better balance than round-robin for skewed costs."""
-        # One very expensive task + many cheap tasks
-        tasks = [{"texts": ["x"] * 1000, "max_length": 4096, "embedding_col": "big"}]
-        for i in range(5):
-            tasks.append({"texts": ["x"] * 10, "max_length": 64,
-                          "embedding_col": f"small_{i}"})
-
-        n_gpus = 2
-        tasks_sorted = sorted(tasks, key=lambda t: len(t["texts"]) * t["max_length"],
-                              reverse=True)
-        gpu_loads = [0] * n_gpus
-        partitions: list = [[] for _ in range(n_gpus)]
-        for task in tasks_sorted:
-            g = gpu_loads.index(min(gpu_loads))
-            partitions[g].append(task)
-            gpu_loads[g] += len(task["texts"]) * task["max_length"]
-
-        # The max load across GPUs should be smaller than naive round-robin
-        max_load = max(gpu_loads)
-        # Round-robin would put big on GPU 0 and all smalls on alternate GPUs
-        rr_loads = [0, 0]
-        for i, t in enumerate(tasks):
-            rr_loads[i % 2] += len(t["texts"]) * t["max_length"]
-        max_rr = max(rr_loads)
-
-        self.assertLessEqual(max_load, max_rr,
-                             "LPT should produce load ≤ round-robin for skewed tasks")
+        # Verify key values from spec table (base=32)
+        spec_table = [
+            (64,   128),   # chief_complaint: min(256, 128) = 128
+            (256,   64),   # triage:          min(64, 128)  = 64
+            (512,   32),   # diag_history:    min(32, 128)  = 32
+            (1024,  16),   # radiology:       min(16, 128)  = 16
+            (2048,   8),   # lab groups:      min(8, 128)   = 8
+            (4096,   4),   # discharge_hist:  min(4, 128)   = 4
+        ]
+        for cap, expected in spec_table:
+            got = embed_features._effective_batch_size(base, cap)
+            self.assertEqual(got, expected,
+                             f"cap={cap}: expected {expected}, got {got}")
 
 
 if __name__ == "__main__":
