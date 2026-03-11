@@ -5,17 +5,17 @@
 1. [Identifier Hierarchy](#1-identifier-hierarchy)
 2. [Data Splits — Implementation](#2-data-splits--implementation)
 3. [Module Implementation](#3-module-implementation)
-   - [build_lab_panel_config.py](#buildlabpanelconfigpy)
-   - [create_splits.py](#createsplitspy)
-   - [extract_demographics.py](#extractdemographicspy)
-   - [extract_diag_history.py](#extractdiaghistorypy)
-   - [extract_discharge_history.py](#extractdischargehistorypy)
-   - [extract_triage_and_complaint.py](#extracttriageandcomplaintpy)
-   - [extract_labs.py](#extractlabspy)
-   - [extract_radiology.py](#extractradiologypy)
-   - [extract_y_data.py](#extractydatapy)
-   - [embed_features.py](#embedfeaturespy)
-   - [combine_dataset.py](#combinedatasetpy)
+   - [build_lab_panel_config.py](#build_lab_panel_configpy)
+   - [create_splits.py](#create_splitspy)
+   - [extract_demographics.py](#extract_demographicspy)
+   - [extract_diag_history.py](#extract_diag_historypy)
+   - [extract_discharge_history.py](#extract_discharge_historypy)
+   - [extract_triage_and_complaint.py](#extract_triage_and_complaintpy)
+   - [extract_labs.py](#extract_labspy)
+   - [extract_radiology.py](#extract_radiologypy)
+   - [extract_y_data.py](#extract_y_datapy)
+   - [embed_features.py](#embed_featurespy)
+   - [combine_dataset.py](#combine_datasetpy)
 4. [Embedding Implementation Detail](#4-embedding-implementation-detail)
    - [Model](#model)
    - [Mean Pooling](#mean-pooling)
@@ -49,10 +49,14 @@ subject_id   (patient — persistent across all visits)
 
 Several tables contain records with null `hadm_id` (~10–20% of `labevents`, lower rates in `note` and `chartevents`). Handling is configurable via `HADM_LINKAGE_STRATEGY`:
 
-| Strategy | Behaviour |
-|----------|-----------|
-| `"drop"` *(default)* | Exclude records with null `hadm_id`. Count and percentage logged per module. |
-| `"link"` | Time-window linkage: match `charttime` against patient admission windows within `HADM_LINKAGE_TOLERANCE_HOURS`. Assign if exactly one match; assign closest if multiple; drop if none. All outcomes logged to `hadm_linkage_stats.json`. |
+| Strategy             | Behaviour                                                                              |
+|----------------------|----------------------------------------------------------------------------------------|
+| `"drop"` *(default)* | Exclude records with null `hadm_id`. Count and percentage logged per module.           |
+| `"link"`             | Time-window `hadm_id` linkage; assign closest match; log to `hadm_linkage_stats.json`. |
+
+**`"link"` detail:** match `charttime` against `[admittime − tolerance, dischtime + tolerance]` per
+`subject_id` (tolerance = `HADM_LINKAGE_TOLERANCE_HOURS` h). Assign if exactly one match; assign
+closest if multiple; drop if none.
 
 ---
 
@@ -389,7 +393,7 @@ token hidden states (final layer):
 Mean pooling is chosen over `[CLS]` because Clinical_ModernBERT is not fine-tuned — the `[CLS]` token does not develop task-specific semantics in this regime. Mean pooling ensures every content token contributes equally, which is important for long texts (600-token discharge notes, 40-measurement lab timelines).
 
 **Implementation:**
-```python
+```
 attention_mask = batch["attention_mask"]           # (B, L)
 hidden = model(**batch).last_hidden_state          # (B, L, 768)
 mask = attention_mask.unsqueeze(-1).float()        # (B, L, 1)
@@ -461,7 +465,7 @@ python embed_features.py --config config/preprocessing.yaml \
 
 #### Slice Computation
 
-```python
+```
 per_job = config["BERT_SLICE_SIZE_PER_GPU"] * n_gpus
 n_slices = math.ceil(len(all_hadm_ids) / per_job)
 slice_start = slice_index * per_job
@@ -475,7 +479,7 @@ slice_hadm_ids = set(all_hadm_ids[slice_start:slice_end])
 
 Each slice appends its rows to the same feature parquet using `fastparquet` append mode:
 
-```python
+```
 import fastparquet as fp
 
 if output_path.exists():
@@ -535,7 +539,7 @@ sorted features (by cost, high → low):
 ```
 
 **Implementation in `run()`:**
-```python
+```
 tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
 gpu_loads = [0] * n_gpus
 gpu_tasks = [[] for _ in range(n_gpus)]
@@ -581,7 +585,7 @@ For each feature in each slice:
 ```
 
 **Append mechanics (fastparquet):**
-```python
+```
 import fastparquet as fp
 
 # First write for this feature (no prior rows at all)
