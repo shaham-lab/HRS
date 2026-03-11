@@ -27,12 +27,13 @@ Expected config keys:
 
 import logging
 import os
+from typing import cast
 
 import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _check_required_keys, _output_is_valid
+from preprocessing_utils import _check_required_keys, _load_config
 
 logger = logging.getLogger(__name__)
 
@@ -134,8 +135,6 @@ def _effective_batch_size(base_batch_size: int, effective_max_length: int) -> in
     scaled = int(base_batch_size * _REFERENCE_LENGTH / max(effective_max_length, 1))
     return max(1, min(scaled, base_batch_size * 4))  # cap at 4× base
 
-
-# _output_is_valid is imported from preprocessing_utils (shared with check_embed_status.py).
 
 def _embed_texts(
     texts: list[str],
@@ -338,7 +337,7 @@ def _worker(
     worker_logger.info(
         "[GPU %d | %s] Loading model '%s'…", rank, device_str, model_name
     )
-    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer = AutoTokenizer.from_pretrained(model_name)              # type: ignore[return-value]
     model: BertModel = BertModel.from_pretrained(model_name, add_pooling_layer=False)  # type: ignore[assignment]
     model.to(device)
     model.eval()
@@ -386,7 +385,7 @@ def _worker(
             try:
                 existing = pd.read_parquet(output_path, columns=["hadm_id"])
                 already_done = set(existing["hadm_id"].tolist()) & slice_hadm_ids
-            except Exception:  # noqa: BLE001
+            except Exception:  # noqa: BLE001  # noinspection PyBroadException
                 already_done = set()
 
         pending_hadm_ids = slice_hadm_ids - already_done
@@ -498,7 +497,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
     preprocessing_dir   = str(config["PREPROCESSING_DIR"])
     device_str          = str(config["BERT_DEVICE"])
     max_gpus_cfg        = config.get("BERT_MAX_GPUS")
-    max_gpus: int | None = int(max_gpus_cfg) if max_gpus_cfg is not None else None
+    max_gpus: int | None = int(cast(int, max_gpus_cfg)) if max_gpus_cfg is not None else None
 
     os.makedirs(embeddings_dir, exist_ok=True)
 
@@ -524,10 +523,9 @@ def run(config: dict, slice_index: int | None = None) -> None:
     # ------------------------------------------------------------------ #
     # Admission-slice computation
     # ------------------------------------------------------------------ #
-    if slice_index is None:
-        slice_index = int(config.get("BERT_SLICE_INDEX", 0))
-    # Resolve to plain int so type-checkers see int below, not int | None
-    resolved_slice_index: int = slice_index
+    resolved_slice_index: int = (
+        int(config.get("BERT_SLICE_INDEX", 0)) if slice_index is None else slice_index
+    )
 
     splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
     splits_full = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
@@ -681,7 +679,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
         results = [result_queue.get()]
     else:
         import torch.multiprocessing as mp
-        ctx: mp.SpawnContext = mp.get_context("spawn")   # required for CUDA
+        ctx = cast(mp.SpawnContext, mp.get_context("spawn"))   # required for CUDA
         result_queue_mp = ctx.Queue()
 
         results = []
@@ -743,7 +741,6 @@ def main() -> None:
     (embed_job.sh) independently of run_pipeline.py.
     """
     import argparse
-    import yaml  # type: ignore
 
     parser = argparse.ArgumentParser(
         description="Embed CDSS text features using BERT.",
@@ -773,23 +770,7 @@ def main() -> None:
         datefmt="%Y-%m-%d %H:%M:%S",
     )
 
-    # Load config and expand ~ in path values
-    if not os.path.exists(args.config):
-        raise FileNotFoundError(
-            f"Configuration file not found: {args.config}"
-        )
-    with open(args.config, "r", encoding="utf-8") as fh:
-        config: dict = yaml.safe_load(fh)
-
-    _PATH_KEYS = {
-        "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
-        "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR",
-        "CLASSIFICATIONS_DIR", "HASH_REGISTRY_PATH",
-    }
-    for key in _PATH_KEYS:
-        if key in config and isinstance(config[key], str):
-            config[key] = os.path.expanduser(config[key])
-
+    config = _load_config(args.config)
     logger.info("Loaded configuration from %s", args.config)
     run(config, slice_index=args.slice_index)
 
