@@ -6,6 +6,34 @@ import os
 from typing import Any, cast
 
 import pandas as pd
+import yaml
+
+
+# ---------------------------------------------------------------------------
+# Configuration loading
+# ---------------------------------------------------------------------------
+
+_PATH_KEYS: set[str] = {
+    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
+    "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+    "HASH_REGISTRY_PATH",
+}
+
+
+def _load_config(config_path: str) -> dict:
+    """Load and validate preprocessing.yaml; expand ~ in path values."""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    with open(config_path, "r", encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"Configuration file {config_path} must contain a YAML mapping."
+        )
+    for key in _PATH_KEYS:
+        if key in cfg and isinstance(cfg[key], str):
+            cfg[key] = os.path.expanduser(cfg[key])
+    return cfg
 
 
 def _check_required_keys(config: dict, required_keys: list[str]) -> None:

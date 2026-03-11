@@ -21,37 +21,13 @@ import os
 import sys
 import time
 
-import yaml
+from preprocessing_utils import _load_config, _PATH_KEYS  # noqa: F401  (re-exported for tests)
 
 logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 _CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
-
-
-_PATH_KEYS = {
-    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
-    "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
-    "HASH_REGISTRY_PATH",
-}
-
-
-def _load_config(config_path: str) -> dict:
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(
-            f"Configuration file not found: {config_path}"
-        )
-    with open(config_path, "r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"Configuration file {config_path} must contain a YAML mapping."
-        )
-    for key in _PATH_KEYS:
-        if key in cfg and isinstance(cfg[key], str):
-            cfg[key] = os.path.expanduser(cfg[key])
-    return cfg
 
 
 def _setup_logging() -> None:

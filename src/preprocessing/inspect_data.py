@@ -11,10 +11,11 @@ Usage:
 
 import argparse
 import os
-from typing import Any, cast
+from typing import cast
 
 import pandas as pd
-import yaml
+
+from preprocessing_utils import _load_config, _load_csv
 
 pd.set_option("display.max_columns", None)
 pd.set_option("display.width", 120)
@@ -23,42 +24,44 @@ pd.set_option("display.float_format", "{:.2f}".format)
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 _REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
 _CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
-_PATH_KEYS = {
-    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
-    "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
-    "HASH_REGISTRY_PATH",
-}
+
 
 
 # ---------------------------------------------------------------------------
-# Config loading (same pattern as run_pipeline.py)
+# Shared helpers
 # ---------------------------------------------------------------------------
 
-def _load_config(config_path: str) -> dict:
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-    with open(config_path, "r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"Configuration file {config_path} must contain a YAML mapping."
-        )
-    for key in _PATH_KEYS:
-        if key in cfg and isinstance(cfg[key], str):
-            cfg[key] = os.path.expanduser(cfg[key])
-    return cfg
+def _find_first_path(candidates: list[tuple[str, str]]) -> tuple[str, str]:
+    """Return the first (gz, csv) pair whose gz or csv file exists.
+
+    Falls back to ``candidates[0]`` when none of the candidates exist so that
+    the subsequent ``_load_csv`` call raises a descriptive ``FileNotFoundError``.
+    """
+    if not candidates:
+        raise ValueError("_find_first_path called with empty candidates list")
+    for gz, csv in candidates:
+        if os.path.exists(gz) or os.path.exists(csv):
+            return gz, csv
+    return candidates[0]
 
 
-# ---------------------------------------------------------------------------
-# Shared helpers (imported lazily to avoid circular import with preprocessing_utils)
-# ---------------------------------------------------------------------------
-
-def _load_csv(path_gz: str, path_csv: str, **kwargs: Any) -> pd.DataFrame:
-    if os.path.exists(path_gz):
-        return cast(pd.DataFrame, pd.read_csv(path_gz, **kwargs))
-    if os.path.exists(path_csv):
-        return cast(pd.DataFrame, pd.read_csv(path_csv, **kwargs))
-    raise FileNotFoundError(f"Neither {path_gz} nor {path_csv} found.")
+def _print_note_stats(df: pd.DataFrame, marker: str) -> None:
+    """Print standard statistics for a notes DataFrame."""
+    _print_snapshot(df)
+    print(f"\nUnique patients:   {df['subject_id'].nunique():,}")
+    print(f"Unique admissions: {df['hadm_id'].nunique():,}")
+    print(f"hadm_id null: {df['hadm_id'].isna().sum():,}")
+    print(f"\nFirst 3 non-empty note previews (first 300 chars each):")
+    for i, text in enumerate(df["text"].dropna().head(3)):
+        print(f"\n  [{i + 1}] {str(text)[:300].strip()!r}")
+    avg_len = float(df["text"].dropna().str.len().mean())
+    print(f"\nAverage note length: {avg_len:,.0f} characters (~{avg_len / 4:.0f} tokens estimated)")
+    print("  Clinical_ModernBERT context window: 8,192 tokens. Notes exceeding this will be truncated.")
+    has_marker = df["text"].str.contains(marker, na=False)
+    print(
+        f"\n{marker!r} marker present: {has_marker.sum():,} / {len(df):,}"
+        f" notes ({100 * has_marker.mean():.1f}%)"
+    )
 
 
 def _print_header(label: str, path: str) -> None:
@@ -176,7 +179,7 @@ def _inspect_omr(mimic_dir: str) -> None:
         subset = df[df["result_name"].str.contains(keyword, case=False, na=False)]
         print(f"\n{keyword} entries: {len(subset):,}")
         print(f"  Unique result_name values: {subset['result_name'].unique().tolist()}")
-        vals = pd.to_numeric(subset["result_value"], errors="coerce").dropna()
+        vals = cast(pd.Series, pd.to_numeric(subset["result_value"], errors="coerce")).dropna()
         if len(vals):
             print(
                 f"  Value range: {vals.min():.1f} – {vals.max():.1f},"
@@ -325,7 +328,7 @@ def _inspect_chartevents(mimic_dir: str) -> None:
 
     _print_snapshot(df)
 
-    VITAL_LABELS = {
+    vital_labels = {
         226707: "Height (Inch)",
         226730: "Height (cm)",
         226512: "Admission Weight (Kg)",
@@ -333,8 +336,8 @@ def _inspect_chartevents(mimic_dir: str) -> None:
         226531: "Admission Weight (lbs.)",
         226846: "Feeding Weight (kg)",
     }
-    vitals = df[df["itemid"].isin(VITAL_LABELS.keys())].copy()
-    vitals["label"] = vitals["itemid"].map(VITAL_LABELS)
+    vitals = df[df["itemid"].isin(vital_labels.keys())].copy()
+    vitals["label"] = vitals["itemid"].map(vital_labels)
     print(f"\nHeight/Weight rows in sample: {len(vitals):,}")
     if not vitals.empty:
         print(vitals[["itemid", "label", "valuenum", "valueuom"]].to_string(index=False))
@@ -363,11 +366,7 @@ def _inspect_discharge(mimic_dir: str, note_dir: str) -> None:
         (os.path.join(mimic_dir, "hosp", "discharge.csv.gz"),
          os.path.join(mimic_dir, "hosp", "discharge.csv")),
     ]
-    path_gz, path_csv = candidates[0]
-    for gz, csv in candidates:
-        if os.path.exists(gz) or os.path.exists(csv):
-            path_gz, path_csv = gz, csv
-            break
+    path_gz, path_csv = _find_first_path(candidates)
     _print_header("note/discharge (fallback hosp/discharge)", path_gz)
     try:
         df = _load_csv(
@@ -378,24 +377,7 @@ def _inspect_discharge(mimic_dir: str, note_dir: str) -> None:
         print("NOT FOUND — skipping.")
         return
 
-    _print_snapshot(df)
-
-    print(f"\nUnique patients:   {df['subject_id'].nunique():,}")
-    print(f"Unique admissions: {df['hadm_id'].nunique():,}")
-    print(f"hadm_id null: {df['hadm_id'].isna().sum():,}")
-    print(f"\nFirst 3 non-empty note previews (first 300 chars each):")
-    for i, text in enumerate(df["text"].dropna().head(3)):
-        print(f"\n  [{i + 1}] {str(text)[:300].strip()!r}")
-
-    avg_len = df["text"].dropna().str.len().mean()
-    print(f"\nAverage note length: {avg_len:,.0f} characters (~{avg_len / 4:.0f} tokens estimated)")
-    print("  Clinical_ModernBERT context window: 8,192 tokens. Notes exceeding this will be truncated.")
-
-    has_marker = df["text"].str.contains("Allergies:", na=False)
-    print(
-        f"\n'Allergies:' marker present: {has_marker.sum():,} / {len(df):,}"
-        f" notes ({100 * has_marker.mean():.1f}%)"
-    )
+    _print_note_stats(df, "Allergies:")
 
 
 def _inspect_radiology(mimic_dir: str, note_dir: str) -> None:
@@ -408,11 +390,7 @@ def _inspect_radiology(mimic_dir: str, note_dir: str) -> None:
         (os.path.join(mimic_dir, "hosp", "radiology.csv.gz"),
          os.path.join(mimic_dir, "hosp", "radiology.csv")),
     ]
-    path_gz, path_csv = candidates[0]
-    for gz, csv in candidates:
-        if os.path.exists(gz) or os.path.exists(csv):
-            path_gz, path_csv = gz, csv
-            break
+    path_gz, path_csv = _find_first_path(candidates)
     _print_header("note/radiology (fallback hosp/radiology)", path_gz)
     try:
         df = _load_csv(
@@ -423,24 +401,7 @@ def _inspect_radiology(mimic_dir: str, note_dir: str) -> None:
         print("NOT FOUND — skipping.")
         return
 
-    _print_snapshot(df)
-
-    print(f"\nUnique patients:   {df['subject_id'].nunique():,}")
-    print(f"Unique admissions: {df['hadm_id'].nunique():,}")
-    print(f"hadm_id null: {df['hadm_id'].isna().sum():,}")
-    print(f"\nFirst 3 non-empty note previews (first 300 chars each):")
-    for i, text in enumerate(df["text"].dropna().head(3)):
-        print(f"\n  [{i + 1}] {str(text)[:300].strip()!r}")
-
-    avg_len = df["text"].dropna().str.len().mean()
-    print(f"\nAverage note length: {avg_len:,.0f} characters (~{avg_len / 4:.0f} tokens estimated)")
-    print("  Clinical_ModernBERT context window: 8,192 tokens. Notes exceeding this will be truncated.")
-
-    has_marker = df["text"].str.contains("EXAMINATION:", na=False)
-    print(
-        f"\n'EXAMINATION:' marker present: {has_marker.sum():,} / {len(df):,}"
-        f" notes ({100 * has_marker.mean():.1f}%)"
-    )
+    _print_note_stats(df, "EXAMINATION:")
 
 
 def _inspect_triage(mimic_dir: str, ed_dir: str | None = None) -> None:
@@ -457,11 +418,7 @@ def _inspect_triage(mimic_dir: str, ed_dir: str | None = None) -> None:
         (os.path.join(mimic_dir, "hosp", "triage.csv.gz"),
          os.path.join(mimic_dir, "hosp", "triage.csv")),
     ]
-    path_gz, path_csv = candidates[0]
-    for gz, csv in candidates:
-        if os.path.exists(gz) or os.path.exists(csv):
-            path_gz, path_csv = gz, csv
-            break
+    path_gz, path_csv = _find_first_path(candidates)
     _print_header("ed/triage (mimic-iv-ed, fallback MIMIC_DATA_DIR/ed or hosp/triage)", path_gz)
     try:
         df = _load_csv(path_gz, path_csv)
@@ -501,11 +458,7 @@ def _inspect_edstays(mimic_dir: str, ed_dir: str | None = None) -> None:
         (os.path.join(mimic_dir, "ed", "edstays.csv.gz"),
          os.path.join(mimic_dir, "ed", "edstays.csv")),
     ]
-    path_gz, path_csv = candidates[0]
-    for gz, csv in candidates:
-        if os.path.exists(gz) or os.path.exists(csv):
-            path_gz, path_csv = gz, csv
-            break
+    path_gz, path_csv = _find_first_path(candidates)
     _print_header("ed/edstays (mimic-iv-ed bridge table)", path_gz)
     try:
         df = _load_csv(
