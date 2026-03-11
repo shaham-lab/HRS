@@ -15,6 +15,47 @@ def _check_required_keys(config: dict, required_keys: list[str]) -> None:
             raise KeyError(f"Missing required config key: '{key}'")
 
 
+def _link_hadm_for_row(
+    row: pd.Series,
+    admissions_df: pd.DataFrame,
+    tolerance: pd.Timedelta,
+) -> float | None:
+    """Resolve hadm_id for a single null-hadm_id row via time-window linkage.
+
+    Looks for admissions for the same subject_id where charttime falls within
+    [admittime - tolerance, dischtime + tolerance].
+
+    Returns the resolved hadm_id as float, or None if unresolvable.
+    When multiple admissions match, picks the one whose admittime is closest
+    to charttime.
+
+    ``pd.to_datetime`` is called on ``row["charttime"]`` intentionally: it is
+    idempotent when the value is already a Timestamp (e.g. from ``parse_dates``)
+    and handles string/NaT inputs gracefully, making this helper reusable
+    regardless of how the calling DataFrame was loaded.
+    """
+    ct = pd.to_datetime(row["charttime"])
+    candidates = admissions_df[admissions_df["subject_id"] == row["subject_id"]].copy()
+    if candidates.empty:
+        return None
+    admit_times = pd.to_datetime(candidates["admittime"])
+    if "dischtime" in candidates.columns:
+        disch_times = pd.to_datetime(candidates["dischtime"])
+        window_mask = (admit_times - tolerance <= ct) & (ct <= disch_times + tolerance)
+    else:
+        window_mask = (admit_times - tolerance <= ct)
+    matches = candidates[window_mask]
+    if len(matches) == 0:
+        return None
+    if len(matches) == 1:
+        return float(matches.iloc[0]["hadm_id"])
+    # Multiple matches: pick the one whose admittime is closest to charttime
+    matches = matches.copy()
+    matches["_gap"] = (pd.to_datetime(matches["admittime"]) - ct).abs()
+    best_idx = matches["_gap"].idxmin()
+    return float(matches.loc[best_idx, "hadm_id"])
+
+
 def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
     """Return True if a completed embedding parquet exists at `path` and is usable.
 

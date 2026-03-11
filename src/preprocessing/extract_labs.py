@@ -28,7 +28,7 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _check_required_keys, _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _link_hadm_for_row, _load_csv, _record_hashes, _sources_unchanged
 from build_lab_text_lines import _compute_row_abnormal_flag
 
 logger = logging.getLogger(__name__)
@@ -218,33 +218,14 @@ def run(config: dict) -> None:
             elif hadm_linkage_strategy == "link" and null_hadm_count > 0:
                 null_rows = chunk[null_hadm_mask].copy()
                 resolved_rows = []
-
+                tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
                 for _, row in null_rows.iterrows():
-                    sid = row["subject_id"]
-                    ct = pd.to_datetime(row["charttime"])
-                    if pd.isna(ct):
+                    resolved_hadm = _link_hadm_for_row(row, admissions, tolerance)
+                    if resolved_hadm is None:
                         continue
-                    candidates = admissions[admissions["subject_id"] == sid].copy()
-                    tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
-                    matches = candidates[
-                        (candidates["admittime"] - tolerance <= ct) &
-                        (ct <= candidates["dischtime"] + tolerance)
-                    ]
-                    if len(matches) == 0:
-                        continue  # unresolvable — drop
-                    elif len(matches) == 1:
-                        new_row = row.copy()
-                        new_row["hadm_id"] = int(matches.iloc[0]["hadm_id"])
-                        resolved_rows.append(new_row)
-                    else:
-                        matches = matches.copy()
-                        matches["_gap"] = (
-                            matches["admittime"].apply(lambda t: abs((t - ct).total_seconds()))
-                        )
-                        best = matches.sort_values("_gap").iloc[0]
-                        new_row = row.copy()
-                        new_row["hadm_id"] = int(best["hadm_id"])
-                        resolved_rows.append(new_row)
+                    new_row = row.copy()
+                    new_row["hadm_id"] = int(resolved_hadm)
+                    resolved_rows.append(new_row)
 
                 non_null = chunk[~null_hadm_mask].copy()
                 if resolved_rows:
