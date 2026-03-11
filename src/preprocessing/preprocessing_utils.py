@@ -8,6 +8,38 @@ from typing import Any, cast
 import pandas as pd
 
 
+def _check_required_keys(config: dict, required_keys: list[str]) -> None:
+    """Raise KeyError if any required config key is missing."""
+    for key in required_keys:
+        if key not in config:
+            raise KeyError(f"Missing required config key: '{key}'")
+
+
+def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
+    """Return True if a completed embedding parquet exists at `path` and is usable.
+
+    Checks:
+    - File exists
+    - Can be read as a parquet
+    - Has the expected number of rows (matches the input feature file)
+    - Contains the expected embedding column
+    - No null values in the embedding column (a partial write would leave nulls)
+    """
+    if not os.path.exists(path):
+        return False
+    try:
+        df = pd.read_parquet(path)
+    except Exception:  # noqa: BLE001
+        return False
+    if len(df) != expected_rows:
+        return False
+    if embedding_col not in df.columns:
+        return False
+    if df[embedding_col].isnull().any():
+        return False
+    return True
+
+
 def _gz_or_csv(base_dir: str, subdir: str, table: str) -> str:
     """Return the .csv.gz path if it exists, otherwise the .csv path.
 

@@ -18,22 +18,7 @@ import argparse
 import yaml
 import pandas as pd
 
-
-def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
-    """Mirror of embed_features._output_is_valid — kept in sync manually."""
-    if not os.path.exists(path):
-        return False
-    try:
-        df = pd.read_parquet(path)
-    except Exception:
-        return False
-    if len(df) != expected_rows:
-        return False
-    if embedding_col not in df.columns:
-        return False
-    if df[embedding_col].isnull().any():
-        return False
-    return True
+from preprocessing_utils import _output_is_valid
 
 
 def main() -> None:

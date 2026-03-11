@@ -16,7 +16,7 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -25,10 +25,7 @@ _READMISSION_WINDOW_DAYS = 30
 
 def run(config: dict) -> None:
     """Compute Y1 and Y2 labels and save to parquet."""
-    required_keys = ["MIMIC_DATA_DIR", "CLASSIFICATIONS_DIR"]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    _check_required_keys(config, ["MIMIC_DATA_DIR", "CLASSIFICATIONS_DIR"])
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]

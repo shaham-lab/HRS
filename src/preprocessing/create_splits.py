@@ -19,7 +19,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -29,16 +29,13 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Validate configuration
     # ------------------------------------------------------------------ #
-    required_keys = [
+    _check_required_keys(config, [
         "MIMIC_DATA_DIR",
         "SPLIT_TRAIN",
         "SPLIT_DEV",
         "SPLIT_TEST",
         "PREPROCESSING_DIR",
-    ]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    ])
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     split_train = float(config["SPLIT_TRAIN"])

@@ -32,7 +32,7 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -436,15 +436,12 @@ def _impute_vectorised(
 
 def run(config: dict) -> None:
     """Extract and save demographics feature vectors."""
-    required_keys = [
+    _check_required_keys(config, [
         "MIMIC_DATA_DIR",
         "FEATURES_DIR",
         "PREPROCESSING_DIR",
         "CLASSIFICATIONS_DIR",
-    ]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    ])
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]

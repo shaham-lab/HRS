@@ -28,7 +28,7 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 from build_lab_text_lines import _compute_row_abnormal_flag
 
 logger = logging.getLogger(__name__)
@@ -83,10 +83,7 @@ def _build_lab_text_line(row) -> str:
 
 def run(config: dict) -> None:
     """Extract lab events as long-format chronological text lines per admission."""
-    required_keys = ["MIMIC_DATA_DIR", "FEATURES_DIR"]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    _check_required_keys(config, ["MIMIC_DATA_DIR", "FEATURES_DIR"])
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]

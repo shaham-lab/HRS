@@ -26,6 +26,8 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
+from preprocessing_utils import _check_required_keys
+
 logger = logging.getLogger(__name__)
 
 # Feature parquets from features/ that are included in the final flat dataset.
@@ -43,15 +45,12 @@ _FEATURES_TO_INCLUDE = [
 
 def run(config: dict) -> None:
     """Combine all feature and label parquets into the final dataset."""
-    required_keys = [
+    _check_required_keys(config, [
         "FEATURES_DIR",
         "EMBEDDINGS_DIR",
         "CLASSIFICATIONS_DIR",
         "PREPROCESSING_DIR",
-    ]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    ])
 
     features_dir = str(config["FEATURES_DIR"])
     embeddings_dir = str(config["EMBEDDINGS_DIR"])

@@ -32,6 +32,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
+from preprocessing_utils import _check_required_keys, _output_is_valid
+
 logger = logging.getLogger(__name__)
 
 # Mapping: (input parquet filename, text column) -> output filename, embedding column
@@ -133,31 +135,7 @@ def _effective_batch_size(base_batch_size: int, effective_max_length: int) -> in
     return max(1, min(scaled, base_batch_size * 4))  # cap at 4× base
 
 
-def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
-    """
-    Return True if a completed embedding parquet exists at `path` and is usable.
-
-    Checks:
-    - File exists
-    - Can be read as a parquet
-    - Has the expected number of rows (matches the input feature file)
-    - Contains the expected embedding column
-    - No null values in the embedding column (a partial write would leave nulls)
-    """
-    if not os.path.exists(path):
-        return False
-    try:
-        df = pd.read_parquet(path)
-    except Exception:
-        return False
-    if len(df) != expected_rows:
-        return False
-    if embedding_col not in df.columns:
-        return False
-    if df[embedding_col].isnull().any():
-        return False
-    return True
-
+# _output_is_valid is imported from preprocessing_utils (shared with check_embed_status.py).
 
 def _embed_texts(
     texts: list[str],
@@ -361,7 +339,7 @@ def _worker(
         "[GPU %d | %s] Loading model '%s'…", rank, device_str, model_name
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
-    model = BertModel.from_pretrained(model_name, add_pooling_layer=False)
+    model: BertModel = BertModel.from_pretrained(model_name, add_pooling_layer=False)  # type: ignore[assignment]
     model.to(device)
     model.eval()
     worker_logger.info(
@@ -408,7 +386,7 @@ def _worker(
             try:
                 existing = pd.read_parquet(output_path, columns=["hadm_id"])
                 already_done = set(existing["hadm_id"].tolist()) & slice_hadm_ids
-            except Exception:
+            except Exception:  # noqa: BLE001
                 already_done = set()
 
         pending_hadm_ids = slice_hadm_ids - already_done
@@ -508,23 +486,19 @@ def run(config: dict, slice_index: int | None = None) -> None:
     import torch  # type: ignore
     import yaml   # type: ignore
 
-    required_keys = [
+    _check_required_keys(config, [
         "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
         "PREPROCESSING_DIR", "BERT_MODEL_NAME", "BERT_MAX_LENGTH",
         "BERT_BATCH_SIZE", "BERT_DEVICE",
-    ]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    ])
 
     features_dir        = str(config["FEATURES_DIR"])
     embeddings_dir      = str(config["EMBEDDINGS_DIR"])
     classifications_dir = str(config["CLASSIFICATIONS_DIR"])
     preprocessing_dir   = str(config["PREPROCESSING_DIR"])
     device_str          = str(config["BERT_DEVICE"])
-    max_gpus            = config.get("BERT_MAX_GPUS", None)
-    if max_gpus is not None:
-        max_gpus = int(max_gpus)
+    max_gpus_cfg        = config.get("BERT_MAX_GPUS")
+    max_gpus: int | None = int(max_gpus_cfg) if max_gpus_cfg is not None else None
 
     os.makedirs(embeddings_dir, exist_ok=True)
 
@@ -552,6 +526,8 @@ def run(config: dict, slice_index: int | None = None) -> None:
     # ------------------------------------------------------------------ #
     if slice_index is None:
         slice_index = int(config.get("BERT_SLICE_INDEX", 0))
+    # Resolve to plain int so type-checkers see int below, not int | None
+    resolved_slice_index: int = slice_index
 
     splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
     splits_full = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
@@ -568,19 +544,19 @@ def run(config: dict, slice_index: int | None = None) -> None:
         total_admissions, per_job, slice_size_per_gpu, n_gpus, n_slices,
     )
 
-    if slice_index >= n_slices:
+    if resolved_slice_index >= n_slices:
         logger.info(
-            "slice_index=%d >= n_slices=%d — nothing to do.", slice_index, n_slices
+            "slice_index=%d >= n_slices=%d — nothing to do.", resolved_slice_index, n_slices
         )
         return
 
-    slice_start = slice_index * per_job
+    slice_start = resolved_slice_index * per_job
     slice_end   = min(slice_start + per_job, total_admissions)
     slice_hadm_ids = set(all_hadm_ids[slice_start:slice_end])
 
     logger.info(
         "Processing slice %d/%d: hadm_ids[%d:%d] (%d admissions)",
-        slice_index, n_slices - 1, slice_start, slice_end, len(slice_hadm_ids),
+        resolved_slice_index, n_slices - 1, slice_start, slice_end, len(slice_hadm_ids),
     )
 
     # Filter splits to current slice
@@ -610,7 +586,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
     # ------------------------------------------------------------------ #
     # Build feature tasks (filtered to this slice's admissions)
     # ------------------------------------------------------------------ #
-    logger.info("Building feature task list for slice %d…", slice_index)
+    logger.info("Building feature task list for slice %d…", resolved_slice_index)
     all_tasks = _build_feature_tasks(config, lab_panel_config, labs_df, splits_df)
     logger.info(
         "Pipeline plan — %d feature(s) to embed across %d GPU(s):",
@@ -649,7 +625,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
 
     logger.info(
         "Slice %d split: %s",
-        slice_index,
+        resolved_slice_index,
         " | ".join(
             f"GPU {g}: {len(ids)} admissions" for g, ids in enumerate(gpu_hadm_ids)
         ),
@@ -676,7 +652,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
             })
         # LPT ordering within worker: most expensive features first
         worker_tasks.sort(
-            key=lambda t: len(t["texts"]) * t["max_length"], reverse=True
+            key=lambda _task: len(_task["texts"]) * _task["max_length"], reverse=True
         )
         partitions.append(worker_tasks)
 
@@ -701,18 +677,18 @@ def run(config: dict, slice_index: int | None = None) -> None:
 
     if n_gpus == 1 or not torch.cuda.is_available():
         # Single device or CPU-only: run directly in this process
-        _worker(0, devices[0], partitions[0], config, result_queue, slice_index)
+        _worker(0, devices[0], partitions[0], config, result_queue, resolved_slice_index)
         results = [result_queue.get()]
     else:
         import torch.multiprocessing as mp
-        ctx = mp.get_context("spawn")   # required for CUDA
+        ctx: mp.SpawnContext = mp.get_context("spawn")   # required for CUDA
         result_queue_mp = ctx.Queue()
 
         results = []
         for rank, (device, partition) in enumerate(zip(devices, partitions)):
             p = ctx.Process(
                 target=_worker,
-                args=(rank, device, partition, config, result_queue_mp, slice_index),
+                args=(rank, device, partition, config, result_queue_mp, resolved_slice_index),
                 name=f"embed-worker-{rank}",
             )
             p.start()
@@ -737,7 +713,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
     logger.info("")
     logger.info(
         "Slice %d complete: %d succeeded, %d failed",
-        slice_index, total_completed, total_failed,
+        resolved_slice_index, total_completed, total_failed,
     )
     for r in sorted(results, key=lambda x: x["rank"]):
         rank = r["rank"]
