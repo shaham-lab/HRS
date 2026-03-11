@@ -31,7 +31,7 @@ import pandas as pd
 import yaml
 from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _gz_or_csv, _load_d_labitems, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -62,9 +62,6 @@ _FLUID_CATEGORY_MAP: dict[tuple[str, str], str] = {
 _SINGLE_GROUP_NAME_OVERRIDES: dict[str, str] = {
     "cerebrospinal_fluid": "csf",
 }
-
-# Artefact fluid values to exclude
-_ARTIFACT_FLUIDS = frozenset({"I", "Q", "fluid"})
 
 
 def _fluid_to_group_name(fluid: str) -> str:
@@ -104,16 +101,7 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     hosp_dir = os.path.join(mimic_dir, "hosp")
     logger.info("Loading d_labitems…")
-    d_labitems = _load_csv(
-        os.path.join(hosp_dir, "d_labitems.csv.gz"),
-        os.path.join(hosp_dir, "d_labitems.csv"),
-        usecols=["itemid", "label", "fluid", "category"],
-    )
-
-    # Strip whitespace and remove artefact rows
-    d_labitems["fluid"] = d_labitems["fluid"].str.strip()
-    d_labitems["category"] = d_labitems["category"].str.strip()
-    d_labitems = d_labitems[~d_labitems["fluid"].isin(_ARTIFACT_FLUIDS)].copy()
+    d_labitems = _load_d_labitems(hosp_dir)
 
     logger.info("d_labitems: %d rows after removing artefacts", len(d_labitems))
 

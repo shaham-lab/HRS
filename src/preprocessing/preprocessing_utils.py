@@ -18,7 +18,7 @@ def _check_required_keys(config: dict, required_keys: list[str]) -> None:
 def _link_hadm_for_row(
     row: pd.Series,
     admissions_df: pd.DataFrame,
-    tolerance: pd.Timedelta,
+    tolerance: Any,
 ) -> float | None:
     """Resolve hadm_id for a single null-hadm_id row via time-window linkage.
 
@@ -54,6 +54,25 @@ def _link_hadm_for_row(
     matches["_gap"] = (pd.to_datetime(matches["admittime"]) - ct).abs()
     best_idx = matches["_gap"].idxmin()
     return float(matches.loc[best_idx, "hadm_id"])
+
+
+def _load_d_labitems(hosp_dir: str) -> pd.DataFrame:
+    """Load and clean the d_labitems lookup table from *hosp_dir*.
+
+    Returns a DataFrame with:
+    - Columns: itemid, label, fluid, category
+    - Whitespace stripped from fluid and category
+    - Artifact rows removed (fluid in {'I', 'Q', 'fluid'})
+    """
+    _artifact_fluids = frozenset({"I", "Q", "fluid"})
+    d_labitems = _load_csv(
+        os.path.join(hosp_dir, "d_labitems.csv.gz"),
+        os.path.join(hosp_dir, "d_labitems.csv"),
+        usecols=["itemid", "label", "fluid", "category"],
+    )
+    d_labitems["fluid"] = d_labitems["fluid"].str.strip()
+    d_labitems["category"] = d_labitems["category"].str.strip()
+    return d_labitems[~d_labitems["fluid"].isin(_artifact_fluids)].copy()
 
 
 def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:

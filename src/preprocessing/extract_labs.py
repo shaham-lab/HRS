@@ -28,57 +28,13 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _check_required_keys, _gz_or_csv, _link_hadm_for_row, _load_csv, _record_hashes, _sources_unchanged
-from build_lab_text_lines import _compute_row_abnormal_flag
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _link_hadm_for_row, _load_csv, _load_d_labitems, _record_hashes, _sources_unchanged
+from build_lab_text_lines import build_lab_text_line_row as _build_lab_text_line, build_lab_text_line_series
 
 logger = logging.getLogger(__name__)
 
 # Rows to read per chunk from labevents
 _CHUNK_SIZE = 1_000_000
-
-
-def _build_lab_text_line(row) -> str:
-    """Convert a single lab event row to a chronological text line.
-
-    Format: [HH:MM] {label}: {value} {unit} (ref: lower-upper) [ABNORMAL]
-
-    Where [HH:MM] is elapsed time since admittime (relative, not clock time).
-    [ABNORMAL] is appended when flag == "abnormal" OR when valuenum falls
-    outside [ref_range_lower, ref_range_upper].
-    """
-    # Elapsed time since admittime
-    try:
-        elapsed = pd.to_datetime(row["charttime"]) - pd.to_datetime(row["admittime"])
-        total_minutes = int(elapsed.total_seconds() // 60)
-        hours = total_minutes // 60
-        minutes = total_minutes % 60
-        time_str = f"{hours:02d}:{minutes:02d}"
-    except (TypeError, ValueError, OverflowError):
-        time_str = "00:00"
-
-    # Value: prefer numeric formatted to 2dp, fall back to text value
-    if pd.notna(row["valuenum"]):
-        value_str = f"{row['valuenum']:.2f}"
-    else:
-        value_str = str(row["value"]).strip()
-
-    # Unit
-    uom = f" {row['valueuom']}" if pd.notna(row["valueuom"]) else ""
-
-    # Reference range — only include when both bounds are present
-    ref_str = ""
-    ref_lower = row.get("ref_range_lower", None)
-    ref_upper = row.get("ref_range_upper", None)
-    if pd.notna(ref_lower) and pd.notna(ref_upper):
-        ref_str = f" (ref: {ref_lower}-{ref_upper})"
-
-    # Abnormal flag: flagged as "abnormal" OR valuenum outside reference range
-    flag_str = " [ABNORMAL]" if _compute_row_abnormal_flag(row) else ""
-
-    return (
-        f"[{time_str}] {row['label']}: "
-        f"{value_str}{uom}{ref_str}{flag_str}"
-    )
 
 
 def run(config: dict) -> None:
@@ -136,15 +92,7 @@ def run(config: dict) -> None:
     with tqdm(total=len(steps), desc="extract_labs", unit="step", dynamic_ncols=True) as pbar:
         pbar.set_description("extract_labs — loading d_labitems and admissions")
         logger.info("Loading d_labitems…")
-        d_labitems = _load_csv(
-            os.path.join(hosp_dir, "d_labitems.csv.gz"),
-            os.path.join(hosp_dir, "d_labitems.csv"),
-            usecols=["itemid", "label", "fluid", "category"],
-        )
-        # Clean d_labitems: strip whitespace, remove artifact rows
-        d_labitems["fluid"]    = d_labitems["fluid"].str.strip()
-        d_labitems["category"] = d_labitems["category"].str.strip()
-        d_labitems = d_labitems[~d_labitems["fluid"].isin(["I", "Q", "fluid"])]
+        d_labitems = _load_d_labitems(hosp_dir)
 
         d_labitems_indexed = d_labitems.set_index("itemid")
         item_to_label    = d_labitems_indexed["label"].to_dict()
@@ -312,8 +260,7 @@ def run(config: dict) -> None:
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_labs — building lab text lines")
         logger.info("Building lab text lines…")
-        tqdm.pandas(desc="Building lab text lines")
-        labs["lab_text_line"] = labs.progress_apply(_build_lab_text_line, axis=1)
+        labs["lab_text_line"] = build_lab_text_line_series(labs)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
