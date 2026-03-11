@@ -74,10 +74,11 @@ if [[ $EMBED_STATUS_CODE -eq 1 || $EMBED_STATUS_CODE -eq 2 ]]; then
             EMBED_JOB=$(sbatch --parsable \
                 --dependency=afterok:"$CURRENT_DEP" \
                 embed_job.sh "$i")
+            echo "    embed slice $i : job $EMBED_JOB (embed_job.sh $i, depends on $CURRENT_DEP)"
         else
             EMBED_JOB=$(sbatch --parsable embed_job.sh "$i")
+            echo "    embed slice $i : job $EMBED_JOB (embed_job.sh $i)"
         fi
-        echo "    embed slice $i : job $EMBED_JOB (embed_job.sh $i${CURRENT_DEP:+, depends on $CURRENT_DEP})"
         CURRENT_DEP="$EMBED_JOB"
     done
 fi

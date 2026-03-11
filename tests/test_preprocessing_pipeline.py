@@ -1588,7 +1588,6 @@ class TestEmbedFeaturesSlicing(unittest.TestCase):
             partitions[g].append(task)
             gpu_loads[g] += len(task["texts"]) * task["max_length"]
 
-        # The expensive task goes to GPU 0; all cheap tasks go to GPU 1 or GPU 0 to balance
         # The max load across GPUs should be smaller than naive round-robin
         max_load = max(gpu_loads)
         # Round-robin would put big on GPU 0 and all smalls on alternate GPUs

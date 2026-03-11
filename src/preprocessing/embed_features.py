@@ -328,6 +328,7 @@ def _worker(
     feature_tasks: list[dict],
     config: dict,
     result_queue,
+    slice_index: int = 0,
 ) -> None:
     """
     Worker process: loads BERT on `device_str`, embeds its assigned features,
@@ -403,8 +404,8 @@ def _worker(
 
         if not pending_hadm_ids:
             worker_logger.info(
-                "[GPU %d] [SKIP slice=%s feature=%s] all %d rows already present.",
-                rank, "?", embedding_col, len(slice_hadm_ids),
+                "[GPU %d] [SKIP slice=%d feature=%s] all %d rows already present.",
+                rank, slice_index, embedding_col, len(slice_hadm_ids),
             )
             completed.append(output_path)
             continue
@@ -645,7 +646,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
         # Single device — run in current process, no spawn overhead
         import queue
         result_queue: queue.SimpleQueue = queue.SimpleQueue()
-        _worker(0, devices[0], partitions[0], config, result_queue)
+        _worker(0, devices[0], partitions[0], config, result_queue, slice_index)
         results = [result_queue.get()]
     else:
         import torch.multiprocessing as mp
@@ -656,7 +657,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
         for rank, (device, partition) in enumerate(zip(devices, partitions)):
             p = ctx.Process(
                 target=_worker,
-                args=(rank, device, partition, config, result_queue_mp),
+                args=(rank, device, partition, config, result_queue_mp, slice_index),
                 name=f"embed-worker-{rank}",
             )
             p.start()
