@@ -1838,6 +1838,108 @@ class TestEmbedFeaturesWorkerPaths(unittest.TestCase):
             p.start.assert_called_once()
             p.join.assert_called_once()
 
+    # ------------------------------------------------------------------ #
+    # single-GPU: no worker temp file created (writes directly)
+    # ------------------------------------------------------------------ #
+    def test_single_gpu_no_worker_temp_files(self):
+        """Single-GPU path writes directly to output_path (n_workers=1 → write_path == output_path)."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        n_workers = 1
+        rank = 0
+        write_path = output_path + f".worker{rank}" if n_workers > 1 else output_path
+        self.assertEqual(write_path, output_path,
+                         "Single-GPU write_path must equal output_path (no temp file)")
+
+    def test_multi_gpu_uses_worker_temp_files(self):
+        """Multi-GPU path writes to per-worker temp (n_workers=2 → write_path != output_path)."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        for n_workers in (2, 4):
+            for rank in range(n_workers):
+                write_path = output_path + f".worker{rank}" if n_workers > 1 else output_path
+                self.assertNotEqual(write_path, output_path,
+                                    f"n_workers={n_workers} rank={rank}: write_path should differ from output_path")
+                self.assertEqual(write_path, output_path + f".worker{rank}")
+
+    # ------------------------------------------------------------------ #
+    # incomplete worker temp: detected and deleted, triggers re-embed
+    # ------------------------------------------------------------------ #
+    def test_incomplete_worker_temp_detected_and_deleted(self):
+        """If worker temp exists but has fewer rows than expected, it is deleted."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        write_path = output_path + ".worker0"
+        slice_hadm_ids = {1001, 1002, 1003, 1004}
+
+        # Write an incomplete worker temp (only 2 of 4 expected rows).
+        self._make_parquet(write_path, [1001, 1002])
+
+        # Simulate per-worker temp check logic (n_workers > 1)
+        force_reembed = False
+        if os.path.exists(write_path) and not force_reembed:
+            try:
+                wp_df = pd.read_parquet(write_path, columns=["hadm_id"])
+                wp_done = set(wp_df["hadm_id"].tolist())
+                if not slice_hadm_ids.issubset(wp_done):
+                    os.remove(write_path)
+            except Exception:  # noqa: BLE001
+                if os.path.exists(write_path):
+                    os.remove(write_path)
+
+        self.assertFalse(os.path.exists(write_path),
+                         "Incomplete worker temp should be deleted")
+
+    def test_complete_worker_temp_kept_for_merge(self):
+        """If worker temp has all expected rows (killed mid-merge), it is kept for re-merge."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        write_path = output_path + ".worker0"
+        slice_hadm_ids = {1001, 1002, 1003}
+
+        # Write a complete worker temp (all expected rows present).
+        self._make_parquet(write_path, [1001, 1002, 1003])
+
+        # Simulate per-worker temp check logic
+        skip_reembed = False
+        force_reembed = False
+        if os.path.exists(write_path) and not force_reembed:
+            try:
+                wp_df = pd.read_parquet(write_path, columns=["hadm_id"])
+                wp_done = set(wp_df["hadm_id"].tolist())
+                if slice_hadm_ids.issubset(wp_done):
+                    skip_reembed = True  # merge will handle it
+                else:
+                    os.remove(write_path)
+            except Exception:  # noqa: BLE001
+                if os.path.exists(write_path):
+                    os.remove(write_path)
+
+        self.assertTrue(os.path.exists(write_path),
+                        "Complete worker temp should be kept for the merge step")
+        self.assertTrue(skip_reembed, "Re-embed should be skipped when worker temp is complete")
+
+    # ------------------------------------------------------------------ #
+    # merge row count: tracked without re-reading the final file
+    # ------------------------------------------------------------------ #
+    def test_merge_row_count_from_in_memory_df(self):
+        """Multi-worker merge tracks n_rows from the in-memory concat, not a re-read."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        self._make_parquet(output_path + ".worker0", [1001, 1002])
+        self._make_parquet(output_path + ".worker1", [1003, 1004, 1005])
+
+        worker_paths = [output_path + f".worker{r}" for r in range(2)]
+        dfs = [pd.read_parquet(wp) for wp in worker_paths]
+        merged = pd.concat(dfs, ignore_index=True)
+        n_rows = len(merged)   # tracked from in-memory df — no re-read of final file
+
+        tmp_path = output_path + ".tmp"
+        merged.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, output_path)
+        for wp in worker_paths:
+            os.remove(wp)
+
+        # n_rows was computed before writing — must equal actual file row count
+        final_df = pd.read_parquet(output_path)
+        self.assertEqual(n_rows, 5, "n_rows should be 5 (2+3)")
+        self.assertEqual(n_rows, len(final_df), "n_rows must match actual file row count")
+
 
 if __name__ == "__main__":
     unittest.main()

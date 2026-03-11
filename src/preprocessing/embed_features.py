@@ -307,11 +307,18 @@ def _worker(
     config: dict,
     result_queue,
     slice_index: int = 0,
+    n_workers: int = 1,
 ) -> None:
     """
     Worker process: loads BERT on `device_str`, embeds its assigned features,
     writes output parquets with 3-level resume and fastparquet checkpointing.
     One worker per GPU, spawned by torch.multiprocessing.
+
+    When n_workers > 1 (multi-GPU parallel run) each worker writes to a
+    per-worker temporary parquet: ``output_path + f".worker{rank}"``.
+    The main process merges the per-worker files after all workers complete.
+    When n_workers == 1 (single-GPU / CPU) the worker writes directly to
+    ``output_path`` — no temporary files are created.
 
     Resume levels:
       1. Feature-level: skip if all slice hadm_ids already present in output.
@@ -354,36 +361,21 @@ def _worker(
         embedding_col = task["embedding_col"]
         texts         = task["texts"]          # list[str], aligned with subject_hadm
         subject_hadm  = task["subject_hadm"]   # pd.DataFrame with subject_id, hadm_id
-        worker_path   = output_path + f".worker{rank}"
+
+        # Multi-GPU: write to per-worker temp; single-GPU: write directly.
+        write_path = output_path + f".worker{rank}" if n_workers > 1 else output_path
 
         slice_hadm_ids = set(subject_hadm["hadm_id"].tolist())
 
-        # Clean up stale per-worker temp if final output is already complete
-        if os.path.exists(worker_path) and not force_reembed:
-            if os.path.exists(output_path):
-                try:
-                    existing = pd.read_parquet(output_path, columns=["hadm_id"])
-                    if slice_hadm_ids.issubset(set(existing["hadm_id"].tolist())):
-                        os.remove(worker_path)
-                        worker_logger.info(
-                            "[GPU %d] Removed stale worker temp for completed feature %s",
-                            rank, embedding_col,
-                        )
-                except Exception:  # noqa: BLE001  # noinspection PyBroadException
-                    pass  # if we can't read the final output, leave the temp alone
-
         # Fix 6 — cleanup stale .tmp on force-reembed
         if force_reembed:
-            tmp_path = output_path + ".tmp"
-            if os.path.exists(tmp_path):
-                os.remove(tmp_path)
-                worker_logger.info(
-                    "[GPU %d] FORCE_REEMBED: removed stale .tmp for %s",
-                    rank, embedding_col,
-                )
-            worker_tmp = worker_path + ".tmp"
-            if os.path.exists(worker_tmp):
-                os.remove(worker_tmp)
+            for stale in (output_path + ".tmp", write_path + ".tmp", write_path):
+                if stale != output_path and os.path.exists(stale):
+                    os.remove(stale)
+                    worker_logger.info(
+                        "[GPU %d] FORCE_REEMBED: removed stale file %s",
+                        rank, os.path.basename(stale),
+                    )
 
         # --- Effective max_length and batch size ---
         if task["kind"] == "lab":
@@ -413,6 +405,12 @@ def _worker(
                 "[GPU %d] [SKIP slice=%d feature=%s] all %d rows already present.",
                 rank, slice_index, embedding_col, len(slice_hadm_ids),
             )
+            # Clean up any stale worker temp left from a killed merge step.
+            if n_workers > 1 and os.path.exists(write_path):
+                try:
+                    os.remove(write_path)
+                except Exception:  # noqa: BLE001  # noinspection PyBroadException
+                    pass
             completed.append(output_path)
             continue
 
@@ -421,6 +419,46 @@ def _worker(
                 "[GPU %d] Resuming %s: %d/%d rows pending.",
                 rank, embedding_col, len(pending_hadm_ids), len(slice_hadm_ids),
             )
+
+        # ------------------------------------------------------------------ #
+        # Per-worker temp: handle stale file from a previously killed run    #
+        # ------------------------------------------------------------------ #
+        # Spec: "If a job is killed mid-merge, the per-worker temps are still #
+        # present on restart and the merge is re-run."                        #
+        # Spec: "If a job is killed mid-embedding, the incomplete per-worker  #
+        # temps are detected (row count < expected) and that worker re-embeds #
+        # from scratch for that feature."                                     #
+        if n_workers > 1 and os.path.exists(write_path) and not force_reembed:
+            try:
+                wp_df = pd.read_parquet(write_path, columns=["hadm_id"])
+                wp_done = set(wp_df["hadm_id"].tolist())
+                if slice_hadm_ids.issubset(wp_done):
+                    # worker temp is complete — merge was killed; skip re-embedding.
+                    worker_logger.info(
+                        "[GPU %d] Worker temp complete for %s — "
+                        "skipping re-embed (merge will combine it)",
+                        rank, embedding_col,
+                    )
+                    completed.append(output_path)
+                    continue
+                else:
+                    # worker temp is incomplete from a killed embedding run.
+                    os.remove(write_path)
+                    worker_logger.info(
+                        "[GPU %d] Removed incomplete worker temp for %s "
+                        "(%d/%d expected rows) — re-embedding from scratch",
+                        rank, embedding_col,
+                        len(wp_done & slice_hadm_ids), len(slice_hadm_ids),
+                    )
+            except Exception:  # noqa: BLE001  # noinspection PyBroadException
+                # Unreadable worker temp — delete and re-embed from scratch.
+                if os.path.exists(write_path):
+                    os.remove(write_path)
+                    worker_logger.info(
+                        "[GPU %d] Removed unreadable worker temp for %s "
+                        "— re-embedding from scratch",
+                        rank, embedding_col,
+                    )
 
         # ------------------------------------------------------------------ #
         # Level 2 — Record-level resume: filter to only pending rows          #
@@ -442,7 +480,7 @@ def _worker(
             # Level 3 — Checkpoint: embed in intervals, append via fastparquet   #
             # ------------------------------------------------------------------ #
             n_total = len(texts_pending)
-            is_first_write = not os.path.exists(worker_path)
+            is_first_write = not os.path.exists(write_path)
             rows_written = 0
 
             for start in range(0, n_total, checkpoint_interval):
@@ -462,12 +500,12 @@ def _worker(
 
                 # Atomic first write; subsequent writes use fastparquet append.
                 if is_first_write:
-                    tmp_path = worker_path + ".tmp"
+                    tmp_path = write_path + ".tmp"
                     fp.write(tmp_path, batch_sh, compression="snappy")
-                    os.replace(tmp_path, worker_path)
+                    os.replace(tmp_path, write_path)
                     is_first_write = False
                 else:
-                    fp.write(worker_path, batch_sh, compression="snappy", append=True)
+                    fp.write(write_path, batch_sh, compression="snappy", append=True)
 
                 rows_written += len(batch_sh)
                 worker_logger.info(
@@ -682,17 +720,21 @@ def run(config: dict, slice_index: int | None = None) -> None:
         )
 
     # ------------------------------------------------------------------ #
-    # Step C — Run workers in parallel, each writing to its own temp file
+    # Step C — Run workers (parallel for multi-GPU, in-process for single)
     # ------------------------------------------------------------------ #
-    # Each worker writes to output_path + f".worker{rank}".  When all workers
-    # finish the main process merges the per-worker files into the final
-    # output parquets (Step D), eliminating concurrent write conflicts.
+    # Multi-GPU: each worker writes to output_path + f".worker{rank}".
+    # The main process merges the per-worker files in Step D.
+    # Single-GPU / CPU: worker runs in-process and writes directly to
+    # output_path — no per-worker temp files are created.
     import queue
     result_queue: queue.SimpleQueue = queue.SimpleQueue()
 
     if n_gpus == 1 or not torch.cuda.is_available():
-        # Single device or CPU-only: run directly in this process
-        _worker(0, devices[0], partitions[0], config, result_queue, resolved_slice_index)
+        # Single device or CPU-only: run directly in this process, no temp files.
+        _worker(
+            0, devices[0], partitions[0], config, result_queue,
+            resolved_slice_index, n_workers=1,
+        )
         results = [result_queue.get()]
     else:
         import torch.multiprocessing as mp
@@ -703,7 +745,8 @@ def run(config: dict, slice_index: int | None = None) -> None:
         for rank, (device, partition) in enumerate(zip(devices, partitions)):
             p = ctx.Process(
                 target=_worker,
-                args=(rank, device, partition, config, result_queue_mp, resolved_slice_index),
+                args=(rank, device, partition, config, result_queue_mp,
+                      resolved_slice_index, n_gpus),
                 name=f"embed-worker-{rank}",
             )
             p.start()
@@ -727,52 +770,56 @@ def run(config: dict, slice_index: int | None = None) -> None:
             results.append(result_queue_mp.get())
         results.sort(key=lambda r: r["rank"])
 
-    # ------------------------------------------------------------------ #
-    # Step D — Merge per-worker parquets into final output parquets       #
-    # ------------------------------------------------------------------ #
-    logger.info("Merging per-worker parquets into final outputs…")
+        # ------------------------------------------------------------------ #
+        # Step D — Merge per-worker parquets into final output parquets       #
+        # (multi-GPU only — single-GPU writes directly, no merge needed)      #
+        # ------------------------------------------------------------------ #
+        logger.info("Merging per-worker parquets into final outputs…")
 
-    all_output_paths: set[str] = set()
-    for r in results:
-        for path in r["completed"]:
-            all_output_paths.add(path)
+        all_output_paths: set[str] = set()
+        for r in results:
+            for path in r["completed"]:
+                all_output_paths.add(path)
 
-    for output_path in sorted(all_output_paths):
-        worker_paths = [
-            output_path + f".worker{rank}"
-            for rank in range(n_gpus)
-            if os.path.exists(output_path + f".worker{rank}")
-        ]
+        for output_path in sorted(all_output_paths):
+            worker_paths = [
+                output_path + f".worker{rank}"
+                for rank in range(n_gpus)
+                if os.path.exists(output_path + f".worker{rank}")
+            ]
 
-        if not worker_paths:
-            logger.warning(
-                "No worker files found for %s — skipping merge",
+            if not worker_paths:
+                logger.warning(
+                    "No worker files found for %s — skipping merge",
+                    os.path.basename(output_path),
+                )
+                continue
+
+            if len(worker_paths) == 1:
+                # Only one worker file present (e.g. other worker failed).
+                # Count rows before rename so we can log without re-reading.
+                n_rows = len(pd.read_parquet(worker_paths[0], columns=["hadm_id"]))
+                tmp_path = output_path + ".tmp"
+                os.replace(worker_paths[0], tmp_path)
+                os.replace(tmp_path, output_path)
+            else:
+                # Merge all worker parquets; track row count from in-memory df.
+                dfs = [pd.read_parquet(wp) for wp in worker_paths]
+                merged = pd.concat(dfs, ignore_index=True)
+                n_rows = len(merged)
+                tmp_path = output_path + ".tmp"
+                merged.to_parquet(tmp_path, index=False)
+                os.replace(tmp_path, output_path)
+                # Clean up worker files
+                for wp in worker_paths:
+                    os.remove(wp)
+
+            logger.info(
+                "  Merged %d worker file(s) → %s (%d rows)",
+                len(worker_paths),
                 os.path.basename(output_path),
+                n_rows,
             )
-            continue
-
-        if len(worker_paths) == 1:
-            # Single worker (or only one succeeded) — rename directly
-            tmp_path = output_path + ".tmp"
-            os.replace(worker_paths[0], tmp_path)
-            os.replace(tmp_path, output_path)
-        else:
-            # Merge all worker parquets
-            dfs = [pd.read_parquet(wp) for wp in worker_paths]
-            merged = pd.concat(dfs, ignore_index=True)
-            tmp_path = output_path + ".tmp"
-            merged.to_parquet(tmp_path, index=False)
-            os.replace(tmp_path, output_path)
-            # Clean up worker files
-            for wp in worker_paths:
-                os.remove(wp)
-
-        logger.info(
-            "  Merged %d worker file(s) → %s (%d rows)",
-            len(worker_paths),
-            os.path.basename(output_path),
-            len(pd.read_parquet(output_path, columns=["hadm_id"])),
-        )
 
     # ------------------------------------------------------------------ #
     # Summary
