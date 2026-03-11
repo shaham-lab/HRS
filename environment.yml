@@ -32,5 +32,6 @@ dependencies:
     - torchvision
     - transformers
     - seaborn
+    - fastparquet
 
 

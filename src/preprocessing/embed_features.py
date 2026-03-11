@@ -225,15 +225,13 @@ def _build_feature_tasks(
     config: dict,
     lab_panel_config: dict,
     labs_df,      # pd.DataFrame | None
-    splits_df,    # pd.DataFrame
+    splits_df,    # pd.DataFrame — already filtered to the current slice
 ) -> list[dict]:
     """
     Build the full list of feature task dicts (up to 18).
-    Loads all input text on the main process once.
+    Loads all input text on the main process once, filtered to splits_df rows.
     Each dict contains everything a worker needs to embed one feature.
     """
-    import yaml  # type: ignore
-
     features_dir = str(config["FEATURES_DIR"])
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
     tasks = []
@@ -248,13 +246,17 @@ def _build_feature_tasks(
         if text_col not in df.columns:
             logger.warning("Column '%s' not found in %s, skipping.", text_col, input_path)
             continue
+        # Filter to current slice's hadm_ids
+        df = splits_df.merge(df[["subject_id", "hadm_id", text_col]],
+                             on=["subject_id", "hadm_id"], how="left")
+        df[text_col] = df[text_col].fillna("")
         tasks.append({
             "kind":          "text",
             "text_col":      text_col,
             "output_path":   os.path.join(embeddings_dir, output_filename),
             "embedding_col": embedding_col,
             "texts":         [str(t) for t in df[text_col].tolist()],
-            "subject_hadm":  df[["subject_id", "hadm_id"]].copy(),
+            "subject_hadm":  df[["subject_id", "hadm_id"]].copy().reset_index(drop=True),
         })
         logger.info("  Loaded %d texts for '%s'", len(df), text_col)
 
@@ -314,7 +316,7 @@ def _build_feature_tasks(
                 "output_path":   output_path,
                 "embedding_col": embedding_col,
                 "texts":         group_text["text"].tolist(),
-                "subject_hadm":  group_text[["subject_id", "hadm_id"]].copy(),
+                "subject_hadm":  group_text[["subject_id", "hadm_id"]].copy().reset_index(drop=True),
             })
 
     return tasks
@@ -329,9 +331,16 @@ def _worker(
 ) -> None:
     """
     Worker process: loads BERT on `device_str`, embeds its assigned features,
-    writes output parquets. One worker per GPU, spawned by torch.multiprocessing.
+    writes output parquets with 3-level resume and fastparquet checkpointing.
+    One worker per GPU, spawned by torch.multiprocessing.
+
+    Resume levels:
+      1. Feature-level: skip if all slice hadm_ids already present in output.
+      2. Record-level: filter to only rows whose hadm_id is missing from output.
+      3. Checkpoint: append every BERT_CHECKPOINT_INTERVAL rows via fastparquet.
     """
     import torch  # type: ignore
+    import fastparquet as fp  # type: ignore
     from transformers import AutoTokenizer, BertModel  # type: ignore
     from transformers import logging as hf_logging     # type: ignore
 
@@ -339,10 +348,11 @@ def _worker(
 
     worker_logger = logging.getLogger(f"embed_features.worker{rank}")
 
-    model_name    = str(config["BERT_MODEL_NAME"])
-    max_length    = int(config["BERT_MAX_LENGTH"])
-    batch_size    = int(config["BERT_BATCH_SIZE"])
-    force_reembed = bool(config.get("BERT_FORCE_REEMBED", False))
+    model_name          = str(config["BERT_MODEL_NAME"])
+    max_length          = int(config["BERT_MAX_LENGTH"])
+    batch_size          = int(config["BERT_BATCH_SIZE"])
+    force_reembed       = bool(config.get("BERT_FORCE_REEMBED", False))
+    checkpoint_interval = int(config.get("BERT_CHECKPOINT_INTERVAL", 10000))
 
     device = torch.device(device_str)
     worker_logger.info(
@@ -363,21 +373,12 @@ def _worker(
     for task in feature_tasks:
         output_path   = task["output_path"]
         embedding_col = task["embedding_col"]
-        texts         = task["texts"]
-        subject_hadm  = task["subject_hadm"]
+        texts         = task["texts"]          # list[str], aligned with subject_hadm
+        subject_hadm  = task["subject_hadm"]   # pd.DataFrame with subject_id, hadm_id
 
-        # --- Resume check ---
-        if not force_reembed and _output_is_valid(
-            output_path, expected_rows=len(texts), embedding_col=embedding_col
-        ):
-            worker_logger.info(
-                "[GPU %d] [SKIP] %s already complete (%d rows).",
-                rank, os.path.basename(output_path), len(texts),
-            )
-            completed.append(output_path)
-            continue
+        slice_hadm_ids = set(subject_hadm["hadm_id"].tolist())
 
-        # --- Effective max_length and batch size ---
+        # --- Effective max_length and batch size (needed for cost estimate below) ---
         if task["kind"] == "lab":
             effective_max_length = min(max_length, _LAB_MAX_LENGTH)
         else:
@@ -387,32 +388,87 @@ def _worker(
             )
         effective_batch_size = _effective_batch_size(batch_size, effective_max_length)
 
-        n_with_text = sum(1 for t in texts if isinstance(t, str) and t.strip())
+        # ------------------------------------------------------------------ #
+        # Level 1 — Feature-level resume: all slice rows already written?    #
+        # ------------------------------------------------------------------ #
+        already_done: set = set()
+        if os.path.exists(output_path) and not force_reembed:
+            try:
+                existing = pd.read_parquet(output_path, columns=["hadm_id"])
+                already_done = set(existing["hadm_id"].tolist())
+            except Exception:
+                already_done = set()
+
+        pending_hadm_ids = slice_hadm_ids - already_done
+
+        if not pending_hadm_ids:
+            worker_logger.info(
+                "[GPU %d] [SKIP slice=%s feature=%s] all %d rows already present.",
+                rank, "?", embedding_col, len(slice_hadm_ids),
+            )
+            completed.append(output_path)
+            continue
+
+        if already_done:
+            worker_logger.info(
+                "[GPU %d] Resuming %s: %d/%d rows pending.",
+                rank, embedding_col, len(pending_hadm_ids), len(slice_hadm_ids),
+            )
+
+        # ------------------------------------------------------------------ #
+        # Level 2 — Record-level resume: filter to only pending rows          #
+        # ------------------------------------------------------------------ #
+        pending_mask = subject_hadm["hadm_id"].isin(pending_hadm_ids).values
+        subject_hadm_pending = subject_hadm[pending_mask].reset_index(drop=True)
+        texts_pending = [t for t, m in zip(texts, pending_mask) if m]
+
+        n_with_text = sum(1 for t in texts_pending if isinstance(t, str) and t.strip())
         worker_logger.info(
             "[GPU %d] Embedding %s: %d texts (%d non-empty) "
             "max_length=%d batch_size=%d",
-            rank, embedding_col, len(texts), n_with_text,
+            rank, embedding_col, len(texts_pending), n_with_text,
             effective_max_length, effective_batch_size,
         )
 
         try:
-            embeddings = _embed_texts(
-                texts, tokenizer, model, device,
-                effective_max_length, effective_batch_size,
-            )
+            # ------------------------------------------------------------------ #
+            # Level 3 — Checkpoint: embed in intervals, append via fastparquet   #
+            # ------------------------------------------------------------------ #
+            n_total = len(texts_pending)
+            is_first_write = not os.path.exists(output_path)
+            rows_written = 0
 
-            out_df = subject_hadm.copy()
-            out_df[embedding_col] = list(embeddings)
+            for start in range(0, n_total, checkpoint_interval):
+                end = min(start + checkpoint_interval, n_total)
+                batch_texts = texts_pending[start:end]
+                batch_sh = subject_hadm_pending.iloc[start:end].copy()
 
-            # Atomic write via temp file — safe against mid-write kill signals
-            tmp_path = output_path + ".tmp"
-            out_df.to_parquet(tmp_path, index=False)
-            os.replace(tmp_path, output_path)
+                embeddings = _embed_texts(
+                    batch_texts, tokenizer, model, device,
+                    effective_max_length, effective_batch_size,
+                )
+
+                batch_sh[embedding_col] = list(embeddings)
+
+                # Atomic first write; subsequent writes use fastparquet append.
+                if is_first_write:
+                    tmp_path = output_path + ".tmp"
+                    fp.write(tmp_path, batch_sh, compression="snappy")
+                    os.replace(tmp_path, output_path)
+                    is_first_write = False
+                else:
+                    fp.write(output_path, batch_sh, compression="snappy", append=True)
+
+                rows_written += len(batch_sh)
+                worker_logger.info(
+                    "[GPU %d] Checkpoint: wrote rows %d–%d for %s (%d total so far)",
+                    rank, start, end - 1, embedding_col, rows_written,
+                )
 
             worker_logger.info(
-                "[GPU %d] Saved %s (%d rows, dim=%d)",
+                "[GPU %d] Saved %s (%d new rows, dim=%d)",
                 rank, os.path.basename(output_path),
-                len(out_df), embeddings.shape[1],
+                rows_written, 768,
             )
             completed.append(output_path)
 
@@ -425,8 +481,15 @@ def _worker(
     result_queue.put({"rank": rank, "completed": completed, "failed": failed})
 
 
-def run(config: dict) -> None:
-    """Embed all text features using all available GPUs in parallel."""
+def run(config: dict, slice_index: int | None = None) -> None:
+    """Embed text features for one admission slice using multi-GPU parallel processing.
+
+    Args:
+        config: Preprocessing configuration dict.
+        slice_index: 0-based index of the slice to process. If None, reads
+            ``config["BERT_SLICE_INDEX"]`` (default 0).
+    """
+    import math
     import torch  # type: ignore
     import yaml   # type: ignore
 
@@ -470,7 +533,46 @@ def run(config: dict) -> None:
     n_gpus = len(devices)
 
     # ------------------------------------------------------------------ #
-    # Load input data on main process (once)
+    # Admission-slice computation
+    # ------------------------------------------------------------------ #
+    if slice_index is None:
+        slice_index = int(config.get("BERT_SLICE_INDEX", 0))
+
+    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
+    splits_full = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
+    all_hadm_ids = sorted(splits_full["hadm_id"].unique().tolist())
+    total_admissions = len(all_hadm_ids)
+
+    slice_size_per_gpu = int(config.get("BERT_SLICE_SIZE_PER_GPU", 20000))
+    per_job = slice_size_per_gpu * n_gpus
+    n_slices = math.ceil(total_admissions / per_job)
+
+    logger.info(
+        "Total admissions: %d | Slice size per job: %d (%d per GPU × %d GPU(s)) "
+        "| Total slices: %d",
+        total_admissions, per_job, slice_size_per_gpu, n_gpus, n_slices,
+    )
+
+    if slice_index >= n_slices:
+        logger.info(
+            "slice_index=%d >= n_slices=%d — nothing to do.", slice_index, n_slices
+        )
+        return
+
+    slice_start = slice_index * per_job
+    slice_end   = min(slice_start + per_job, total_admissions)
+    slice_hadm_ids = set(all_hadm_ids[slice_start:slice_end])
+
+    logger.info(
+        "Processing slice %d/%d: hadm_ids[%d:%d] (%d admissions)",
+        slice_index, n_slices - 1, slice_start, slice_end, len(slice_hadm_ids),
+    )
+
+    # Filter splits to current slice
+    splits_df = splits_full[splits_full["hadm_id"].isin(slice_hadm_ids)].reset_index(drop=True)
+
+    # ------------------------------------------------------------------ #
+    # Load lab data filtered to slice
     # ------------------------------------------------------------------ #
     lab_panel_config: dict = {}
     labs_df = None
@@ -481,33 +583,58 @@ def run(config: dict) -> None:
             lab_panel_config = yaml.safe_load(fh)
         labs_path = os.path.join(features_dir, "labs_features.parquet")
         if os.path.exists(labs_path):
-            logger.info("Loading labs_features.parquet…")
+            logger.info("Loading labs_features.parquet (filtering to slice)…")
             labs_df = pd.read_parquet(labs_path)
-            logger.info("  Loaded %d lab rows", len(labs_df))
+            labs_df = labs_df[labs_df["hadm_id"].isin(slice_hadm_ids)].reset_index(drop=True)
+            logger.info("  Loaded %d lab rows for this slice", len(labs_df))
         else:
             logger.warning("labs_features.parquet not found — lab embeddings skipped.")
     else:
         logger.warning("lab_panel_config.yaml not found — lab embeddings skipped.")
 
-    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
-    splits_df = pd.read_parquet(splits_path)[["subject_id", "hadm_id"]].drop_duplicates()
-
-    logger.info("Building feature task list…")
+    # ------------------------------------------------------------------ #
+    # Build feature tasks (filtered to this slice's admissions)
+    # ------------------------------------------------------------------ #
+    logger.info("Building feature task list for slice %d…", slice_index)
     all_tasks = _build_feature_tasks(config, lab_panel_config, labs_df, splits_df)
-    logger.info("Total features to embed: %d across %d GPU(s)", len(all_tasks), n_gpus)
+    logger.info(
+        "Pipeline plan — %d feature(s) to embed across %d GPU(s):",
+        len(all_tasks), n_gpus,
+    )
+    for i, t in enumerate(all_tasks, 1):
+        logger.info("  %2d. %s (%d texts)", i, t["embedding_col"], len(t["texts"]))
 
     # ------------------------------------------------------------------ #
-    # Partition tasks round-robin across GPUs
+    # Add max_length to each task (used for LPT cost estimate)
     # ------------------------------------------------------------------ #
+    global_max_length = int(config.get("BERT_MAX_LENGTH", 8192))
+    for task in all_tasks:
+        if task["kind"] == "lab":
+            task["max_length"] = min(global_max_length, _LAB_MAX_LENGTH)
+        else:
+            task["max_length"] = min(
+                global_max_length,
+                _MAX_LENGTH_CAP.get(task["text_col"], global_max_length),
+            )
+
+    # ------------------------------------------------------------------ #
+    # LPT scheduling — assign features to GPUs by greedy load balancing
+    # ------------------------------------------------------------------ #
+    # Sort by estimated cost (texts × max_length) descending, then greedily
+    # assign each feature to the GPU with the lowest accumulated cost.
+    all_tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
+    gpu_loads: list[int] = [0] * n_gpus
     partitions: list[list[dict]] = [[] for _ in range(n_gpus)]
-    for i, task in enumerate(all_tasks):
-        partitions[i % n_gpus].append(task)
+    for task in all_tasks:
+        g = gpu_loads.index(min(gpu_loads))
+        partitions[g].append(task)
+        gpu_loads[g] += len(task["texts"]) * task["max_length"]
 
-    logger.info("Feature assignment:")
-    for i, (device, partition) in enumerate(zip(devices, partitions)):
+    logger.info("Feature assignment (LPT scheduling):")
+    for i, (device, partition, load) in enumerate(zip(devices, partitions, gpu_loads)):
         logger.info(
-            "  GPU %d (%s): %d features — %s",
-            i, device, len(partition),
+            "  GPU %d (%s): %d features, estimated cost %d — %s",
+            i, device, len(partition), load,
             ", ".join(t["embedding_col"] for t in partition),
         )
 
@@ -551,8 +678,8 @@ def run(config: dict) -> None:
 
     logger.info("")
     logger.info(
-        "Embedding complete: %d succeeded, %d failed",
-        total_completed, total_failed,
+        "Slice %d complete: %d succeeded, %d failed",
+        slice_index, total_completed, total_failed,
     )
     for r in sorted(results, key=lambda x: x["rank"]):
         rank = r["rank"]
@@ -574,7 +701,9 @@ def main() -> None:
     CLI entry point for running embed_features standalone.
 
     Usage:
-        python src/preprocessing/embed_features.py --config config/preprocessing.yaml
+        python src/preprocessing/embed_features.py \
+            --config config/preprocessing.yaml \
+            --slice-index 0
 
     This allows embed_features to be submitted as a dedicated SLURM job
     (embed_job.sh) independently of run_pipeline.py.
@@ -589,6 +718,17 @@ def main() -> None:
         "--config",
         default="config/preprocessing.yaml",
         help="Path to preprocessing.yaml (default: config/preprocessing.yaml)",
+    )
+    parser.add_argument(
+        "--slice-index",
+        type=int,
+        default=None,
+        dest="slice_index",
+        help=(
+            "0-based index of the admission slice to process. "
+            "Defaults to BERT_SLICE_INDEX in the config (usually 0). "
+            "submit_all.sh passes this automatically for each SLURM job."
+        ),
     )
     args = parser.parse_args()
 
@@ -617,7 +757,7 @@ def main() -> None:
             config[key] = os.path.expanduser(config[key])
 
     logger.info("Loaded configuration from %s", args.config)
-    run(config)
+    run(config, slice_index=args.slice_index)
 
 
 if __name__ == "__main__":

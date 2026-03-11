@@ -6,12 +6,17 @@
 #
 # Behaviour:
 #   - Checks preprocessing and embedding output state automatically.
-#   - If nothing exists: submits pipeline → embed → combine in sequence.
-#   - If preprocessing done but embedding incomplete: submits embed → combine.
+#   - If nothing exists: submits pipeline → 14 embed slices (chained) → combine.
+#   - If preprocessing done but embedding incomplete: submits remaining slices → combine.
 #   - If all embedding complete: submits combine only.
 #   - If everything complete: prints status and exits without submitting.
 #
 # Re-run this script at any time — it always picks up from where it left off.
+# Each embed slice job detects its already-completed rows and skips them, so
+# a re-submitted slice only processes what remains.
+#
+# IMPORTANT: Embed slices are chained sequentially (--dependency=afterok) to
+# prevent concurrent fastparquet append conflicts.
 
 set -euo pipefail
 
@@ -19,6 +24,10 @@ cd ~/Python/HRS/
 mkdir -p logs
 
 CONFIG="config/preprocessing.yaml"
+
+# Total number of embed slices: ceil(546028 / (20000 * 2)) = 14
+N_SLICES=14
+LAST_SLICE=$(( N_SLICES - 1 ))   # 13
 
 echo "============================================================"
 echo "  CDSS Preprocessing Pipeline — Auto-Submit"
@@ -38,8 +47,6 @@ EMBED_STATUS_OUTPUT=$(python src/preprocessing/check_embed_status.py \
 EMBED_STATUS_CODE=$?
 set -e
 
-
-
 echo "$EMBED_STATUS_OUTPUT"
 echo ""
 
@@ -47,59 +54,50 @@ echo ""
 # Decide which jobs to submit based on exit code
 # ------------------------------------------------------------------ #
 
+CURRENT_DEP=""   # will hold the last submitted job ID for chaining
+
 if [[ $EMBED_STATUS_CODE -eq 2 ]]; then
-    # Preprocessing incomplete → full pipeline
-    echo "Decision: submitting full pipeline (preprocessing + embed + combine)."
+    # Preprocessing incomplete → submit pipeline job first
+    echo "Decision: submitting full pipeline (preprocessing + embed slices + combine)."
     echo ""
 
     PREPROCESS_JOB=$(sbatch --parsable pipeline_job.sh)
     echo "  [1/3] Preprocessing : job $PREPROCESS_JOB (pipeline_job.sh)"
+    CURRENT_DEP="$PREPROCESS_JOB"
+fi
 
-    EMBED_JOB=$(sbatch --parsable \
-        --dependency=afterok:$PREPROCESS_JOB \
-        embed_job.sh)
-    echo "  [2/3] Embedding     : job $EMBED_JOB (embed_job.sh, depends on $PREPROCESS_JOB)"
+if [[ $EMBED_STATUS_CODE -eq 1 || $EMBED_STATUS_CODE -eq 2 ]]; then
+    # Embedding incomplete → submit all 14 slice jobs chained sequentially
+    echo "  Submitting $N_SLICES embed slice jobs (chained sequentially):"
+    for i in $(seq 0 $LAST_SLICE); do
+        if [[ -n "$CURRENT_DEP" ]]; then
+            EMBED_JOB=$(sbatch --parsable \
+                --dependency=afterok:"$CURRENT_DEP" \
+                embed_job.sh "$i")
+        else
+            EMBED_JOB=$(sbatch --parsable embed_job.sh "$i")
+        fi
+        echo "    embed slice $i : job $EMBED_JOB (embed_job.sh $i${CURRENT_DEP:+, depends on $CURRENT_DEP})"
+        CURRENT_DEP="$EMBED_JOB"
+    done
+fi
 
+# Always submit combine (with dependency on last embed slice if one was submitted)
+if [[ -n "$CURRENT_DEP" ]]; then
     COMBINE_JOB=$(sbatch --parsable \
-        --dependency=afterok:$EMBED_JOB \
+        --dependency=afterok:"$CURRENT_DEP" \
         combine_job.sh)
-    echo "  [3/3] Combine       : job $COMBINE_JOB (combine_job.sh, depends on $EMBED_JOB)"
-
-    echo ""
-    echo "To cancel all: scancel $PREPROCESS_JOB $EMBED_JOB $COMBINE_JOB"
-
-elif [[ $EMBED_STATUS_CODE -eq 1 ]]; then
-    # Preprocessing done, embedding incomplete → embed + combine
-    echo "Decision: submitting embed + combine (preprocessing already complete)."
-    echo ""
-
-    EMBED_JOB=$(sbatch --parsable embed_job.sh)
-    echo "  [1/2] Embedding : job $EMBED_JOB (embed_job.sh)"
-
-    COMBINE_JOB=$(sbatch --parsable \
-        --dependency=afterok:$EMBED_JOB \
-        combine_job.sh)
-    echo "  [2/2] Combine   : job $COMBINE_JOB (combine_job.sh, depends on $EMBED_JOB)"
-
-    echo ""
-    echo "To cancel all: scancel $EMBED_JOB $COMBINE_JOB"
-
-elif [[ $EMBED_STATUS_CODE -eq 0 ]]; then
-    # Embedding complete → combine only
-    echo "Decision: submitting combine only (all embeddings already complete)."
-    echo ""
-
-    COMBINE_JOB=$(sbatch --parsable combine_job.sh)
-    echo "  [1/1] Combine : job $COMBINE_JOB (combine_job.sh)"
-
-    echo ""
-    echo "To cancel: scancel $COMBINE_JOB"
-
+    echo "  Combine : job $COMBINE_JOB (combine_job.sh, depends on $CURRENT_DEP)"
 else
-    echo "ERROR: check_embed_status.py returned unexpected exit code $EMBED_STATUS_CODE"
-    exit 1
+    COMBINE_JOB=$(sbatch --parsable combine_job.sh)
+    echo "  Combine : job $COMBINE_JOB (combine_job.sh)"
 fi
 
 echo ""
-echo "Monitor : squeue -u \$USER"
-echo "Logs    : ls logs/"
+if [[ $EMBED_STATUS_CODE -eq 0 ]]; then
+    echo "All embeddings already complete — submitted combine only."
+    echo "To cancel: scancel $COMBINE_JOB"
+else
+    echo "Monitor : squeue -u \$USER"
+    echo "Logs    : ls logs/"
+fi

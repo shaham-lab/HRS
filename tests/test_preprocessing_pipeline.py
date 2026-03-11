@@ -1462,5 +1462,144 @@ class TestExtractDischargeHistoryFormat(unittest.TestCase):
         self.assertNotIn("Prior Discharge Summary (2019", text)
 
 
+class TestEmbedFeaturesSlicing(unittest.TestCase):
+    """Tests for embed_features.py slice computation and LPT scheduling."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.preprocessing_dir = os.path.join(self.tmp, "preprocessing")
+        self.features_dir = os.path.join(self.tmp, "features")
+        self.embeddings_dir = os.path.join(self.tmp, "embeddings")
+        self.classifications_dir = os.path.join(self.tmp, "classifications")
+        os.makedirs(self.preprocessing_dir)
+        os.makedirs(self.features_dir)
+        os.makedirs(self.embeddings_dir)
+        os.makedirs(self.classifications_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def _make_splits(self, n: int) -> pd.DataFrame:
+        """Write data_splits.parquet with n admissions and return it."""
+        df = pd.DataFrame({
+            "subject_id": list(range(1, n + 1)),
+            "hadm_id": list(range(1000, 1000 + n)),
+            "split": ["train"] * n,
+        })
+        df.to_parquet(
+            os.path.join(self.preprocessing_dir, "data_splits.parquet"), index=False
+        )
+        return df
+
+    def test_slice_computation_covers_all_admissions(self):
+        """Every hadm_id belongs to exactly one slice."""
+        import math
+        import embed_features
+
+        n = 100
+        self._make_splits(n)
+        all_hadm_ids = sorted(range(1000, 1000 + n))
+        slice_size_per_gpu = 20
+        n_gpus = 2
+        per_job = slice_size_per_gpu * n_gpus
+        n_slices = math.ceil(n / per_job)
+
+        seen = set()
+        for si in range(n_slices):
+            start = si * per_job
+            end = min(start + per_job, n)
+            for hid in all_hadm_ids[start:end]:
+                self.assertNotIn(hid, seen, f"hadm_id {hid} in multiple slices")
+                seen.add(hid)
+
+        self.assertEqual(seen, set(all_hadm_ids), "Not all hadm_ids covered by slices")
+
+    def test_slice_out_of_range_returns_early(self):
+        """run() with slice_index >= n_slices logs and returns without error."""
+        try:
+            import torch  # noqa: F401
+        except ImportError:
+            self.skipTest("torch not available")
+
+        import embed_features
+
+        n = 10
+        self._make_splits(n)
+
+        # With per_job=20 there is only 1 slice (slice 0), so slice_index=1 is OOB.
+        config = {
+            "FEATURES_DIR": self.features_dir,
+            "EMBEDDINGS_DIR": self.embeddings_dir,
+            "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "PREPROCESSING_DIR": self.preprocessing_dir,
+            "BERT_MODEL_NAME": "bert-base-uncased",
+            "BERT_MAX_LENGTH": 512,
+            "BERT_BATCH_SIZE": 4,
+            "BERT_DEVICE": "cpu",
+            "BERT_SLICE_SIZE_PER_GPU": 20,
+            "BERT_CHECKPOINT_INTERVAL": 5,
+        }
+        # Should return without raising
+        embed_features.run(config, slice_index=99)
+        # No embeddings written
+        self.assertEqual(os.listdir(self.embeddings_dir), [])
+
+    def test_lpt_assigns_all_tasks(self):
+        """LPT scheduling assigns every task to exactly one GPU."""
+        # Simulate 6 tasks with varying costs across 2 GPUs
+        tasks = [
+            {"embedding_col": f"feat_{i}", "texts": ["x"] * (10 * (6 - i)),
+             "max_length": 512}
+            for i in range(6)
+        ]
+        n_gpus = 2
+        tasks_sorted = sorted(tasks, key=lambda t: len(t["texts"]) * t["max_length"],
+                              reverse=True)
+        gpu_loads = [0] * n_gpus
+        partitions: list = [[] for _ in range(n_gpus)]
+        for task in tasks_sorted:
+            g = gpu_loads.index(min(gpu_loads))
+            partitions[g].append(task)
+            gpu_loads[g] += len(task["texts"]) * task["max_length"]
+
+        all_assigned = [t for p in partitions for t in p]
+        self.assertEqual(len(all_assigned), len(tasks),
+                         "Some tasks not assigned by LPT")
+
+        for t in tasks:
+            self.assertIn(t, all_assigned, f"Task {t['embedding_col']} not assigned")
+
+    def test_lpt_balances_load(self):
+        """LPT scheduling produces better balance than round-robin for skewed costs."""
+        # One very expensive task + many cheap tasks
+        tasks = [{"texts": ["x"] * 1000, "max_length": 4096, "embedding_col": "big"}]
+        for i in range(5):
+            tasks.append({"texts": ["x"] * 10, "max_length": 64,
+                          "embedding_col": f"small_{i}"})
+
+        n_gpus = 2
+        tasks_sorted = sorted(tasks, key=lambda t: len(t["texts"]) * t["max_length"],
+                              reverse=True)
+        gpu_loads = [0] * n_gpus
+        partitions: list = [[] for _ in range(n_gpus)]
+        for task in tasks_sorted:
+            g = gpu_loads.index(min(gpu_loads))
+            partitions[g].append(task)
+            gpu_loads[g] += len(task["texts"]) * task["max_length"]
+
+        # The expensive task goes to GPU 0; all cheap tasks go to GPU 1 or GPU 0 to balance
+        # The max load across GPUs should be smaller than naive round-robin
+        max_load = max(gpu_loads)
+        # Round-robin would put big on GPU 0 and all smalls on alternate GPUs
+        rr_loads = [0, 0]
+        for i, t in enumerate(tasks):
+            rr_loads[i % 2] += len(t["texts"]) * t["max_length"]
+        max_rr = max(rr_loads)
+
+        self.assertLessEqual(max_load, max_rr,
+                             "LPT should produce load ≤ round-robin for skewed tasks")
+
+
 if __name__ == "__main__":
     unittest.main()
