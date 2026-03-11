@@ -38,7 +38,7 @@ logger = logging.getLogger(__name__)
 # Fluids whose items are each grouped under a single group key regardless of
 # their category (Chemistry, Hematology, etc.)
 _SINGLE_GROUP_FLUIDS = frozenset({
-    "Ascites", "Pleural", "CSF", "Bone Marrow", "Joint Fluid", "Stool",
+    "Ascites", "Pleural", "Cerebrospinal Fluid", "Bone Marrow", "Joint Fluid", "Stool",
 })
 
 # Map (fluid_lower, category_lower) → group name for multi-category fluids
@@ -50,6 +50,17 @@ _FLUID_CATEGORY_MAP: dict[tuple[str, str], str] = {
     ("urine", "hematology"):    "urine_hematology",
     ("other body fluid", "chemistry"):  "other_body_fluid_chemistry",
     ("other body fluid", "hematology"): "other_body_fluid_hematology",
+    # Blood-gas panels for non-blood fluids: fold into the closest existing group
+    # rather than creating spurious extra groups.
+    ("urine", "blood gas"):             "urine_hematology",
+    ("other body fluid", "blood gas"):  "other_body_fluid_hematology",
+    ("fluid", "blood gas"):             "blood_gas",
+}
+
+# Explicit group-name overrides for single-group fluids whose snake_case
+# conversion would differ from the canonical name in the spec.
+_SINGLE_GROUP_NAME_OVERRIDES: dict[str, str] = {
+    "cerebrospinal_fluid": "csf",
 }
 
 # Artefact fluid values to exclude
@@ -58,7 +69,8 @@ _ARTIFACT_FLUIDS = frozenset({"I", "Q", "fluid"})
 
 def _fluid_to_group_name(fluid: str) -> str:
     """Convert a single-group fluid name to snake_case group key."""
-    return fluid.strip().lower().replace(" ", "_")
+    raw = fluid.strip().lower().replace(" ", "_")
+    return _SINGLE_GROUP_NAME_OVERRIDES.get(raw, raw)
 
 
 def run(config: dict) -> None:
