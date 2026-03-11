@@ -29,6 +29,7 @@ import pandas as pd
 from tqdm import tqdm
 
 from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from build_lab_text_lines import _compute_row_abnormal_flag
 
 logger = logging.getLogger(__name__)
 
@@ -52,7 +53,7 @@ def _build_lab_text_line(row) -> str:
         hours = total_minutes // 60
         minutes = total_minutes % 60
         time_str = f"{hours:02d}:{minutes:02d}"
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         time_str = "00:00"
 
     # Value: prefer numeric formatted to 2dp, fall back to text value
@@ -72,14 +73,7 @@ def _build_lab_text_line(row) -> str:
         ref_str = f" (ref: {ref_lower}-{ref_upper})"
 
     # Abnormal flag: flagged as "abnormal" OR valuenum outside reference range
-    is_abnormal = str(row["flag"]).strip().lower() == "abnormal"
-    if not is_abnormal and pd.notna(row.get("valuenum")) and pd.notna(ref_lower) and pd.notna(ref_upper):
-        try:
-            vn = float(row["valuenum"])
-            is_abnormal = vn < float(ref_lower) or vn > float(ref_upper)
-        except (TypeError, ValueError):
-            pass
-    flag_str = " [ABNORMAL]" if is_abnormal else ""
+    flag_str = " [ABNORMAL]" if _compute_row_abnormal_flag(row) else ""
 
     return (
         f"[{time_str}] {row['label']}: "

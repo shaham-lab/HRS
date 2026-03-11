@@ -49,10 +49,12 @@ def build_lab_text_line_series(df: pd.DataFrame) -> pd.Series:
 
     # Value string: prefer numeric, fall back to text
     value_num = pd.to_numeric(df["valuenum"], errors="coerce")
-    has_num = value_num.notna()
-    value_strs = pd.Series("", index=df.index)
-    value_strs[has_num] = value_num[has_num].map(lambda v: f"{v:.2f}")
-    value_strs[~has_num] = df.loc[~has_num, "value"].fillna("").astype(str).str.strip()
+    has_num = pd.notna(value_num)
+    text_values = df["value"].fillna("").astype(str).str.strip()
+    value_strs = pd.Series(
+        [f"{v:.2f}" if h else t for h, v, t in zip(has_num, value_num, text_values)],
+        index=df.index,
+    )
 
     # Unit
     uom = df["valueuom"].fillna("").astype(str).str.strip()
@@ -61,14 +63,11 @@ def build_lab_text_line_series(df: pd.DataFrame) -> pd.Series:
     # Reference range
     ref_lower = pd.to_numeric(df["ref_range_lower"], errors="coerce")
     ref_upper = pd.to_numeric(df["ref_range_upper"], errors="coerce")
-    has_ref = ref_lower.notna() & ref_upper.notna()
-    ref_strs = pd.Series("", index=df.index)
-    ref_strs[has_ref] = (
-        " (ref: "
-        + ref_lower[has_ref].map(lambda v: f"{v:g}")
-        + "-"
-        + ref_upper[has_ref].map(lambda v: f"{v:g}")
-        + ")"
+    has_ref = pd.notna(ref_lower) & pd.notna(ref_upper)
+    ref_strs = pd.Series(
+        [f" (ref: {lo:g}-{hi:g})" if h else ""
+         for h, lo, hi in zip(has_ref, ref_lower, ref_upper)],
+        index=df.index,
     )
 
     # Abnormal flag: flagged OR valuenum outside reference range
@@ -87,6 +86,25 @@ def build_lab_text_line_series(df: pd.DataFrame) -> pd.Series:
         + value_strs + uom_strs + ref_strs + flag_strs
     )
     return result
+
+
+def _compute_row_abnormal_flag(row) -> bool:
+    """Return True if the lab event row should be flagged as abnormal.
+
+    A row is abnormal if flag == "abnormal" OR if valuenum falls outside
+    [ref_range_lower, ref_range_upper].
+    """
+    is_abnormal = str(row.get("flag", "")).strip().lower() == "abnormal"
+    if not is_abnormal:
+        ref_lower = row.get("ref_range_lower")
+        ref_upper = row.get("ref_range_upper")
+        if pd.notna(row.get("valuenum")) and pd.notna(ref_lower) and pd.notna(ref_upper):
+            try:
+                vn = float(row["valuenum"])
+                is_abnormal = vn < float(ref_lower) or vn > float(ref_upper)
+            except (TypeError, ValueError):
+                pass
+    return is_abnormal
 
 
 def build_lab_text_line_row(row) -> str:
@@ -112,7 +130,7 @@ def build_lab_text_line_row(row) -> str:
         hours = total_minutes // 60
         minutes = total_minutes % 60
         time_str = f"{hours:02d}:{minutes:02d}"
-    except Exception:
+    except (TypeError, ValueError, OverflowError):
         time_str = "00:00"
 
     # Value: prefer numeric formatted to 2dp, fall back to text value
@@ -139,13 +157,6 @@ def build_lab_text_line_row(row) -> str:
             ref_str = f" (ref: {ref_lower}-{ref_upper})"
 
     # Abnormal flag: flagged as "abnormal" OR valuenum outside reference range
-    is_abnormal = str(row.get("flag", "")).strip().lower() == "abnormal"
-    if not is_abnormal and pd.notna(row.get("valuenum")) and pd.notna(ref_lower) and pd.notna(ref_upper):
-        try:
-            vn = float(row["valuenum"])
-            is_abnormal = vn < float(ref_lower) or vn > float(ref_upper)
-        except (TypeError, ValueError):
-            pass
-    flag_str = " [ABNORMAL]" if is_abnormal else ""
+    flag_str = " [ABNORMAL]" if _compute_row_abnormal_flag(row) else ""
 
     return f"[{time_str}] {row['label']}: {value_str}{uom_str}{ref_str}{flag_str}"
