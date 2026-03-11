@@ -409,7 +409,7 @@ def _worker(
             if n_workers > 1 and os.path.exists(write_path):
                 try:
                     os.remove(write_path)
-                except Exception:  # noqa: BLE001  # noinspection PyBroadException
+                except OSError:
                     pass
             completed.append(output_path)
             continue
