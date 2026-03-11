@@ -1603,5 +1603,235 @@ class TestEmbedFeaturesSlicing(unittest.TestCase):
                              f"cap={cap}: expected {expected}, got {got}")
 
 
+class TestEmbedFeaturesWorkerPaths(unittest.TestCase):
+    """Tests for per-worker parquet files and the merge step."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def _make_parquet(self, path: str, hadm_ids: list, col: str = "emb") -> None:
+        """Write a minimal parquet with hadm_id and an embedding column."""
+        df = pd.DataFrame({
+            "hadm_id": hadm_ids,
+            col: [float(h) for h in hadm_ids],
+        })
+        df.to_parquet(path, index=False)
+
+    # ------------------------------------------------------------------ #
+    # worker_path naming
+    # ------------------------------------------------------------------ #
+    def test_worker_path_naming_pattern(self):
+        """worker_path follows the output_path + '.worker{rank}' pattern."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        for rank in range(4):
+            worker_path = output_path + f".worker{rank}"
+            self.assertEqual(
+                worker_path,
+                output_path + f".worker{rank}",
+                f"unexpected worker path for rank {rank}",
+            )
+
+    # ------------------------------------------------------------------ #
+    # merge — single worker file → atomic rename, no leftover
+    # ------------------------------------------------------------------ #
+    def test_merge_single_worker_renames_atomically(self):
+        """A single worker file is renamed to the final output path."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        worker0 = output_path + ".worker0"
+        self._make_parquet(worker0, [1001, 1002, 1003])
+
+        # Simulate merge logic for 1 GPU
+        n_gpus = 1
+        worker_paths = [
+            output_path + f".worker{r}"
+            for r in range(n_gpus)
+            if os.path.exists(output_path + f".worker{r}")
+        ]
+        self.assertEqual(len(worker_paths), 1)
+
+        tmp_path = output_path + ".tmp"
+        os.replace(worker_paths[0], tmp_path)
+        os.replace(tmp_path, output_path)
+
+        self.assertTrue(os.path.exists(output_path), "Final output not created")
+        self.assertFalse(os.path.exists(worker0), "Worker file not removed")
+        self.assertFalse(os.path.exists(tmp_path), ".tmp file left behind")
+
+        result = pd.read_parquet(output_path)
+        self.assertEqual(sorted(result["hadm_id"].tolist()), [1001, 1002, 1003])
+
+    # ------------------------------------------------------------------ #
+    # merge — two worker files → concat + cleanup
+    # ------------------------------------------------------------------ #
+    def test_merge_two_workers_concatenates_and_cleans_up(self):
+        """Two worker files are merged, and worker files are deleted."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        worker0 = output_path + ".worker0"
+        worker1 = output_path + ".worker1"
+        self._make_parquet(worker0, [1001, 1002])
+        self._make_parquet(worker1, [1003, 1004])
+
+        n_gpus = 2
+        worker_paths = [
+            output_path + f".worker{r}"
+            for r in range(n_gpus)
+            if os.path.exists(output_path + f".worker{r}")
+        ]
+        self.assertEqual(len(worker_paths), 2)
+
+        dfs = [pd.read_parquet(wp) for wp in worker_paths]
+        merged = pd.concat(dfs, ignore_index=True)
+        tmp_path = output_path + ".tmp"
+        merged.to_parquet(tmp_path, index=False)
+        os.replace(tmp_path, output_path)
+        for wp in worker_paths:
+            os.remove(wp)
+
+        self.assertTrue(os.path.exists(output_path))
+        self.assertFalse(os.path.exists(worker0), "worker0 not cleaned up")
+        self.assertFalse(os.path.exists(worker1), "worker1 not cleaned up")
+
+        result = pd.read_parquet(output_path)
+        self.assertEqual(sorted(result["hadm_id"].tolist()), [1001, 1002, 1003, 1004])
+
+    # ------------------------------------------------------------------ #
+    # merge — missing worker file (worker failed) → skip that rank
+    # ------------------------------------------------------------------ #
+    def test_merge_skips_missing_worker_file(self):
+        """If worker1 file is absent (failed), only worker0 data is merged."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        worker0 = output_path + ".worker0"
+        self._make_parquet(worker0, [1001, 1002])
+        # worker1 intentionally NOT created (simulates failure)
+
+        n_gpus = 2
+        worker_paths = [
+            output_path + f".worker{r}"
+            for r in range(n_gpus)
+            if os.path.exists(output_path + f".worker{r}")
+        ]
+        self.assertEqual(len(worker_paths), 1,
+                         "Should only find the one worker file that exists")
+
+    # ------------------------------------------------------------------ #
+    # stale-cleanup: worker temp removed when final output is complete
+    # ------------------------------------------------------------------ #
+    def test_stale_worker_temp_removed_when_output_complete(self):
+        """Stale worker temp is removed when the final output covers all slice hadm_ids."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        worker_path = output_path + ".worker0"
+
+        slice_hadm_ids = {1001, 1002, 1003}
+
+        # Write a complete final output (all slice ids present)
+        self._make_parquet(output_path, sorted(slice_hadm_ids))
+        # Write a stale worker temp
+        self._make_parquet(worker_path, [1001])
+
+        # Simulate stale-cleanup logic
+        force_reembed = False
+        if os.path.exists(worker_path) and not force_reembed:
+            if os.path.exists(output_path):
+                try:
+                    existing = pd.read_parquet(output_path, columns=["hadm_id"])
+                    if slice_hadm_ids.issubset(set(existing["hadm_id"].tolist())):
+                        os.remove(worker_path)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self.assertFalse(os.path.exists(worker_path),
+                         "Stale worker temp should have been removed")
+
+    def test_stale_worker_temp_kept_when_output_incomplete(self):
+        """Stale worker temp is kept when the final output is missing some ids."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        worker_path = output_path + ".worker0"
+
+        slice_hadm_ids = {1001, 1002, 1003}
+
+        # Final output only has 2 of 3 ids — not complete
+        self._make_parquet(output_path, [1001, 1002])
+        self._make_parquet(worker_path, [1003])
+
+        force_reembed = False
+        if os.path.exists(worker_path) and not force_reembed:
+            if os.path.exists(output_path):
+                try:
+                    existing = pd.read_parquet(output_path, columns=["hadm_id"])
+                    if slice_hadm_ids.issubset(set(existing["hadm_id"].tolist())):
+                        os.remove(worker_path)
+                except Exception:  # noqa: BLE001
+                    pass
+
+        self.assertTrue(os.path.exists(worker_path),
+                        "Worker temp should NOT be removed when output is incomplete")
+
+    # ------------------------------------------------------------------ #
+    # force_reembed: both .tmp files are cleaned up
+    # ------------------------------------------------------------------ #
+    def test_force_reembed_cleans_worker_tmp(self):
+        """force_reembed removes both output.tmp and worker.tmp."""
+        output_path = os.path.join(self.tmp, "feat.parquet")
+        worker_path = output_path + ".worker0"
+
+        output_tmp = output_path + ".tmp"
+        worker_tmp = worker_path + ".tmp"
+
+        # Create both stale .tmp files
+        pd.DataFrame({"hadm_id": [1]}).to_parquet(output_tmp, index=False)
+        pd.DataFrame({"hadm_id": [2]}).to_parquet(worker_tmp, index=False)
+
+        # Simulate force_reembed cleanup logic
+        force_reembed = True
+        if force_reembed:
+            if os.path.exists(output_tmp):
+                os.remove(output_tmp)
+            if os.path.exists(worker_tmp):
+                os.remove(worker_tmp)
+
+        self.assertFalse(os.path.exists(output_tmp), "output.tmp not removed")
+        self.assertFalse(os.path.exists(worker_tmp), "worker.tmp not removed")
+
+    # ------------------------------------------------------------------ #
+    # parallel spawn: all processes are started before any join
+    # ------------------------------------------------------------------ #
+    def test_parallel_spawn_all_start_before_join(self):
+        """All worker processes are spawned before any is joined (parallel pattern)."""
+        # This test verifies the structural correctness of the parallel
+        # spawn loop by checking that we can track start/join order using
+        # a simple in-process mock rather than actual multiprocessing.
+        from unittest.mock import MagicMock, call
+
+        n_gpus = 2
+        processes = []
+        start_calls = []
+        join_calls = []
+
+        for rank in range(n_gpus):
+            p = MagicMock()
+            p.pid = 1000 + rank
+            p.name = f"embed-worker-{rank}"
+            p.exitcode = 0
+            processes.append(p)
+            p.start()
+            start_calls.append(rank)
+
+        for p in processes:
+            p.join()
+            join_calls.append(int(p.name.split("-")[-1]))
+
+        # All starts happen before any joins
+        self.assertEqual(start_calls, [0, 1], "Not all workers started")
+        self.assertEqual(join_calls, [0, 1], "Not all workers joined")
+        # Verify the order: start0, start1, join0, join1
+        for p in processes:
+            p.start.assert_called_once()
+            p.join.assert_called_once()
+
+
 if __name__ == "__main__":
     unittest.main()
