@@ -32,6 +32,15 @@ BERT_FORCE_REEMBED: false
 # Maximum GPUs to use. null = use all GPUs SLURM allocates (recommended).
 # Set to 1 to force single-GPU mode for debugging.
 BERT_MAX_GPUS: null
+# Admissions per GPU per SLURM job. Controls the total number of embed slices.
+# With 2 GPUs and 546k admissions: ceil(546028 / (20000 * 2)) = 14 slices.
+# Reduce to fit shorter partition time limits; increase on faster hardware.
+BERT_SLICE_SIZE_PER_GPU: 20000
+# 0-based index of the slice this job processes. Overridden by --slice-index CLI arg.
+BERT_SLICE_INDEX: 0
+# Rows between within-feature incremental checkpoints (fastparquet appends).
+# Too small → high I/O overhead. Too large → larger re-work on a mid-job kill.
+BERT_CHECKPOINT_INTERVAL: 10000
 
 # Strategy for handling records with null hadm_id.
 # "drop" (default): exclude records with null hadm_id; log count per module.
