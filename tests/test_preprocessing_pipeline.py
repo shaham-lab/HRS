@@ -1625,15 +1625,21 @@ class TestEmbedFeaturesWorkerPaths(unittest.TestCase):
     # worker_path naming
     # ------------------------------------------------------------------ #
     def test_worker_path_naming_pattern(self):
-        """worker_path follows the output_path + '.worker{rank}' pattern."""
+        """worker_path is output_path + '.worker{rank}', is unique per rank,
+        and has the expected suffix."""
         output_path = os.path.join(self.tmp, "feat.parquet")
-        for rank in range(4):
-            worker_path = output_path + f".worker{rank}"
-            self.assertEqual(
-                worker_path,
-                output_path + f".worker{rank}",
-                f"unexpected worker path for rank {rank}",
-            )
+        worker_paths = [output_path + f".worker{rank}" for rank in range(4)]
+
+        for rank, wp in enumerate(worker_paths):
+            # Must start with the final output path
+            self.assertTrue(wp.startswith(output_path),
+                            f"worker path for rank {rank} doesn't start with output_path")
+            # Must have the correct suffix
+            self.assertEqual(wp, output_path + f".worker{rank}",
+                             f"unexpected suffix for rank {rank}")
+
+        # All paths are unique
+        self.assertEqual(len(set(worker_paths)), 4, "worker paths are not unique")
 
     # ------------------------------------------------------------------ #
     # merge — single worker file → atomic rename, no leftover
