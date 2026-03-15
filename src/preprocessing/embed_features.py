@@ -504,22 +504,23 @@ def _worker_embed_and_checkpoint(
 
     pyarrow is used instead of fastparquet because fastparquet cannot serialize
     object-dtype columns containing numpy arrays (fixed-size float32 vectors).
-    pyarrow handles these natively as fixed_size_list(float32, 768) columns.
+    pyarrow handles these natively as fixed_size_list(float32, D) columns.
 
-    Append mechanic: pyarrow does not support true in-place append, so each
-    checkpoint batch is written to a fresh .tmp file, then the existing file
-    (if any) is read back, concatenated with the new batch, and atomically
-    replaced. This is safe: the .tmp file is only renamed over the target after
-    a successful write, so a kill mid-write leaves the previous checkpoint
-    intact.
+    Append mechanic: a single pq.ParquetWriter is opened on a .tmp path for
+    the duration of the feature, appending one row group per checkpoint
+    interval. After all checkpoints complete the writer is closed and the .tmp
+    is atomically renamed to write_path. This avoids re-reading previous
+    checkpoints on every append.
+
+    Resume safety: if killed mid-write, write_path is absent (only .tmp exists).
+    _worker_handle_stale_worker_temp detects the missing/incomplete file and
+    triggers a clean re-embed for this feature on restart.
     """
     import pyarrow as pa            # type: ignore
     import pyarrow.parquet as pq    # type: ignore
 
     embed_dim = model.config.hidden_size
 
-    # Build a pyarrow schema with typed embedding column so pyarrow never has
-    # to infer the array type from the object-dtype pandas column.
     pa_schema = pa.schema([
         ("subject_id", pa.int64()),
         ("hadm_id",    pa.int64()),
@@ -528,43 +529,53 @@ def _worker_embed_and_checkpoint(
 
     n_total = len(texts_pending)
     rows_written = 0
+    tmp_path = write_path + ".tmp"
 
-    for start in range(0, n_total, checkpoint_interval):
-        end = min(start + checkpoint_interval, n_total)
-        batch_texts = texts_pending[start:end]
-        batch_sh = subject_hadm_pending.iloc[start:end].copy()
+    writer = None
+    try:
+        writer = pq.ParquetWriter(tmp_path, schema=pa_schema, compression="snappy")
+        for start in range(0, n_total, checkpoint_interval):
+            end = min(start + checkpoint_interval, n_total)
+            batch_texts = texts_pending[start:end]
+            batch_sh = subject_hadm_pending.iloc[start:end].copy()
 
-        embeddings = _embed_texts(
-            batch_texts, tokenizer, model, device,
-            effective_max_length, effective_batch_size,
-        )
+            embeddings = _embed_texts(
+                batch_texts, tokenizer, model, device,
+                effective_max_length, effective_batch_size,
+            )
 
-        # embeddings is a (N, D) float32 numpy array from _embed_texts.
-        # Convert each row to a plain Python list — pyarrow's from_pandas
-        # converts list-of-lists to fixed_size_list correctly when the schema
-        # specifies the target type.
-        batch_sh[embedding_col] = [emb.tolist() for emb in embeddings]
+            # Build pyarrow table directly from numpy — no pandas round-trip
+            # for the embedding column.  embeddings.flatten() produces a 1-D
+            # contiguous float32 array of shape (N * embed_dim,);
+            # FixedSizeListArray.from_arrays slices it into N fixed-size lists
+            # of length embed_dim entirely within pyarrow's C++ layer.
+            flat = embeddings.flatten()
+            pa_emb = pa.FixedSizeListArray.from_arrays(
+                pa.array(flat, type=pa.float32()), embed_dim
+            )
+            batch_table = pa.table({
+                "subject_id": pa.array(
+                    batch_sh["subject_id"].values, type=pa.int64()
+                ),
+                "hadm_id": pa.array(
+                    batch_sh["hadm_id"].values, type=pa.int64()
+                ),
+                embedding_col: pa_emb,
+            }, schema=pa_schema)
 
-        # Build pyarrow table for this batch
-        batch_table = pa.Table.from_pandas(batch_sh, schema=pa_schema,
-                                           preserve_index=False)
+            writer.write_table(batch_table)
 
-        # Append by reading existing file + concatenating + atomic replace.
-        tmp_path = write_path + ".tmp"
-        if os.path.exists(write_path):
-            existing_table = pq.read_table(write_path, schema=pa_schema)
-            combined = pa.concat_tables([existing_table, batch_table])
-        else:
-            combined = batch_table
+            rows_written += len(batch_sh)
+            worker_logger.info(
+                "[GPU %d] Checkpoint: wrote rows %d–%d for %s (%d total so far)",
+                rank, start, end - 1, embedding_col, rows_written,
+            )
+    finally:
+        if writer is not None:
+            writer.close()
 
-        pq.write_table(combined, tmp_path, compression="snappy")
-        os.replace(tmp_path, write_path)
-
-        rows_written += len(batch_sh)
-        worker_logger.info(
-            "[GPU %d] Checkpoint: wrote rows %d–%d for %s (%d total so far)",
-            rank, start, end - 1, embedding_col, rows_written,
-        )
+    # Atomic rename: write_path only appears after all checkpoints succeed.
+    os.replace(tmp_path, write_path)
 
     return rows_written
 
