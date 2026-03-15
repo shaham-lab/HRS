@@ -147,7 +147,7 @@ def _embed_texts(
     """Return a (N, hidden_size) float32 array using mean pooling."""
     import torch  # type: ignore
 
-    all_embeddings: list[torch.Tensor] = []   # keep on GPU until the end
+    all_embeddings: list[np.ndarray] = []   # accumulate on CPU immediately
     empty_indices: list[int] = []
     global_idx = 0
 
@@ -187,10 +187,10 @@ def _embed_texts(
         sum_mask = torch.clamp(mask_expanded.sum(dim=1), min=1e-9)           # (B, H)
         mean_embeddings = sum_embeddings / sum_mask                           # (B, H)
 
-        all_embeddings.append(mean_embeddings)   # stays on GPU
+        all_embeddings.append(mean_embeddings.cpu().numpy())   # free GPU memory each batch
 
-    # Single GPU → CPU transfer for the entire feature
-    result = torch.cat(all_embeddings, dim=0).cpu().numpy()   # (N, H)
+    # Concatenate CPU numpy arrays
+    result = np.concatenate(all_embeddings, axis=0)   # (N, H)
 
     # Zero-out originally empty texts
     if empty_indices:
