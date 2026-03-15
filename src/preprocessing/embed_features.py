@@ -995,15 +995,15 @@ def _merge_per_worker_parquets(results: list[dict], n_gpus: int) -> None:
         )
 
 
-def _log_run_summary(results: list[dict], resolved_slice_index: int) -> None:
+def _log_run_summary(results: list[dict], resolved_slice_index: int, n_slices: int) -> None:
     """Log the run summary and raise RuntimeError if any tasks failed."""
     total_completed = sum(len(r["completed"]) for r in results)
     total_failed    = sum(len(r["failed"])    for r in results)
 
     logger.info("")
     logger.info(
-        "Slice %d complete: %d succeeded, %d failed",
-        resolved_slice_index, total_completed, total_failed,
+        "Slice %d/%d complete: %d succeeded, %d failed",
+        resolved_slice_index, n_slices - 1, total_completed, total_failed,
     )
     for r in sorted(results, key=lambda x: x["rank"]):
         rank = r["rank"]
@@ -1046,7 +1046,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
     n_gpus  = len(devices)
 
     # Compute the admission slice for this job
-    resolved_slice_index, splits_df, slice_hadm_ids, _ = _compute_admission_slice(
+    resolved_slice_index, splits_df, slice_hadm_ids, n_slices = _compute_admission_slice(
         config, slice_index, n_gpus, preprocessing_dir
     )
     if resolved_slice_index is None:
@@ -1075,7 +1075,7 @@ def run(config: dict, slice_index: int | None = None) -> None:
         _merge_per_worker_parquets(results, n_gpus)
 
     # Log summary and raise on failure
-    _log_run_summary(results, resolved_slice_index)
+    _log_run_summary(results, resolved_slice_index, n_slices)
 
 
 def main() -> None:
