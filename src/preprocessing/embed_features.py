@@ -414,6 +414,12 @@ def _worker_handle_stale_worker_temp(
 
     Returns True if the worker temp is complete and embedding can be skipped
     (the merge step will combine it). Returns False if re-embedding is needed.
+
+    Note: ``slice_hadm_ids`` is already scoped to *this worker's* subset of
+    hadm_ids (not the full slice across all workers).  ``wp_done`` is likewise
+    read from this worker's own temp file, so the ``issubset`` check is an
+    apples-to-apples comparison of the worker's expected rows vs. the rows
+    already written by a previous (killed) run of the same worker.
     """
     if n_workers <= 1 or not os.path.exists(write_path) or force_reembed:
         return False
@@ -622,6 +628,8 @@ def _worker(
 
         # ------------------------------------------------------------------ #
         # Per-worker temp: handle stale file from a previously killed run    #
+        # slice_hadm_ids is already this worker's subset (not the full       #
+        # slice), so the completeness check inside is apples-to-apples.      #
         # ------------------------------------------------------------------ #
         if _worker_handle_stale_worker_temp(
             write_path, slice_hadm_ids, n_workers, rank, embedding_col,
