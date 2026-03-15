@@ -661,7 +661,7 @@ def _worker(
             worker_logger.info(
                 "[GPU %d] Saved %s (%d new rows, dim=%d)",
                 rank, os.path.basename(output_path),
-                rows_written, 768,
+                rows_written, model.config.hidden_size,
             )
             completed.append(output_path)
 
