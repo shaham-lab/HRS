@@ -434,6 +434,93 @@ def _impute_vectorised(
     return result
 
 
+def _write_linkage_stats(
+    linkage_stats: dict, classifications_dir: str
+) -> None:
+    """Merge *linkage_stats* into the existing hadm_linkage_stats.json file.
+
+    Creates the file (and directory) if it does not yet exist.
+    """
+    os.makedirs(classifications_dir, exist_ok=True)
+    stats_json_path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
+    existing_stats: dict = {}
+    if os.path.exists(stats_json_path):
+        with open(stats_json_path, "r", encoding="utf-8") as fh:
+            try:
+                existing_stats = json.load(fh)
+            except (json.JSONDecodeError, ValueError):
+                existing_stats = {}
+    existing_stats.setdefault("extract_demographics", {})
+    existing_stats["extract_demographics"]["chartevents"] = linkage_stats
+    with open(stats_json_path, "w", encoding="utf-8") as fh:
+        json.dump(existing_stats, fh, indent=2)
+    logger.info("Updated hadm_linkage_stats.json at %s", stats_json_path)
+
+
+def _merge_and_flag_vitals(
+    age_gender: pd.DataFrame,
+    omr_vitals: pd.DataFrame,
+    chart_vitals: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge age/gender with OMR and chart vitals, then add missingness flags.
+
+    Returns a DataFrame with height_cm, weight_kg, bmi and the three
+    corresponding *_missing indicator columns.
+    """
+    df = age_gender.merge(omr_vitals, on=["subject_id", "hadm_id"], how="left")
+    df = df.merge(chart_vitals, on=["subject_id", "hadm_id"], how="left")
+
+    # Prefer OMR; fall back to chartevents
+    df["height_cm"] = df["omr_height_cm"].combine_first(df["chart_height_cm"])
+    df["weight_kg"] = df["omr_weight_kg"].combine_first(df["chart_weight_kg"])
+    df["bmi"]       = df["omr_bmi"]  # BMI only from OMR
+
+    n_total = len(df)
+    pct_h = 100.0 * df["height_cm"].notna().sum() / n_total
+    pct_w = 100.0 * df["weight_kg"].notna().sum() / n_total
+    pct_b = 100.0 * df["bmi"].notna().sum() / n_total
+    logger.info(
+        "  After merge: height missing %.1f%%  weight missing %.1f%%  BMI missing %.1f%%",
+        100.0 - pct_h, 100.0 - pct_w, 100.0 - pct_b,
+    )
+
+    # Missingness indicators (computed before imputation)
+    df["height_missing"] = df["height_cm"].isna().astype(float)
+    df["weight_missing"] = df["weight_kg"].isna().astype(float)
+    df["bmi_missing"]    = df["bmi"].isna().astype(float)
+    return df
+
+
+def _impute_vitals(
+    df: pd.DataFrame,
+    stats: dict[str, dict[str, float]],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Impute missing height and weight, then derive BMI where absent.
+
+    Returns the modified DataFrame in-place (also returned for convenience).
+    """
+    df["age_bin"] = pd.cut(
+        df["age"], bins=_AGE_BINS, labels=_AGE_LABELS, right=False
+    ).astype(str)
+    df["stratum"] = df["age_bin"].astype(str) + "_" + df["gender_numeric"].astype(str)
+
+    n_missing_h_before = int(df["height_cm"].isna().sum())
+    n_missing_w_before = int(df["weight_kg"].isna().sum())
+    df["height_cm"] = _impute_vectorised(df, "height_cm", stats, rng)
+    df["weight_kg"] = _impute_vectorised(df, "weight_kg", stats, rng)
+    logger.info("  Imputed %d height values, %d weight values",
+                n_missing_h_before, n_missing_w_before)
+
+    # Derive BMI from imputed height/weight where still missing
+    still_missing_bmi = df["bmi"].isna()
+    if still_missing_bmi.any():
+        height_m = df.loc[still_missing_bmi, "height_cm"] / 100.0
+        weight_kg = df.loc[still_missing_bmi, "weight_kg"]
+        df.loc[still_missing_bmi, "bmi"] = weight_kg / (height_m ** 2)
+    return df
+
+
 def run(config: dict) -> None:
     """Extract and save demographics feature vectors."""
     _check_required_keys(config, [
@@ -534,52 +621,15 @@ def run(config: dict) -> None:
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
-        # Write hadm_linkage_stats.json (merge with existing if present)
+        # Write hadm_linkage_stats.json
         # ------------------------------------------------------------------ #
-        os.makedirs(classifications_dir, exist_ok=True)
-        stats_json_path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
-        existing_stats: dict = {}
-        if os.path.exists(stats_json_path):
-            with open(stats_json_path, "r", encoding="utf-8") as fh:
-                try:
-                    existing_stats = json.load(fh)
-                except (json.JSONDecodeError, ValueError):
-                    existing_stats = {}
-        existing_stats.setdefault("extract_demographics", {})
-        existing_stats["extract_demographics"]["chartevents"] = linkage_stats
-        with open(stats_json_path, "w", encoding="utf-8") as fh:
-            json.dump(existing_stats, fh, indent=2)
-        logger.info("Updated hadm_linkage_stats.json at %s", stats_json_path)
+        _write_linkage_stats(linkage_stats, classifications_dir)
 
         # ------------------------------------------------------------------ #
-        # Merge and combine sources
+        # Merge vitals and add missingness flags
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_demographics — merging vitals")
-        df = age_gender.merge(omr_vitals, on=["subject_id", "hadm_id"], how="left")
-        df = df.merge(chart_vitals, on=["subject_id", "hadm_id"], how="left")
-
-        # Fix 4: Merge canonical columns
-        df["height_cm"] = df["omr_height_cm"].combine_first(df["chart_height_cm"])
-        df["weight_kg"] = df["omr_weight_kg"].combine_first(df["chart_weight_kg"])
-        df["bmi"]       = df["omr_bmi"]  # BMI only from OMR
-
-        # Log coverage percentages after merging sources
-        n_total = len(df)
-        pct_h = 100.0 * df["height_cm"].notna().sum() / n_total
-        pct_w = 100.0 * df["weight_kg"].notna().sum() / n_total
-        pct_b = 100.0 * df["bmi"].notna().sum() / n_total
-        logger.info(
-            "  After merge: height missing %.1f%%  weight missing %.1f%%  BMI missing %.1f%%",
-            100.0 - pct_h, 100.0 - pct_w, 100.0 - pct_b,
-        )
-
-        # ------------------------------------------------------------------ #
-        # Missingness indicators (before imputation)
-        # ------------------------------------------------------------------ #
-        # Fix 4: Use canonical column names
-        df["height_missing"] = df["height_cm"].isna().astype(float)
-        df["weight_missing"] = df["weight_kg"].isna().astype(float)
-        df["bmi_missing"]    = df["bmi"].isna().astype(float)
+        df = _merge_and_flag_vitals(age_gender, omr_vitals, chart_vitals)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
@@ -592,32 +642,12 @@ def run(config: dict) -> None:
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
-        # Impute missing height and weight
+        # Impute missing height and weight, derive BMI
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_demographics — imputing missing height and weight")
         logger.info("Imputing missing height and weight…")
-
-        df["age_bin"] = pd.cut(
-            df["age"], bins=_AGE_BINS, labels=_AGE_LABELS, right=False
-        ).astype(str)
-        df["stratum"] = df["age_bin"].astype(str) + "_" + df["gender_numeric"].astype(str)
         rng = np.random.default_rng(seed=42)
-
-        n_missing_h_before = int(df["height_cm"].isna().sum())
-        n_missing_w_before = int(df["weight_kg"].isna().sum())
-        # Fix 6: Vectorised imputation
-        df["height_cm"] = _impute_vectorised(df, "height_cm", stats, rng)
-        df["weight_kg"] = _impute_vectorised(df, "weight_kg", stats, rng)
-        logger.info("  Imputed %d height values, %d weight values",
-                    n_missing_h_before, n_missing_w_before)
-
-        # BMI: derive from height/weight if still missing.
-        # Fix 5: height is now in cm; divide by 100 to get metres
-        still_missing_bmi = df["bmi"].isna()
-        if still_missing_bmi.any():
-            height_m = df.loc[still_missing_bmi, "height_cm"] / 100.0
-            weight_kg = df.loc[still_missing_bmi, "weight_kg"]
-            df.loc[still_missing_bmi, "bmi"] = weight_kg / (height_m ** 2)
+        df = _impute_vitals(df, stats, rng)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #

@@ -37,6 +37,151 @@ logger = logging.getLogger(__name__)
 _CHUNK_SIZE = 1_000_000
 
 
+def _parse_lab_window(config: dict) -> int | None:
+    """Parse LAB_ADMISSION_WINDOW from config.
+
+    Returns an integer number of hours, or None for the "full" sentinel.
+    Raises ValueError for invalid values.
+    """
+    raw_window = config.get("LAB_ADMISSION_WINDOW", 24)
+    if str(raw_window).strip().lower() == "full":
+        return None
+    try:
+        lab_window_hours = int(raw_window)
+        if lab_window_hours <= 0:
+            raise ValueError(f"LAB_ADMISSION_WINDOW must be positive, got {lab_window_hours}")
+        return lab_window_hours
+    except (TypeError, ValueError) as exc:
+        raise ValueError(
+            f"LAB_ADMISSION_WINDOW must be a positive integer or 'full', "
+            f"got {raw_window!r}"
+        ) from exc
+
+
+def _stream_and_filter_labevents(
+    lab_path: str,
+    item_to_label: dict,
+    item_to_fluid: dict,
+    item_to_category: dict,
+    admissions: pd.DataFrame,
+    hadm_linkage_strategy: str,
+    hadm_linkage_tolerance_hours: int,
+) -> list[pd.DataFrame]:
+    """Stream labevents CSV in chunks, applying hadm linkage and item filters.
+
+    Returns a list of filtered DataFrames (one per non-empty chunk).
+    """
+    all_chunks: list[pd.DataFrame] = []
+    i = 0
+    for chunk in tqdm(
+        pd.read_csv(
+            lab_path,
+            usecols=[
+                "subject_id", "hadm_id", "itemid", "charttime",
+                "value", "valuenum", "valueuom",
+                "ref_range_lower", "ref_range_upper", "flag", "priority",
+            ],
+            dtype={"subject_id": int, "hadm_id": float, "itemid": int},
+            parse_dates=["charttime"],
+            chunksize=_CHUNK_SIZE,
+        ),
+        desc="Streaming labevents",
+        unit="chunk",
+    ):
+        chunk = chunk.copy()
+        raw_chunk_len = len(chunk)
+        null_hadm_mask = chunk["hadm_id"].isna()
+        null_hadm_count = int(null_hadm_mask.sum())
+
+        if hadm_linkage_strategy == "drop":
+            chunk = chunk[~null_hadm_mask].copy()
+        elif hadm_linkage_strategy == "link" and null_hadm_count > 0:
+            null_rows = chunk[null_hadm_mask].copy()
+            resolved_rows = []
+            tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
+            for _, row in null_rows.iterrows():
+                resolved_hadm = _link_hadm_for_row(row, admissions, tolerance)
+                if resolved_hadm is None:
+                    continue
+                new_row = row.copy()
+                new_row["hadm_id"] = int(resolved_hadm)
+                resolved_rows.append(new_row)
+
+            non_null = chunk[~null_hadm_mask].copy()
+            if resolved_rows:
+                resolved_df = pd.DataFrame(resolved_rows)
+                chunk = pd.concat([non_null, resolved_df], ignore_index=True)
+            else:
+                chunk = non_null
+
+        chunk = chunk.dropna(subset=["hadm_id"]).copy()
+        chunk["hadm_id"] = chunk["hadm_id"].astype(int)
+
+        # Filter out rows where both value and valuenum are null
+        chunk = chunk[chunk["value"].notna() | chunk["valuenum"].notna()]
+
+        # Join label, fluid, category from d_labitems
+        chunk["label"]    = chunk["itemid"].map(item_to_label)
+        chunk["fluid"]    = chunk["itemid"].map(item_to_fluid)
+        chunk["category"] = chunk["itemid"].map(item_to_category)
+
+        # Drop rows where itemid is not in d_labitems
+        chunk = chunk.dropna(subset=["label"])
+
+        logger.info(
+            "  Chunk %d: %d rows read  |  %d null hadm_id (%s)  |  %d retained after filters",
+            i, raw_chunk_len, null_hadm_count,
+            f"strategy: {hadm_linkage_strategy}", len(chunk),
+        )
+        i += 1
+
+        if not chunk.empty:
+            all_chunks.append(chunk)
+
+    return all_chunks
+
+
+def _apply_admission_window_filter(
+    labs: pd.DataFrame,
+    admissions: pd.DataFrame,
+    lab_window_hours: int | None,
+) -> pd.DataFrame:
+    """Filter lab events to the configured admission window.
+
+    Parameters
+    ----------
+    labs : pd.DataFrame
+        All lab events after chunk streaming (without admittime/dischtime).
+    admissions : pd.DataFrame
+        Admissions table with admittime and dischtime columns.
+    lab_window_hours : int or None
+        Hours from admittime to include, or None for full admission.
+
+    Returns
+    -------
+    pd.DataFrame
+        Lab events filtered to the admission window.
+    """
+    labs = labs.merge(
+        admissions[["subject_id", "hadm_id", "admittime", "dischtime"]],
+        on=["subject_id", "hadm_id"],
+        how="inner",
+    )
+
+    window_mask = labs["charttime"] >= labs["admittime"]
+    if lab_window_hours is None:
+        window_mask &= labs["charttime"] <= labs["dischtime"]
+    else:
+        cutoff = labs["admittime"] + pd.to_timedelta(lab_window_hours, unit="h")
+        window_mask &= labs["charttime"] <= cutoff
+
+    labs = labs[window_mask]
+    logger.info("  After window filter (%s): %d rows for %d admissions",
+                f"{lab_window_hours}h" if lab_window_hours else "full",
+                len(labs), labs["hadm_id"].nunique())
+    return labs
+
+
 def run(config: dict) -> None:
     """Extract lab events as long-format chronological text lines per admission."""
     _check_required_keys(config, ["MIMIC_DATA_DIR", "FEATURES_DIR"])
@@ -46,20 +191,7 @@ def run(config: dict) -> None:
     hosp_dir = os.path.join(mimic_dir, "hosp")
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
-    # Parse LAB_ADMISSION_WINDOW: int (hours) or "full"
-    raw_window = config.get("LAB_ADMISSION_WINDOW", 24)
-    if str(raw_window).strip().lower() == "full":
-        lab_window_hours: int | None = None  # sentinel: use dischtime
-    else:
-        try:
-            lab_window_hours = int(raw_window)
-            if lab_window_hours <= 0:
-                raise ValueError(f"LAB_ADMISSION_WINDOW must be positive, got {lab_window_hours}")
-        except (TypeError, ValueError) as exc:
-            raise ValueError(
-                f"LAB_ADMISSION_WINDOW must be a positive integer or 'full', "
-                f"got {raw_window!r}"
-            ) from exc
+    lab_window_hours = _parse_lab_window(config)
 
     hadm_linkage_strategy: str = str(config.get("HADM_LINKAGE_STRATEGY", "drop")).lower()
     hadm_linkage_tolerance_hours: int = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 1))
@@ -79,9 +211,6 @@ def run(config: dict) -> None:
                                output_paths, registry_path, logger):
             return
 
-    # ------------------------------------------------------------------ #
-    # Load d_labitems for label, fluid, category mapping
-    # ------------------------------------------------------------------ #
     steps = [
         "Load d_labitems and admissions",
         "Stream and filter labevents",
@@ -90,6 +219,9 @@ def run(config: dict) -> None:
         "Sort and save labs_features.parquet",
     ]
     with tqdm(total=len(steps), desc="extract_labs", unit="step", dynamic_ncols=True) as pbar:
+        # ------------------------------------------------------------------ #
+        # Load d_labitems for label, fluid, category mapping
+        # ------------------------------------------------------------------ #
         pbar.set_description("extract_labs — loading d_labitems and admissions")
         logger.info("Loading d_labitems…")
         d_labitems = _load_d_labitems(hosp_dir)
@@ -103,9 +235,6 @@ def run(config: dict) -> None:
                     d_labitems["fluid"].nunique(),
                     d_labitems["category"].nunique())
 
-        # ------------------------------------------------------------------ #
-        # Load admissions for window filtering
-        # ------------------------------------------------------------------ #
         logger.info("Loading admissions…")
         admissions = _load_csv(
             os.path.join(hosp_dir, "admissions.csv.gz"),
@@ -125,7 +254,7 @@ def run(config: dict) -> None:
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
-        # Stream labevents in chunks, applying per-chunk filters
+        # Stream labevents in chunks
         # ------------------------------------------------------------------ #
         lab_gz = os.path.join(hosp_dir, "labevents.csv.gz")
         lab_csv = os.path.join(hosp_dir, "labevents.csv")
@@ -133,81 +262,14 @@ def run(config: dict) -> None:
             raise FileNotFoundError(
                 f"labevents table not found under {hosp_dir}"
             )
-
         lab_path = lab_gz if os.path.exists(lab_gz) else lab_csv
         logger.info("Streaming labevents from %s…", lab_path)
 
         pbar.set_description("extract_labs — streaming labevents chunks")
-        all_chunks: list[pd.DataFrame] = []
-        i = 0
-        for chunk in tqdm(
-            pd.read_csv(
-                lab_path,
-                usecols=[
-                    "subject_id", "hadm_id", "itemid", "charttime",
-                    "value", "valuenum", "valueuom",
-                    "ref_range_lower", "ref_range_upper", "flag", "priority",
-                ],
-                dtype={"subject_id": int, "hadm_id": float, "itemid": int},
-                parse_dates=["charttime"],
-                chunksize=_CHUNK_SIZE,
-            ),
-            desc="Streaming labevents",
-            unit="chunk",
-        ):
-            # 1. Handle rows with no hadm_id per strategy
-            chunk = chunk.copy()
-            raw_chunk_len = len(chunk)
-            null_hadm_mask = chunk["hadm_id"].isna()
-            null_hadm_count = int(null_hadm_mask.sum())
-
-            if hadm_linkage_strategy == "drop":
-                chunk = chunk[~null_hadm_mask].copy()
-            elif hadm_linkage_strategy == "link" and null_hadm_count > 0:
-                null_rows = chunk[null_hadm_mask].copy()
-                resolved_rows = []
-                tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
-                for _, row in null_rows.iterrows():
-                    resolved_hadm = _link_hadm_for_row(row, admissions, tolerance)
-                    if resolved_hadm is None:
-                        continue
-                    new_row = row.copy()
-                    new_row["hadm_id"] = int(resolved_hadm)
-                    resolved_rows.append(new_row)
-
-                non_null = chunk[~null_hadm_mask].copy()
-                if resolved_rows:
-                    resolved_df = pd.DataFrame(resolved_rows)
-                    chunk = pd.concat([non_null, resolved_df], ignore_index=True)
-                else:
-                    chunk = non_null
-
-            chunk = chunk.dropna(subset=["hadm_id"]).copy()
-            chunk["hadm_id"] = chunk["hadm_id"].astype(int)
-
-            # 2. Filter out rows where both value and valuenum are null
-            chunk = chunk[chunk["value"].notna() | chunk["valuenum"].notna()]
-
-            # 3. Join label, fluid, category from d_labitems
-            chunk["label"]    = chunk["itemid"].map(item_to_label)
-            chunk["fluid"]    = chunk["itemid"].map(item_to_fluid)
-            chunk["category"] = chunk["itemid"].map(item_to_category)
-
-            # 4. Drop rows where itemid is not in d_labitems (unmapped items)
-            chunk = chunk.dropna(subset=["label"])
-
-            logger.info(
-                "  Chunk %d: %d rows read  |  %d null hadm_id (%s)  |  %d retained after filters",
-                i,
-                raw_chunk_len,
-                null_hadm_count,
-                f"strategy: {hadm_linkage_strategy}",
-                len(chunk),
-            )
-            i += 1
-
-            if not chunk.empty:
-                all_chunks.append(chunk)
+        all_chunks = _stream_and_filter_labevents(
+            lab_path, item_to_label, item_to_fluid, item_to_category,
+            admissions, hadm_linkage_strategy, hadm_linkage_tolerance_hours,
+        )
 
         if not all_chunks:
             logger.warning("No lab events found – saving empty labs feature file")
@@ -227,32 +289,10 @@ def run(config: dict) -> None:
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
-        # Apply admission window filter after concatenating all chunks
+        # Apply admission window filter
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_labs — applying admission window filter")
-        labs = labs.merge(
-            admissions[["subject_id", "hadm_id", "admittime", "dischtime"]],
-            on=["subject_id", "hadm_id"],
-            how="inner",
-        )
-
-        # Lower bound: charttime >= admittime (always)
-        window_mask = labs["charttime"] >= labs["admittime"]
-
-        # Upper bound: configurable
-        if lab_window_hours is None:
-            # "full" — use entire admission window
-            window_mask &= labs["charttime"] <= labs["dischtime"]
-        else:
-            # Integer hours — cut off at admittime + window
-            cutoff = labs["admittime"] + pd.to_timedelta(lab_window_hours, unit="h")
-            window_mask &= labs["charttime"] <= cutoff
-
-        labs = labs[window_mask]
-        n_after_window = len(labs)
-        logger.info("  After window filter (%s): %d rows for %d admissions",
-                    f"{lab_window_hours}h" if lab_window_hours else "full",
-                    n_after_window, labs["hadm_id"].nunique())
+        labs = _apply_admission_window_filter(labs, admissions, lab_window_hours)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
@@ -264,23 +304,17 @@ def run(config: dict) -> None:
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
-        # Sort chronologically within each admission
+        # Sort chronologically and save
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_labs — saving labs_features.parquet")
         labs = labs.sort_values(["subject_id", "hadm_id", "charttime"])
 
-        # ------------------------------------------------------------------ #
-        # Output — long format, one row per lab event
-        # ------------------------------------------------------------------ #
         out_df = labs[[
             "subject_id", "hadm_id", "charttime",
             "itemid", "label", "fluid", "category",
             "lab_text_line",
         ]].reset_index(drop=True)
 
-        # ------------------------------------------------------------------ #
-        # Save output
-        # ------------------------------------------------------------------ #
         os.makedirs(features_dir, exist_ok=True)
         output_path = os.path.join(features_dir, "labs_features.parquet")
         out_df.to_parquet(output_path, index=False)

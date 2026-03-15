@@ -23,6 +23,49 @@ logger = logging.getLogger(__name__)
 _READMISSION_WINDOW_DAYS = 30
 
 
+def _compute_y1_mortality(admissions: pd.DataFrame) -> pd.DataFrame:
+    """Return a DataFrame with subject_id, hadm_id, y1_mortality."""
+    labels = admissions[["subject_id", "hadm_id", "hospital_expire_flag"]].copy()
+    labels = labels.rename(columns={"hospital_expire_flag": "y1_mortality"})
+    logger.info("  Y1 positive rate: %.2f%%  (%d deceased admissions)",
+                100 * labels["y1_mortality"].mean(), labels["y1_mortality"].sum())
+    return labels
+
+
+def _compute_y2_readmission(admissions: pd.DataFrame, labels: pd.DataFrame) -> pd.DataFrame:
+    """Append y2_readmission to *labels* and return the updated DataFrame."""
+    logger.info("Computing 30-day readmission labels…")
+
+    adm_a = admissions[
+        ["subject_id", "hadm_id", "dischtime", "hospital_expire_flag"]
+    ].copy()
+    adm_b = admissions[["subject_id", "hadm_id", "admittime"]].copy()
+    adm_b = adm_b.rename(
+        columns={"hadm_id": "next_hadm_id", "admittime": "next_admittime"}
+    )
+
+    cross = adm_a.merge(adm_b, on="subject_id", how="left")
+    cross = cross[cross["next_admittime"] > cross["dischtime"]]
+
+    window = pd.Timedelta(days=_READMISSION_WINDOW_DAYS)
+    time_since_discharge: pd.Series = cross["next_admittime"] - cross["dischtime"]
+    cross = cross[time_since_discharge <= window]
+
+    readmitted_hadm_ids = cross["hadm_id"].unique()
+    labels = labels.copy()
+    labels["y2_readmission"] = labels["hadm_id"].isin(readmitted_hadm_ids).astype(float)
+
+    # Patients who died cannot be readmitted – set Y2 to NaN
+    died_mask = labels["y1_mortality"] == 1
+    labels.loc[died_mask, "y2_readmission"] = float("nan")
+
+    logger.info("  Y2 positive rate (excl. deaths): %.2f%%  (%d readmitted)",
+                100 * labels.loc[~died_mask, "y2_readmission"].mean(),
+                int(labels.loc[~died_mask, "y2_readmission"].sum()))
+    logger.info("  Y2 excluded (deceased): %d admissions", int(died_mask.sum()))
+    return labels
+
+
 def run(config: dict) -> None:
     """Compute Y1 and Y2 labels and save to parquet."""
     _check_required_keys(config, ["MIMIC_DATA_DIR", "CLASSIFICATIONS_DIR"])
@@ -68,49 +111,14 @@ def run(config: dict) -> None:
         # Y1 – in-hospital mortality
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_y_data — computing Y1 (mortality)")
-        labels = admissions[["subject_id", "hadm_id", "hospital_expire_flag"]].copy()
-        labels = labels.rename(columns={"hospital_expire_flag": "y1_mortality"})
-        logger.info("  Y1 positive rate: %.2f%%  (%d deceased admissions)",
-                    100 * labels["y1_mortality"].mean(), labels["y1_mortality"].sum())
+        labels = _compute_y1_mortality(admissions)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Y2 – 30-day readmission
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_y_data — computing Y2 (30-day readmission)")
-        logger.info("Computing 30-day readmission labels…")
-
-        # Self-join on subject_id to find subsequent admissions
-        adm_a = admissions[
-            ["subject_id", "hadm_id", "dischtime", "hospital_expire_flag"]
-        ].copy()
-        adm_b = admissions[["subject_id", "hadm_id", "admittime"]].copy()
-        adm_b = adm_b.rename(
-            columns={"hadm_id": "next_hadm_id", "admittime": "next_admittime"}
-        )
-
-        cross = adm_a.merge(adm_b, on="subject_id", how="left")
-
-        # Subsequent admission must come strictly after current discharge
-        cross = cross[cross["next_admittime"] > cross["dischtime"]]
-
-        # Within 30-day window
-        window = pd.Timedelta(days=_READMISSION_WINDOW_DAYS)
-        time_since_discharge: pd.Series = cross["next_admittime"] - cross["dischtime"]
-        cross = cross[time_since_discharge <= window]
-
-        readmitted_hadm_ids = cross["hadm_id"].unique()
-
-        labels["y2_readmission"] = labels["hadm_id"].isin(readmitted_hadm_ids).astype(float)
-
-        # Patients who died cannot be readmitted – set Y2 to NaN
-        died_mask = labels["y1_mortality"] == 1
-        labels.loc[died_mask, "y2_readmission"] = float("nan")
-
-        logger.info("  Y2 positive rate (excl. deaths): %.2f%%  (%d readmitted)",
-                    100 * labels.loc[~died_mask, "y2_readmission"].mean(),
-                    int(labels.loc[~died_mask, "y2_readmission"].sum()))
-        logger.info("  Y2 excluded (deceased): %d admissions", int(died_mask.sum()))
+        labels = _compute_y2_readmission(admissions, labels)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #

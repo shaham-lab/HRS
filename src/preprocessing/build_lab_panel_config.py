@@ -69,6 +69,42 @@ def _fluid_to_group_name(fluid: str) -> str:
     return _SINGLE_GROUP_NAME_OVERRIDES.get(raw, raw)
 
 
+def _assign_itemids_to_groups(d_labitems) -> dict[str, list[int]]:
+    """Iterate over d_labitems and assign each itemid to its lab group.
+
+    Returns a dict mapping group name → sorted list of integer itemids.
+    """
+    groups: dict[str, list[int]] = {}
+
+    for _, row in tqdm(d_labitems.iterrows(), total=len(d_labitems),
+                       desc="Assigning lab groups", unit="item"):
+        fluid = str(row["fluid"]).strip()
+        category = str(row["category"]).strip()
+        itemid = int(row["itemid"])
+
+        fluid_lower = fluid.lower()
+        category_lower = category.lower()
+
+        if fluid in _SINGLE_GROUP_FLUIDS:
+            group_name = _fluid_to_group_name(fluid)
+        else:
+            group_name = _FLUID_CATEGORY_MAP.get(
+                (fluid_lower, category_lower),
+                # Fallback: combine fluid + category as snake_case
+                f"{fluid_lower.replace(' ', '_')}_{category_lower.replace(' ', '_')}",
+            )
+
+        groups.setdefault(group_name, [])
+        if itemid not in groups[group_name]:
+            groups[group_name].append(itemid)
+
+    # Sort itemids within each group for determinism
+    for group_name in groups:
+        groups[group_name].sort()
+
+    return groups
+
+
 def run(config: dict) -> None:
     """Build lab panel config and save to CLASSIFICATIONS_DIR/lab_panel_config.yaml."""
     required_keys = ["MIMIC_DATA_DIR", "CLASSIFICATIONS_DIR"]
@@ -101,39 +137,12 @@ def run(config: dict) -> None:
     hosp_dir = os.path.join(mimic_dir, "hosp")
     logger.info("Loading d_labitems…")
     d_labitems = _load_d_labitems(hosp_dir)
-
     logger.info("d_labitems: %d rows after removing artefacts", len(d_labitems))
 
     # ------------------------------------------------------------------ #
     # Assign each itemid to a lab group
     # ------------------------------------------------------------------ #
-    groups: dict[str, list[int]] = {}
-
-    for _, row in tqdm(d_labitems.iterrows(), total=len(d_labitems),
-                       desc="Assigning lab groups", unit="item"):
-        fluid = str(row["fluid"]).strip()
-        category = str(row["category"]).strip()
-        itemid = int(row["itemid"])
-
-        fluid_lower = fluid.lower()
-        category_lower = category.lower()
-
-        if fluid in _SINGLE_GROUP_FLUIDS:
-            group_name = _fluid_to_group_name(fluid)
-        else:
-            group_name = _FLUID_CATEGORY_MAP.get(
-                (fluid_lower, category_lower),
-                # Fallback: combine fluid + category as snake_case
-                f"{fluid_lower.replace(' ', '_')}_{category_lower.replace(' ', '_')}",
-            )
-
-        groups.setdefault(group_name, [])
-        if itemid not in groups[group_name]:
-            groups[group_name].append(itemid)
-
-    # Sort itemids within each group for determinism
-    for group_name in groups:
-        groups[group_name].sort()
+    groups = _assign_itemids_to_groups(d_labitems)
 
     logger.info("Lab panel config: %d groups, %d total itemids",
                 len(groups), sum(len(v) for v in groups.values()))

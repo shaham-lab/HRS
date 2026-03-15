@@ -43,6 +43,56 @@ _FEATURES_TO_INCLUDE = [
 # Text parquets are intentionally excluded from the final dataset.
 
 
+def _merge_labels(base: pd.DataFrame, classifications_dir: str) -> pd.DataFrame:
+    """Merge y_labels.parquet into *base* on (subject_id, hadm_id)."""
+    labels_path = os.path.join(classifications_dir, "y_labels.parquet")
+    if not os.path.exists(labels_path):
+        raise FileNotFoundError(
+            f"y_labels.parquet not found at {labels_path}. "
+            "Run extract_y_data.py first."
+        )
+    logger.info("Merging y_labels…")
+    labels = pd.read_parquet(labels_path)
+    base = base.merge(labels, on=["subject_id", "hadm_id"], how="left")
+    n_missing_y1 = int(base["y1_mortality"].isna().sum())
+    if n_missing_y1:
+        logger.warning("  %d admissions missing Y1 after label merge", n_missing_y1)
+    return base
+
+
+def _merge_feature_parquets(base: pd.DataFrame, features_dir: str) -> pd.DataFrame:
+    """Merge the selected feature parquets from *features_dir* into *base*."""
+    for filename in tqdm(_FEATURES_TO_INCLUDE, desc="Merging features", unit="file"):
+        path = str(os.path.join(features_dir, filename))
+        if not os.path.exists(path):
+            logger.warning("Feature file not found, skipping: %s", path)
+            continue
+        logger.info("Merging feature file: %s", filename)
+        feat_df = pd.read_parquet(path)
+        base = base.merge(feat_df, on=["subject_id", "hadm_id"], how="left")
+    return base
+
+
+def _merge_embedding_parquets(base: pd.DataFrame, embeddings_dir: str) -> pd.DataFrame:
+    """Merge all embedding parquets from *embeddings_dir* into *base*."""
+    if not os.path.isdir(embeddings_dir):
+        logger.warning(
+            "Embeddings directory not found (%s) – no embeddings merged.",
+            embeddings_dir,
+        )
+        return base
+    embedding_files = sorted(
+        f for f in os.listdir(embeddings_dir) if f.endswith(".parquet")
+    )
+    for filename in tqdm(embedding_files, desc="Merging embeddings", unit="file"):
+        path = str(os.path.join(embeddings_dir, filename))
+        logger.info("Merging embedding file: %s", filename)
+        emb_df = pd.read_parquet(path)
+        base = base.merge(emb_df, on=["subject_id", "hadm_id"], how="left")
+    logger.info("  Merged %d embedding files", len(embedding_files))
+    return base
+
+
 def run(config: dict) -> None:
     """Combine all feature and label parquets into the final dataset."""
     _check_required_keys(config, [
@@ -88,53 +138,21 @@ def run(config: dict) -> None:
         # Merge labels
         # ------------------------------------------------------------------ #
         pbar.set_description("combine_dataset — merging y_labels")
-        labels_path = os.path.join(classifications_dir, "y_labels.parquet")
-        if not os.path.exists(labels_path):
-            raise FileNotFoundError(
-                f"y_labels.parquet not found at {labels_path}. "
-                "Run extract_y_data.py first."
-            )
-        logger.info("Merging y_labels…")
-        labels = pd.read_parquet(labels_path)
-        base = base.merge(labels, on=["subject_id", "hadm_id"], how="left")
-        n_missing_y1 = int(base["y1_mortality"].isna().sum())
-        if n_missing_y1:
-            logger.warning("  %d admissions missing Y1 after label merge", n_missing_y1)
+        base = _merge_labels(base, classifications_dir)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Merge selected feature parquets
         # ------------------------------------------------------------------ #
         pbar.set_description("combine_dataset — merging feature parquets")
-        for filename in tqdm(_FEATURES_TO_INCLUDE, desc="Merging features", unit="file"):
-            path = str(os.path.join(features_dir, filename))
-            if not os.path.exists(path):
-                logger.warning("Feature file not found, skipping: %s", path)
-                continue
-            logger.info("Merging feature file: %s", filename)
-            feat_df = pd.read_parquet(path)
-            base = base.merge(feat_df, on=["subject_id", "hadm_id"], how="left")
+        base = _merge_feature_parquets(base, features_dir)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
         # Merge embedding parquets (all *.parquet files in embeddings_dir)
         # ------------------------------------------------------------------ #
         pbar.set_description("combine_dataset — merging embedding parquets")
-        if os.path.isdir(embeddings_dir):
-            embedding_files = sorted(
-                f for f in os.listdir(embeddings_dir) if f.endswith(".parquet")
-            )
-            for filename in tqdm(embedding_files, desc="Merging embeddings", unit="file"):
-                path = str(os.path.join(embeddings_dir, filename))
-                logger.info("Merging embedding file: %s", filename)
-                emb_df = pd.read_parquet(path)
-                base = base.merge(emb_df, on=["subject_id", "hadm_id"], how="left")
-            logger.info("  Merged %d embedding files", len(embedding_files))
-        else:
-            logger.warning(
-                "Embeddings directory not found (%s) – no embeddings merged.",
-                embeddings_dir,
-            )
+        base = _merge_embedding_parquets(base, embeddings_dir)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #
