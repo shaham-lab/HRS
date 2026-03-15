@@ -499,13 +499,34 @@ def _worker_embed_and_checkpoint(
     worker_logger,
 ) -> int:
     """
-    Level 3 checkpoint: embed texts in intervals and write via fastparquet.
+    Level 3 checkpoint: embed texts in intervals and append via pyarrow.
     Returns the total number of rows written.
+
+    pyarrow is used instead of fastparquet because fastparquet cannot serialize
+    object-dtype columns containing numpy arrays (fixed-size float32 vectors).
+    pyarrow handles these natively as fixed_size_list(float32, 768) columns.
+
+    Append mechanic: pyarrow does not support true in-place append, so each
+    checkpoint batch is written to a fresh .tmp file, then the existing file
+    (if any) is read back, concatenated with the new batch, and atomically
+    replaced. This is safe: the .tmp file is only renamed over the target after
+    a successful write, so a kill mid-write leaves the previous checkpoint
+    intact.
     """
-    import fastparquet as fp  # type: ignore
+    import pyarrow as pa            # type: ignore
+    import pyarrow.parquet as pq    # type: ignore
+
+    embed_dim = model.config.hidden_size
+
+    # Build a pyarrow schema with typed embedding column so pyarrow never has
+    # to infer the array type from the object-dtype pandas column.
+    pa_schema = pa.schema([
+        ("subject_id", pa.int64()),
+        ("hadm_id",    pa.int64()),
+        (embedding_col, pa.list_(pa.float32(), embed_dim)),
+    ])
 
     n_total = len(texts_pending)
-    is_first_write = not os.path.exists(write_path)
     rows_written = 0
 
     for start in range(0, n_total, checkpoint_interval):
@@ -518,19 +539,26 @@ def _worker_embed_and_checkpoint(
             effective_max_length, effective_batch_size,
         )
 
-        batch_sh[embedding_col] = [
-            np.asarray(emb, dtype=np.float32)
-            for emb in embeddings
-        ]
+        # embeddings is a (N, D) float32 numpy array from _embed_texts.
+        # Convert each row to a plain Python list — pyarrow's from_pandas
+        # converts list-of-lists to fixed_size_list correctly when the schema
+        # specifies the target type.
+        batch_sh[embedding_col] = [emb.tolist() for emb in embeddings]
 
-        # Atomic first write; subsequent writes use fastparquet append.
-        if is_first_write:
-            tmp_path = write_path + ".tmp"
-            fp.write(tmp_path, batch_sh, compression="snappy")
-            os.replace(tmp_path, write_path)
-            is_first_write = False
+        # Build pyarrow table for this batch
+        batch_table = pa.Table.from_pandas(batch_sh, schema=pa_schema,
+                                           preserve_index=False)
+
+        # Append by reading existing file + concatenating + atomic replace.
+        tmp_path = write_path + ".tmp"
+        if os.path.exists(write_path):
+            existing_table = pq.read_table(write_path, schema=pa_schema)
+            combined = pa.concat_tables([existing_table, batch_table])
         else:
-            fp.write(write_path, batch_sh, compression="snappy", append=True)
+            combined = batch_table
+
+        pq.write_table(combined, tmp_path, compression="snappy")
+        os.replace(tmp_path, write_path)
 
         rows_written += len(batch_sh)
         worker_logger.info(
@@ -552,7 +580,7 @@ def _worker(
 ) -> None:
     """
     Worker process: loads BERT on `device_str`, embeds its assigned features,
-    writes output parquets with 3-level resume and fastparquet checkpointing.
+    writes output parquets with 3-level resume and pyarrow checkpointing.
     One worker per GPU, spawned by torch.multiprocessing.
 
     When n_workers > 1 (multi-GPU parallel run) each worker writes to a
@@ -564,7 +592,7 @@ def _worker(
     Resume levels:
       1. Feature-level: skip if all slice hadm_ids already present in output.
       2. Record-level: filter to only rows whose hadm_id is missing from output.
-      3. Checkpoint: append every BERT_CHECKPOINT_INTERVAL rows via fastparquet.
+      3. Checkpoint: append every BERT_CHECKPOINT_INTERVAL rows via pyarrow.
     """
     worker_logger = logging.getLogger(f"embed_features.worker{rank}")
 
@@ -649,7 +677,7 @@ def _worker(
 
         try:
             # ------------------------------------------------------------------ #
-            # Level 3 — Checkpoint: embed in intervals, append via fastparquet   #
+            # Level 3 — Checkpoint: embed in intervals, append via pyarrow       #
             # ------------------------------------------------------------------ #
             rows_written = _worker_embed_and_checkpoint(
                 texts_pending, subject_hadm_pending, embedding_col, write_path,
