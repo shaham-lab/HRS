@@ -974,11 +974,15 @@ def _merge_per_worker_parquets(results: list[dict], n_gpus: int) -> None:
             os.replace(tmp_path, output_path)
         else:
             # Merge all worker parquets; track row count from in-memory df.
+            # Use fastparquet (not pyarrow) to keep the engine consistent with
+            # the worker temp writes, so the object-dtype embedding column
+            # (np.float32 arrays) is serialised identically throughout.
+            import fastparquet as fp  # type: ignore  # noqa: PLC0415
             dfs = [pd.read_parquet(wp) for wp in worker_paths]
             merged = pd.concat(dfs, ignore_index=True)
             n_rows = len(merged)
             tmp_path = output_path + ".tmp"
-            merged.to_parquet(tmp_path, index=False)
+            fp.write(tmp_path, merged, compression="snappy")
             os.replace(tmp_path, output_path)
             for wp in worker_paths:
                 os.remove(wp)
