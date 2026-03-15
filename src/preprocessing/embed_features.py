@@ -1001,16 +1001,17 @@ def _merge_per_worker_parquets(results: list[dict], n_gpus: int) -> None:
             os.replace(worker_paths[0], tmp_path)
             os.replace(tmp_path, output_path)
         else:
-            # Merge all worker parquets; track row count from in-memory df.
-            # Use fastparquet (not pyarrow) to keep the engine consistent with
-            # the worker temp writes, so the object-dtype embedding column
-            # (np.float32 arrays) is serialised identically throughout.
-            import fastparquet as fp  # type: ignore  # noqa: PLC0415
-            dfs = [pd.read_parquet(wp) for wp in worker_paths]
-            merged = pd.concat(dfs, ignore_index=True)
-            n_rows = len(merged)
+            # Merge all worker parquets using pyarrow to preserve the typed
+            # fixed_size_list(float32, 768) embedding column written by the
+            # workers.  A pandas round-trip would lose the schema type and
+            # cause fastparquet serialisation to fail on the object-dtype column.
+            import pyarrow as pa            # type: ignore  # noqa: PLC0415
+            import pyarrow.parquet as pq    # type: ignore  # noqa: PLC0415
+            tables = [pq.read_table(wp) for wp in worker_paths]
+            merged_table = pa.concat_tables(tables)
+            n_rows = len(merged_table)
             tmp_path = output_path + ".tmp"
-            fp.write(tmp_path, merged, compression="snappy")
+            pq.write_table(merged_table, tmp_path, compression="snappy")
             os.replace(tmp_path, output_path)
             for wp in worker_paths:
                 os.remove(wp)
