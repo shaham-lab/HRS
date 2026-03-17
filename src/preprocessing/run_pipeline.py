@@ -11,45 +11,23 @@ Usage examples:
     python preprocessing/run_pipeline.py --embed_features
     python preprocessing/run_pipeline.py --combine_dataset
 
-All configuration is loaded from preprocessing.yaml (located in the same
-directory as this script). No module reads preprocessing.yaml directly.
+All configuration is loaded from config/preprocessing.yaml (located in the
+repository root). No module reads preprocessing.yaml directly.
 """
 
 import argparse
 import logging
 import os
 import sys
+import time
 
-import yaml
+from preprocessing_utils import _load_config, _PATH_KEYS  # noqa: F401  (re-exported for tests)
 
 logger = logging.getLogger(__name__)
 
 _SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-_CONFIG_PATH = os.path.join(_SCRIPT_DIR, "preprocessing.yaml")
-
-
-_PATH_KEYS = {
-    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
-    "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
-    "HASH_REGISTRY_PATH",
-}
-
-
-def _load_config(config_path: str) -> dict:
-    if not os.path.exists(config_path):
-        raise FileNotFoundError(
-            f"Configuration file not found: {config_path}"
-        )
-    with open(config_path, "r", encoding="utf-8") as fh:
-        cfg = yaml.safe_load(fh)
-    if not isinstance(cfg, dict):
-        raise ValueError(
-            f"Configuration file {config_path} must contain a YAML mapping."
-        )
-    for key in _PATH_KEYS:
-        if key in cfg and isinstance(cfg[key], str):
-            cfg[key] = os.path.expanduser(cfg[key])
-    return cfg
+_REPO_ROOT = os.path.abspath(os.path.join(_SCRIPT_DIR, "..", ".."))
+_CONFIG_PATH = os.path.join(_REPO_ROOT, "config", "preprocessing.yaml")
 
 
 def _setup_logging() -> None:
@@ -79,13 +57,18 @@ def _import_module(name: str):
     return module
 
 
-def _run_module(name: str, config: dict) -> None:
-    logger.info("=" * 60)
-    logger.info("Running module: %s", name)
-    logger.info("=" * 60)
+def _run_module(name: str, config: dict, idx: int, total: int) -> float:
+    """Run a single module and return elapsed seconds."""
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("  STEP %d/%d — %s", idx, total, name)
+    logger.info("=" * 70)
+    t0 = time.time()
     module = _import_module(name)
     module.run(config)
-    logger.info("Module '%s' completed successfully.", name)
+    elapsed = time.time() - t0
+    logger.info("  STEP %d/%d — %s completed in %.1fs", idx, total, name, elapsed)
+    return elapsed
 
 
 def main() -> None:
@@ -107,6 +90,11 @@ def main() -> None:
         "--create_splits",
         action="store_true",
         help="Run create_splits.py",
+    )
+    parser.add_argument(
+        "--build_lab_panel_config",
+        action="store_true",
+        help="Run build_lab_panel_config.py",
     )
     parser.add_argument(
         "--extract_demographics",
@@ -156,7 +144,7 @@ def main() -> None:
     parser.add_argument(
         "--config",
         default=_CONFIG_PATH,
-        help=f"Path to preprocessing.yaml (default: {_CONFIG_PATH})",
+        help=f"Path to config/preprocessing.yaml (default: {_CONFIG_PATH})",
     )
     parser.add_argument(
         "--force",
@@ -171,6 +159,27 @@ def main() -> None:
         help=(
             "Force rerun of specific modules by name even if sources are unchanged. "
             "Example: --force-module extract_demographics extract_labs"
+        ),
+    )
+    parser.add_argument(
+        "--modules",
+        dest="modules",
+        nargs="+",
+        metavar="MODULE",
+        help=(
+            "Run only the specified module(s) by name, in pipeline order. "
+            "Example: --modules combine_dataset"
+        ),
+    )
+    parser.add_argument(
+        "--skip-modules",
+        dest="skip_modules",
+        nargs="+",
+        default=[],
+        metavar="MODULE",
+        help=(
+            "Skip specific modules even if they are in the run order. "
+            "Example: --skip-modules embed_features"
         ),
     )
 
@@ -197,13 +206,20 @@ def main() -> None:
 
     # Full pipeline order
     _FULL_ORDER = (
-        ["create_splits"]
+        ["create_splits", "build_lab_panel_config"]
         + _EXTRACT_MODULES
         + ["embed_features", "combine_dataset"]
     )
 
     if args.all:
         modules_to_run = _FULL_ORDER
+    elif getattr(args, "modules", None):
+        invalid = [m for m in args.modules if m not in _FULL_ORDER]
+        if invalid:
+            parser.error(
+                f"Unknown module(s): {invalid}. Valid modules: {_FULL_ORDER}"
+            )
+        modules_to_run = [m for m in _FULL_ORDER if m in args.modules]
     else:
         modules_to_run = [
             name for name in _FULL_ORDER
@@ -215,13 +231,39 @@ def main() -> None:
         sys.exit(0)
 
     # ------------------------------------------------------------------ #
+    # Print plan before execution
+    # ------------------------------------------------------------------ #
+    logger.info("")
+    logger.info("Pipeline plan — %d module(s) to run:", len(modules_to_run))
+    for idx, name in enumerate(modules_to_run, start=1):
+        logger.info("  %d. %s", idx, name)
+    logger.info("")
+
+    # ------------------------------------------------------------------ #
     # Execute modules in order
     # ------------------------------------------------------------------ #
-    for module_name in modules_to_run:
-        config["FORCE_RERUN"] = args.force or (module_name in (args.force_modules or []))
-        _run_module(module_name, config)
+    t_pipeline_start = time.time()
+    n = len(modules_to_run)
+    skip_modules = args.skip_modules or []
+    force_modules = args.force_modules or []
 
-    logger.info("Pipeline finished. Modules run: %s", modules_to_run)
+    for idx, module_name in enumerate(modules_to_run, start=1):
+        if module_name in skip_modules:
+            logger.info(
+                "  STEP %d/%d — %s SKIPPED (--skip-modules)",
+                idx, n, module_name,
+            )
+            continue
+        config["FORCE_RERUN"] = args.force or (module_name in force_modules)
+        _run_module(module_name, config, idx, n)
+
+    total_elapsed = time.time() - t_pipeline_start
+    logger.info("")
+    logger.info("=" * 70)
+    logger.info("  PIPELINE COMPLETE")
+    logger.info("  Modules run : %s", modules_to_run)
+    logger.info("  Total time  : %.1fs (%.1f min)", total_elapsed, total_elapsed / 60)
+    logger.info("=" * 70)
 
 
 if __name__ == "__main__":

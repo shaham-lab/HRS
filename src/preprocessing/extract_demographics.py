@@ -14,7 +14,14 @@ No normalisation is applied.
 Expected config keys:
     MIMIC_DATA_DIR       – root directory containing MIMIC-IV tables
     FEATURES_DIR         – output directory for feature parquets
-    CLASSIFICATIONS_DIR  – directory containing data_splits.parquet
+    PREPROCESSING_DIR    – directory containing data_splits.parquet
+    CLASSIFICATIONS_DIR  – output directory for hadm_linkage_stats.json
+
+Optional config keys:
+    HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
+                                   null hadm_id in chartevents
+    HADM_LINKAGE_TOLERANCE_HOURS – hours of tolerance for time-window linkage
+                                   (default 1, only used when strategy is "link")
 """
 
 import json
@@ -23,8 +30,9 @@ import os
 
 import numpy as np
 import pandas as pd
+from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _load_csv, _record_hashes, _sources_unchanged
 
 logger = logging.getLogger(__name__)
 
@@ -154,8 +162,11 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
 
 
 def _extract_chart_vitals(
-    mimic_dir: str, admissions: pd.DataFrame
-) -> pd.DataFrame:
+    mimic_dir: str, admissions: pd.DataFrame,
+    hadm_linkage_strategy: str = "drop",
+    hadm_linkage_tolerance_hours: int = 1,
+) -> tuple[pd.DataFrame, dict]:
+    """Extract height/weight from chartevents, returning (vitals_df, linkage_stats)."""
     # Fix 2: Use new itemid collections (no BMI from chartevents)
     all_item_ids = list(_CHART_HEIGHT_ITEMS.keys()) + _CHART_WEIGHT_ITEMIDS
     weight_priority = {item_id: rank for rank, (item_id, _) in enumerate(_CHART_WEIGHT_ITEMS)}
@@ -168,22 +179,100 @@ def _extract_chart_vitals(
         result = admissions[["subject_id", "hadm_id"]].copy()
         result["chart_height_cm"] = np.nan
         result["chart_weight_kg"] = np.nan
-        return result
+        linkage_stats: dict = {
+            "total_null_hadm": 0, "dropped": 0,
+            "linked": 0, "ambiguous_resolved": 0, "unresolvable": 0,
+        }
+        return result, linkage_stats
     path = gz if os.path.exists(gz) else csv
 
     _CHART_CHUNK_SIZE = 1_000_000
-    logger.info("Streaming chartevents from %s in chunks of %d…", path, _CHART_CHUNK_SIZE)
+    logger.info("Streaming chartevents from %s…", path)
     height_chunks: list[pd.DataFrame] = []
     weight_chunks: list[pd.DataFrame] = []
 
+    total_null_hadm = 0
+    dropped_count = 0
+    linked_count = 0
+    ambiguous_resolved_count = 0
+    unresolvable_count = 0
+
+    # Prepare admissions index for linkage strategy
+    adm_for_link = admissions.copy()
+    adm_for_link["admittime"] = pd.to_datetime(adm_for_link["admittime"])
+
     # Fix 2 CRITICAL: apply unit conversion and range filtering within each chunk
-    for i, chunk in enumerate(pd.read_csv(
-        path,
-        usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
-        dtype={"subject_id": int, "hadm_id": float, "itemid": int},
-        parse_dates=["charttime"],
-        chunksize=_CHART_CHUNK_SIZE,
+    for i, chunk in enumerate(tqdm(
+        pd.read_csv(
+            path,
+            usecols=["subject_id", "hadm_id", "itemid", "valuenum", "charttime"],
+            dtype={"subject_id": int, "hadm_id": float, "itemid": int},
+            parse_dates=["charttime"],
+            chunksize=_CHART_CHUNK_SIZE,
+        ),
+        desc="Streaming chartevents",
+        unit="chunk",
     )):
+        null_hadm = chunk["hadm_id"].isna().sum()
+        if null_hadm > 0:
+            total_null_hadm += null_hadm
+            logger.info(
+                "chartevents chunk %d: %d rows (%.1f%%) have null hadm_id — strategy: %s",
+                i, null_hadm, 100 * null_hadm / len(chunk), hadm_linkage_strategy,
+            )
+
+        if hadm_linkage_strategy == "link":
+            null_mask = chunk["hadm_id"].isna()
+            if null_mask.any():
+                null_rows = chunk[null_mask].copy()
+                tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
+                linked_rows = []
+                for _, row in null_rows.iterrows():
+                    sid = row["subject_id"]
+                    ct = pd.to_datetime(row["charttime"])
+                    candidates = adm_for_link[adm_for_link["subject_id"] == sid].copy()
+                    if candidates.empty:
+                        unresolvable_count += 1
+                        continue
+                    admittime_dt = pd.to_datetime(candidates["admittime"])
+                    if "dischtime" in candidates.columns:
+                        dischtime_dt = pd.to_datetime(candidates["dischtime"])
+                        window_mask = (
+                            (admittime_dt - tolerance <= ct) &
+                            (ct <= dischtime_dt + tolerance)
+                        )
+                    else:
+                        window_mask = (admittime_dt - tolerance <= ct)
+                    matches = candidates[window_mask]
+                    if len(matches) == 0:
+                        unresolvable_count += 1
+                    elif len(matches) == 1:
+                        linked_count += 1
+                        new_row = row.copy()
+                        new_row["hadm_id"] = float(matches.iloc[0]["hadm_id"])
+                        linked_rows.append(new_row)
+                    else:
+                        # Multiple matches: pick the one whose admittime is closest to charttime
+                        matches = matches.copy()
+                        matches["_hadm_link_gap"] = (pd.to_datetime(matches["admittime"]) - ct).abs()
+                        best_idx = matches["_hadm_link_gap"].idxmin()
+                        best = matches.loc[best_idx]
+                        ambiguous_resolved_count += 1
+                        new_row = row.copy()
+                        new_row["hadm_id"] = float(best["hadm_id"])
+                        linked_rows.append(new_row)
+                if linked_rows:
+                    linked_df = pd.DataFrame(linked_rows)
+                    chunk = pd.concat(
+                        [chunk[~null_mask], linked_df], ignore_index=True
+                    )
+                else:
+                    chunk = chunk[~null_mask]
+        else:
+            # "drop" strategy
+            dropped_count += chunk["hadm_id"].isna().sum()
+            chunk = chunk[chunk["hadm_id"].notna()].copy()
+
         chunk = chunk[chunk["itemid"].isin(all_item_ids)].copy()
         if chunk.empty:
             continue
@@ -204,8 +293,21 @@ def _extract_chart_vitals(
             w_chunk = w_chunk[w_chunk["valuenum"] > 0]
             weight_chunks.append(w_chunk)
 
-        if (i + 1) % 10 == 0:
-            logger.info("  Processed %d chunks…", i + 1)
+    if total_null_hadm > 0:
+        logger.info(
+            "chartevents null hadm_id summary: total=%d, dropped=%d, linked=%d, "
+            "ambiguous_resolved=%d, unresolvable=%d",
+            total_null_hadm, dropped_count, linked_count,
+            ambiguous_resolved_count, unresolvable_count,
+        )
+
+    linkage_stats = {
+        "total_null_hadm": int(total_null_hadm),
+        "dropped": int(dropped_count),
+        "linked": int(linked_count),
+        "ambiguous_resolved": int(ambiguous_resolved_count),
+        "unresolvable": int(unresolvable_count),
+    }
 
     adm = admissions[["subject_id", "hadm_id"]].copy()
 
@@ -241,7 +343,7 @@ def _extract_chart_vitals(
     result = adm.copy()
     result = result.merge(chart_height, on=["subject_id", "hadm_id"], how="left")
     result = result.merge(chart_weight, on=["subject_id", "hadm_id"], how="left")
-    return result
+    return result, linkage_stats
 
 
 def _compute_age(patients: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFrame:
@@ -277,7 +379,7 @@ def _compute_imputation_stats(
 
     stats: dict[str, dict[str, float]] = {}
     for stratum, grp in train_df.groupby("stratum"):
-        stats[stratum] = {
+        stats[str(stratum)] = {
             "height_cm_mean": float(grp["height_cm"].mean()),
             "height_cm_std":  float(grp["height_cm"].std()),
             "weight_kg_mean": float(grp["weight_kg"].mean()),
@@ -332,21 +434,109 @@ def _impute_vectorised(
     return result
 
 
+def _write_linkage_stats(
+    linkage_stats: dict, classifications_dir: str
+) -> None:
+    """Merge *linkage_stats* into the existing hadm_linkage_stats.json file.
+
+    Creates the file (and directory) if it does not yet exist.
+    """
+    os.makedirs(classifications_dir, exist_ok=True)
+    stats_json_path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
+    existing_stats: dict = {}
+    if os.path.exists(stats_json_path):
+        with open(stats_json_path, "r", encoding="utf-8") as fh:
+            try:
+                existing_stats = json.load(fh)
+            except (json.JSONDecodeError, ValueError):
+                existing_stats = {}
+    existing_stats.setdefault("extract_demographics", {})
+    existing_stats["extract_demographics"]["chartevents"] = linkage_stats
+    with open(stats_json_path, "w", encoding="utf-8") as fh:
+        json.dump(existing_stats, fh, indent=2)
+    logger.info("Updated hadm_linkage_stats.json at %s", stats_json_path)
+
+
+def _merge_and_flag_vitals(
+    age_gender: pd.DataFrame,
+    omr_vitals: pd.DataFrame,
+    chart_vitals: pd.DataFrame,
+) -> pd.DataFrame:
+    """Merge age/gender with OMR and chart vitals, then add missingness flags.
+
+    Returns a DataFrame with height_cm, weight_kg, bmi and the three
+    corresponding *_missing indicator columns.
+    """
+    df = age_gender.merge(omr_vitals, on=["subject_id", "hadm_id"], how="left")
+    df = df.merge(chart_vitals, on=["subject_id", "hadm_id"], how="left")
+
+    # Prefer OMR; fall back to chartevents
+    df["height_cm"] = df["omr_height_cm"].combine_first(df["chart_height_cm"])
+    df["weight_kg"] = df["omr_weight_kg"].combine_first(df["chart_weight_kg"])
+    df["bmi"]       = df["omr_bmi"]  # BMI only from OMR
+
+    n_total = len(df)
+    pct_h = 100.0 * df["height_cm"].notna().sum() / n_total
+    pct_w = 100.0 * df["weight_kg"].notna().sum() / n_total
+    pct_b = 100.0 * df["bmi"].notna().sum() / n_total
+    logger.info(
+        "  After merge: height missing %.1f%%  weight missing %.1f%%  BMI missing %.1f%%",
+        100.0 - pct_h, 100.0 - pct_w, 100.0 - pct_b,
+    )
+
+    # Missingness indicators (computed before imputation)
+    df["height_missing"] = df["height_cm"].isna().astype(float)
+    df["weight_missing"] = df["weight_kg"].isna().astype(float)
+    df["bmi_missing"]    = df["bmi"].isna().astype(float)
+    return df
+
+
+def _impute_vitals(
+    df: pd.DataFrame,
+    stats: dict[str, dict[str, float]],
+    rng: np.random.Generator,
+) -> pd.DataFrame:
+    """Impute missing height and weight, then derive BMI where absent.
+
+    Returns the modified DataFrame in-place (also returned for convenience).
+    """
+    df["age_bin"] = pd.cut(
+        df["age"], bins=_AGE_BINS, labels=_AGE_LABELS, right=False
+    ).astype(str)
+    df["stratum"] = df["age_bin"].astype(str) + "_" + df["gender_numeric"].astype(str)
+
+    n_missing_h_before = int(df["height_cm"].isna().sum())
+    n_missing_w_before = int(df["weight_kg"].isna().sum())
+    df["height_cm"] = _impute_vectorised(df, "height_cm", stats, rng)
+    df["weight_kg"] = _impute_vectorised(df, "weight_kg", stats, rng)
+    logger.info("  Imputed %d height values, %d weight values",
+                n_missing_h_before, n_missing_w_before)
+
+    # Derive BMI from imputed height/weight where still missing
+    still_missing_bmi = df["bmi"].isna()
+    if still_missing_bmi.any():
+        height_m = df.loc[still_missing_bmi, "height_cm"] / 100.0
+        weight_kg = df.loc[still_missing_bmi, "weight_kg"]
+        df.loc[still_missing_bmi, "bmi"] = weight_kg / (height_m ** 2)
+    return df
+
+
 def run(config: dict) -> None:
     """Extract and save demographics feature vectors."""
-    required_keys = [
+    _check_required_keys(config, [
         "MIMIC_DATA_DIR",
         "FEATURES_DIR",
+        "PREPROCESSING_DIR",
         "CLASSIFICATIONS_DIR",
-    ]
-    for key in required_keys:
-        if key not in config:
-            raise KeyError(f"Missing required config key: '{key}'")
+    ])
 
     mimic_dir = config["MIMIC_DATA_DIR"]
     features_dir = config["FEATURES_DIR"]
+    preprocessing_dir = config["PREPROCESSING_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]
     registry_path = config.get("HASH_REGISTRY_PATH", "")
+    hadm_linkage_strategy = config.get("HADM_LINKAGE_STRATEGY", "drop").lower()
+    hadm_linkage_tolerance_hours = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 1))
 
     # ------------------------------------------------------------------ #
     # Hash-based skip check
@@ -367,7 +557,7 @@ def run(config: dict) -> None:
     # ------------------------------------------------------------------ #
     # Load splits
     # ------------------------------------------------------------------ #
-    splits_path = os.path.join(classifications_dir, "data_splits.parquet")
+    splits_path = os.path.join(preprocessing_dir, "data_splits.parquet")
     if not os.path.exists(splits_path):
         raise FileNotFoundError(
             f"data_splits.parquet not found at {splits_path}. "
@@ -375,107 +565,115 @@ def run(config: dict) -> None:
         )
     splits = pd.read_parquet(splits_path)
 
-    # ------------------------------------------------------------------ #
-    # Load source tables
-    # ------------------------------------------------------------------ #
-    logger.info("Loading patients and admissions…")
-    admissions = _load_admissions(mimic_dir)
-    patients = _load_patients(mimic_dir)
-    omr = _load_omr(mimic_dir)
-
-    # ------------------------------------------------------------------ #
-    # Age + gender
-    # ------------------------------------------------------------------ #
-    logger.info("Computing age and gender…")
-    age_gender = _compute_age(patients, admissions)
-
-    # ------------------------------------------------------------------ #
-    # Height / Weight / BMI from OMR (preferred)
-    # ------------------------------------------------------------------ #
-    logger.info("Extracting vitals from OMR…")
-    omr_vitals = _extract_omr_vitals(omr, admissions)
-
-    # ------------------------------------------------------------------ #
-    # Fallback via chartevents
-    # ------------------------------------------------------------------ #
-    logger.info("Extracting vitals from chartevents (fallback)…")
-    chart_vitals = _extract_chart_vitals(mimic_dir, admissions)
-
-    # ------------------------------------------------------------------ #
-    # Merge and combine sources
-    # ------------------------------------------------------------------ #
-    df = age_gender.merge(omr_vitals, on=["subject_id", "hadm_id"], how="left")
-    df = df.merge(chart_vitals, on=["subject_id", "hadm_id"], how="left")
-
-    # Fix 4: Merge canonical columns
-    df["height_cm"] = df["omr_height_cm"].combine_first(df["chart_height_cm"])
-    df["weight_kg"] = df["omr_weight_kg"].combine_first(df["chart_weight_kg"])
-    df["bmi"]       = df["omr_bmi"]  # BMI only from OMR
-
-    # Log coverage percentages after merging sources
-    n_total = len(df)
-    pct_h = 100.0 * df["height_cm"].notna().sum() / n_total
-    pct_w = 100.0 * df["weight_kg"].notna().sum() / n_total
-    pct_b = 100.0 * df["bmi"].notna().sum() / n_total
-    logger.info(
-        "Coverage after merge — height: %.1f%%, weight: %.1f%%, BMI: %.1f%%",
-        pct_h, pct_w, pct_b,
-    )
-
-    # ------------------------------------------------------------------ #
-    # Missingness indicators (before imputation)
-    # ------------------------------------------------------------------ #
-    # Fix 4: Use canonical column names
-    df["height_missing"] = df["height_cm"].isna().astype(float)
-    df["weight_missing"] = df["weight_kg"].isna().astype(float)
-    df["bmi_missing"]    = df["bmi"].isna().astype(float)
-
-    # ------------------------------------------------------------------ #
-    # Compute imputation statistics from train split, then impute
-    # ------------------------------------------------------------------ #
-    logger.info("Computing imputation statistics from train split…")
-    stats = _compute_imputation_stats(df, splits, classifications_dir)
-
-    df["age_bin"] = pd.cut(
-        df["age"], bins=_AGE_BINS, labels=_AGE_LABELS, right=False
-    ).astype(str)
-    df["stratum"] = df["age_bin"].astype(str) + "_" + df["gender_numeric"].astype(str)
-    rng = np.random.default_rng(seed=42)
-
-    logger.info("Imputing missing height and weight…")
-    # Fix 6: Vectorised imputation
-    df["height_cm"] = _impute_vectorised(df, "height_cm", stats, rng)
-    df["weight_kg"] = _impute_vectorised(df, "weight_kg", stats, rng)
-
-    # BMI: derive from height/weight if still missing.
-    # Fix 5: height is now in cm; divide by 100 to get metres
-    still_missing_bmi = df["bmi"].isna()
-    if still_missing_bmi.any():
-        height_m = df.loc[still_missing_bmi, "height_cm"] / 100.0
-        weight_kg = df.loc[still_missing_bmi, "weight_kg"]
-        df.loc[still_missing_bmi, "bmi"] = weight_kg / (height_m ** 2)
-
-    # ------------------------------------------------------------------ #
-    # Assemble feature vector
-    # ------------------------------------------------------------------ #
-    logger.info("Assembling demographic_vec…")
-    # Fix 8: Use canonical column names
-    feature_cols = [
-        "age", "gender_numeric", "height_cm", "weight_kg", "bmi",
-        "height_missing", "weight_missing", "bmi_missing",
+    steps = [
+        "Load source tables",
+        "Extract age and gender",
+        "Extract vitals from OMR",
+        "Extract vitals from chartevents (fallback)",
+        "Merge vitals",
+        "Compute imputation statistics",
+        "Impute missing values",
+        "Assemble demographic_vec",
+        "Save demographics_features.parquet",
     ]
-    df["demographic_vec"] = df[feature_cols].values.tolist()
+    with tqdm(total=len(steps), desc="extract_demographics", unit="step", dynamic_ncols=True) as pbar:
+        # ------------------------------------------------------------------ #
+        # Load source tables
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — loading source tables")
+        logger.info("Loading patients and admissions…")
+        admissions = _load_admissions(mimic_dir)
+        patients = _load_patients(mimic_dir)
+        omr = _load_omr(mimic_dir)
+        logger.info("  Loaded %d patients, %d admissions", len(patients), len(admissions))
+        pbar.update(1)
 
-    out_df = df[["subject_id", "hadm_id", "demographic_vec"]].copy()
+        # ------------------------------------------------------------------ #
+        # Age + gender
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — extracting age and gender")
+        logger.info("Computing age and gender…")
+        age_gender = _compute_age(patients, admissions)
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Save output
-    # ------------------------------------------------------------------ #
-    os.makedirs(features_dir, exist_ok=True)
-    output_path = os.path.join(features_dir, "demographics_features.parquet")
-    out_df.to_parquet(output_path, index=False)
-    logger.info("Saved demographics features to %s  (shape=%s)",
-                output_path, out_df.shape)
+        # ------------------------------------------------------------------ #
+        # Height / Weight / BMI from OMR (preferred)
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — extracting vitals from OMR")
+        logger.info("Extracting vitals from OMR…")
+        omr_vitals = _extract_omr_vitals(omr, admissions)
+        omr_hits = int(omr_vitals[["omr_height_cm", "omr_weight_kg", "omr_bmi"]].notna().any(axis=1).sum())
+        logger.info("  OMR: vitals found for %d admissions", omr_hits)
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Fallback via chartevents
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — extracting vitals from chartevents (fallback)")
+        logger.info("Extracting vitals from chartevents (fallback)…")
+        chart_vitals, linkage_stats = _extract_chart_vitals(
+            mimic_dir, admissions,
+            hadm_linkage_strategy=hadm_linkage_strategy,
+            hadm_linkage_tolerance_hours=hadm_linkage_tolerance_hours,
+        )
+        chart_hits = int(chart_vitals[["chart_height_cm", "chart_weight_kg"]].notna().any(axis=1).sum())
+        logger.info("  chartevents fallback: vitals found for %d admissions", chart_hits)
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Write hadm_linkage_stats.json
+        # ------------------------------------------------------------------ #
+        _write_linkage_stats(linkage_stats, classifications_dir)
+
+        # ------------------------------------------------------------------ #
+        # Merge vitals and add missingness flags
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — merging vitals")
+        df = _merge_and_flag_vitals(age_gender, omr_vitals, chart_vitals)
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Compute imputation statistics from train split, then impute
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — computing imputation statistics (train split only)")
+        logger.info("Computing imputation statistics from train split…")
+        stats = _compute_imputation_stats(df, splits, classifications_dir)
+        logger.info("  Imputation stats computed for %d strata", len(stats))
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Impute missing height and weight, derive BMI
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — imputing missing height and weight")
+        logger.info("Imputing missing height and weight…")
+        rng = np.random.default_rng(seed=42)
+        df = _impute_vitals(df, stats, rng)
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Assemble feature vector
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — assembling demographic_vec")
+        logger.info("Assembling demographic_vec…")
+        # Fix 8: Use canonical column names
+        feature_cols = [
+            "age", "gender_numeric", "height_cm", "weight_kg", "bmi",
+            "height_missing", "weight_missing", "bmi_missing",
+        ]
+        df["demographic_vec"] = df[feature_cols].values.tolist()
+
+        out_df = df[["subject_id", "hadm_id", "demographic_vec"]].copy()
+        pbar.update(1)
+
+        # ------------------------------------------------------------------ #
+        # Save output
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_demographics — saving demographics_features.parquet")
+        os.makedirs(features_dir, exist_ok=True)
+        output_path = os.path.join(features_dir, "demographics_features.parquet")
+        out_df.to_parquet(output_path, index=False)
+        logger.info("  Saved %d rows to %s", len(out_df), output_path)
+        pbar.update(1)
 
     if registry_path:
         _record_hashes("extract_demographics", source_paths, registry_path)

@@ -9,12 +9,18 @@ Expected config keys:
     MIMIC_NOTE_DIR  – (optional) root of the mimic-iv-note module; radiology
                       notes are looked up under <MIMIC_NOTE_DIR>/note/ first
     HASH_REGISTRY_PATH – (optional) path to the source-file hash registry
+
+Optional config keys:
+    HADM_LINKAGE_STRATEGY – "drop" (default); null hadm_id records are always
+                             dropped in this module (link strategy not applicable
+                             as these tables lack charttime at the row level)
 """
 
 import logging
 import os
 
 import pandas as pd
+from tqdm import tqdm
 
 from preprocessing_utils import (
     _gz_or_csv,
@@ -60,6 +66,78 @@ def _resolve_note_path(mimic_dir: str, note_dir: str, table: str) -> str:
     return os.path.join(note_dir, "note", f"{table}.csv.gz")
 
 
+def _load_radiology_notes(note_path: str, config: dict) -> pd.DataFrame:
+    """Load radiology notes from *note_path*, dropping rows with null hadm_id.
+
+    Returns a DataFrame with subject_id, hadm_id, charttime, text.
+    """
+    notes = pd.read_csv(
+        note_path,
+        usecols=["subject_id", "hadm_id", "charttime", "text"],
+        parse_dates=["charttime"],
+        dtype={"subject_id": int, "hadm_id": float},
+    )
+    notes["hadm_id"] = notes["hadm_id"].astype("Int64")
+    n_null_hadm = int(notes["hadm_id"].isna().sum())
+    if n_null_hadm > 0:
+        logger.info(
+            "%s: %d rows (%.1f%%) have null hadm_id — dropping (strategy: %s)",
+            "radiology notes", n_null_hadm,
+            100 * n_null_hadm / len(notes),
+            config.get("HADM_LINKAGE_STRATEGY", "drop"),
+        )
+    notes = notes.dropna(subset=["hadm_id"])
+    notes["hadm_id"] = notes["hadm_id"].astype(int)
+    logger.info("  Loaded %d radiology notes for %d admissions",
+                len(notes), notes["hadm_id"].nunique())
+    if n_null_hadm:
+        logger.info("  Dropped %d notes with null hadm_id (%.1f%%)",
+                    n_null_hadm, 100 * n_null_hadm / (len(notes) + n_null_hadm))
+    return notes
+
+
+def _select_most_recent_radiology_note(
+    notes: pd.DataFrame, admissions: pd.DataFrame
+) -> pd.DataFrame:
+    """Filter notes to the admission window and pick the most recent per admission.
+
+    Returns a DataFrame with subject_id, hadm_id, radiology_text.
+    """
+    notes_merged = notes.merge(
+        admissions[["subject_id", "hadm_id", "admittime", "dischtime"]],
+        on=["subject_id", "hadm_id"],
+        how="left",
+    )
+    in_window = (
+        notes_merged["charttime"].isna()
+        | (
+            (notes_merged["charttime"] >= notes_merged["admittime"])
+            & (notes_merged["charttime"] <= notes_merged["dischtime"])
+        )
+    )
+    n_in_window = int(in_window.sum())
+    logger.info("  Notes in admission window: %d / %d (%.1f%% retained)",
+                n_in_window, len(notes_merged),
+                100 * n_in_window / max(len(notes_merged), 1))
+    notes_merged = notes_merged[in_window]
+
+    most_recent = (
+        notes_merged.sort_values("charttime")
+        .groupby(["subject_id", "hadm_id"])["text"]
+        .last()
+        .reset_index()
+        .rename(columns={"text": "radiology_text"})
+    )
+
+    out_df = admissions[["subject_id", "hadm_id"]].merge(
+        most_recent, on=["subject_id", "hadm_id"], how="left"
+    )
+    out_df["radiology_text"] = out_df["radiology_text"].fillna("")
+    logger.info("  Admissions with radiology note: %d / %d",
+                int((out_df["radiology_text"] != "").sum()), len(out_df))
+    return out_df
+
+
 def run(config: dict) -> None:
     """Extract the most recent radiology note for each admission."""
     required_keys = ["MIMIC_DATA_DIR", "FEATURES_DIR"]
@@ -91,7 +169,7 @@ def run(config: dict) -> None:
             return
 
     # ------------------------------------------------------------------ #
-    # Load radiology notes
+    # Validate note file exists
     # ------------------------------------------------------------------ #
     note_path = radiology_source
     if not os.path.exists(note_path):
@@ -101,71 +179,59 @@ def run(config: dict) -> None:
             "Expected radiology.csv[.gz]."
         )
 
-    notes = pd.read_csv(
-        note_path,
-        usecols=["subject_id", "hadm_id", "charttime", "text"],
-        parse_dates=["charttime"],
-        dtype={"subject_id": int, "hadm_id": float},
-    )
+    steps = [
+        "Load radiology notes",
+        "Clean note text",
+        "Load admissions",
+        "Select most recent note per admission",
+        "Save radiology_features.parquet",
+    ]
+    with tqdm(total=len(steps), desc="extract_radiology", unit="step", dynamic_ncols=True) as pbar:
+        # ------------------------------------------------------------------ #
+        # Load notes
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_radiology — loading radiology notes")
+        notes = _load_radiology_notes(note_path, config)
+        pbar.update(1)
 
-    notes["hadm_id"] = notes["hadm_id"].astype("Int64")
-    notes = notes.dropna(subset=["hadm_id"])
-    notes["hadm_id"] = notes["hadm_id"].astype(int)
-    notes["text"] = notes["text"].apply(_clean_note)
-    logger.info("Loaded %d radiology notes", len(notes))
+        # ------------------------------------------------------------------ #
+        # Clean note text
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_radiology — cleaning note text")
+        tqdm.pandas(desc="Cleaning radiology notes")
+        notes["text"] = notes["text"].progress_apply(_clean_note)
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Load admissions for admission window filtering
-    # ------------------------------------------------------------------ #
-    admissions = _load_csv(
-        os.path.join(hosp_dir, "admissions.csv.gz"),
-        os.path.join(hosp_dir, "admissions.csv"),
-        usecols=["subject_id", "hadm_id", "admittime", "dischtime"],
-        parse_dates=["admittime", "dischtime"],
-        dtype={"subject_id": int, "hadm_id": int},
-    )
-
-    # ------------------------------------------------------------------ #
-    # Keep only notes that fall within each admission window
-    # ------------------------------------------------------------------ #
-    notes_merged = notes.merge(
-        admissions[["subject_id", "hadm_id", "admittime", "dischtime"]],
-        on=["subject_id", "hadm_id"],
-        how="left",
-    )
-    in_window = (
-        notes_merged["charttime"].isna()
-        | (
-            (notes_merged["charttime"] >= notes_merged["admittime"])
-            & (notes_merged["charttime"] <= notes_merged["dischtime"])
+        # ------------------------------------------------------------------ #
+        # Load admissions for admission window filtering
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_radiology — loading admissions")
+        admissions = _load_csv(
+            os.path.join(hosp_dir, "admissions.csv.gz"),
+            os.path.join(hosp_dir, "admissions.csv"),
+            usecols=["subject_id", "hadm_id", "admittime", "dischtime"],
+            parse_dates=["admittime", "dischtime"],
+            dtype={"subject_id": int, "hadm_id": int},
         )
-    )
-    notes_merged = notes_merged[in_window]
+        logger.info("  Loaded %d admissions", len(admissions))
+        pbar.update(1)
 
-    # ------------------------------------------------------------------ #
-    # Pick the most recent note per admission
-    # ------------------------------------------------------------------ #
-    most_recent = (
-        notes_merged.sort_values("charttime")
-        .groupby(["subject_id", "hadm_id"])["text"]
-        .last()
-        .reset_index()
-        .rename(columns={"text": "radiology_text"})
-    )
+        # ------------------------------------------------------------------ #
+        # Filter to admission window and select most recent note
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_radiology — selecting most recent note per admission")
+        out_df = _select_most_recent_radiology_note(notes, admissions)
+        pbar.update(1)
 
-    out_df = admissions[["subject_id", "hadm_id"]].merge(
-        most_recent, on=["subject_id", "hadm_id"], how="left"
-    )
-    out_df["radiology_text"] = out_df["radiology_text"].fillna("")
-
-    # ------------------------------------------------------------------ #
-    # Save output
-    # ------------------------------------------------------------------ #
-    os.makedirs(features_dir, exist_ok=True)
-    output_path = os.path.join(features_dir, "radiology_features.parquet")
-    out_df.to_parquet(output_path, index=False)
-    logger.info("Saved radiology features to %s  (shape=%s)",
-                output_path, out_df.shape)
+        # ------------------------------------------------------------------ #
+        # Save output
+        # ------------------------------------------------------------------ #
+        pbar.set_description("extract_radiology — saving radiology_features.parquet")
+        os.makedirs(features_dir, exist_ok=True)
+        output_path = os.path.join(features_dir, "radiology_features.parquet")
+        out_df.to_parquet(output_path, index=False)
+        logger.info("  Saved %d rows to %s", len(out_df), output_path)
+        pbar.update(1)
 
     if registry_path:
         _record_hashes("extract_radiology", source_paths, registry_path)

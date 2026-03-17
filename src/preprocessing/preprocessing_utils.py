@@ -6,6 +6,127 @@ import os
 from typing import Any, cast
 
 import pandas as pd
+import yaml
+
+
+# ---------------------------------------------------------------------------
+# Configuration loading
+# ---------------------------------------------------------------------------
+
+_PATH_KEYS: set[str] = {
+    "MIMIC_DATA_DIR", "MIMIC_NOTE_DIR", "MIMIC_ED_DIR",
+    "PREPROCESSING_DIR", "FEATURES_DIR", "EMBEDDINGS_DIR", "CLASSIFICATIONS_DIR",
+    "HASH_REGISTRY_PATH",
+}
+
+
+def _load_config(config_path: str) -> dict:
+    """Load and validate preprocessing.yaml; expand ~ in path values."""
+    if not os.path.exists(config_path):
+        raise FileNotFoundError(f"Configuration file not found: {config_path}")
+    with open(config_path, "r", encoding="utf-8") as fh:
+        cfg = yaml.safe_load(fh)
+    if not isinstance(cfg, dict):
+        raise ValueError(
+            f"Configuration file {config_path} must contain a YAML mapping."
+        )
+    for key in _PATH_KEYS:
+        if key in cfg and isinstance(cfg[key], str):
+            cfg[key] = os.path.expanduser(cfg[key])
+    return cfg
+
+
+def _check_required_keys(config: dict, required_keys: list[str]) -> None:
+    """Raise KeyError if any required config key is missing."""
+    for key in required_keys:
+        if key not in config:
+            raise KeyError(f"Missing required config key: '{key}'")
+
+
+def _link_hadm_for_row(
+    row: pd.Series,
+    admissions_df: pd.DataFrame,
+    tolerance: Any,
+) -> float | None:
+    """Resolve hadm_id for a single null-hadm_id row via time-window linkage.
+
+    Looks for admissions for the same subject_id where charttime falls within
+    [admittime - tolerance, dischtime + tolerance].
+
+    Returns the resolved hadm_id as float, or None if unresolvable.
+    When multiple admissions match, picks the one whose admittime is closest
+    to charttime.
+
+    ``pd.to_datetime`` is called on ``row["charttime"]`` intentionally: it is
+    idempotent when the value is already a Timestamp (e.g. from ``parse_dates``)
+    and handles string/NaT inputs gracefully, making this helper reusable
+    regardless of how the calling DataFrame was loaded.
+    """
+    ct = cast(pd.Timestamp, pd.to_datetime(row["charttime"]))
+    candidates = admissions_df[admissions_df["subject_id"] == row["subject_id"]].copy()
+    if candidates.empty:
+        return None
+    admit_times = cast(pd.Series, pd.to_datetime(candidates["admittime"]))
+    if "dischtime" in candidates.columns:
+        disch_times = cast(pd.Series, pd.to_datetime(candidates["dischtime"]))
+        window_mask = (admit_times - tolerance <= ct) & (ct <= disch_times + tolerance)
+    else:
+        window_mask = (admit_times - tolerance <= ct)
+    matches = cast(pd.DataFrame, candidates[window_mask])
+    if len(matches) == 0:
+        return None
+    if len(matches) == 1:
+        return float(matches.iloc[0]["hadm_id"])
+    # Multiple matches: pick the one whose admittime is closest to charttime
+    matches = matches.copy()
+    admit_dt = cast(pd.Series, pd.to_datetime(matches["admittime"]))
+    matches["_gap"] = cast(pd.Series, admit_dt - ct).abs()
+    best_idx = matches["_gap"].idxmin()
+    return float(matches.loc[best_idx, "hadm_id"])
+
+
+def _load_d_labitems(hosp_dir: str) -> pd.DataFrame:
+    """Load and clean the d_labitems lookup table from *hosp_dir*.
+
+    Returns a DataFrame with:
+    - Columns: itemid, label, fluid, category
+    - Whitespace stripped from fluid and category
+    - Artifact rows removed (fluid in {'I', 'Q', 'fluid'})
+    """
+    _artifact_fluids = frozenset({"I", "Q", "fluid"})
+    d_labitems = _load_csv(
+        os.path.join(hosp_dir, "d_labitems.csv.gz"),
+        os.path.join(hosp_dir, "d_labitems.csv"),
+        usecols=["itemid", "label", "fluid", "category"],
+    )
+    d_labitems["fluid"] = d_labitems["fluid"].str.strip()
+    d_labitems["category"] = d_labitems["category"].str.strip()
+    return d_labitems[~d_labitems["fluid"].isin(_artifact_fluids)].copy()
+
+
+def _output_is_valid(path: str, expected_rows: int, embedding_col: str) -> bool:
+    """Return True if a completed embedding parquet exists at `path` and is usable.
+
+    Checks:
+    - File exists
+    - Can be read as a parquet
+    - Has the expected number of rows (matches the input feature file)
+    - Contains the expected embedding column
+    - No null values in the embedding column (a partial write would leave nulls)
+    """
+    if not os.path.exists(path):
+        return False
+    try:
+        df = pd.read_parquet(path)
+    except Exception:  # noqa: BLE001  # noinspection PyBroadException
+        return False
+    if len(df) != expected_rows:
+        return False
+    if embedding_col not in df.columns:
+        return False
+    if df[embedding_col].isnull().any():
+        return False
+    return True
 
 
 def _gz_or_csv(base_dir: str, subdir: str, table: str) -> str:
@@ -78,7 +199,7 @@ def _sources_unchanged(
     # Check all outputs exist
     for p in output_paths:
         if not os.path.exists(p):
-            logger.info("[%s] Output missing: %s — will rerun.", module_name, p)
+            logger.info("[%s] Output not found (%s) — will run.", module_name, os.path.basename(p))
             return False
 
     # Check all sources exist
@@ -96,11 +217,12 @@ def _sources_unchanged(
         stored_hash = stored.get(p)
         if stored_hash != current_hash:
             logger.info(
-                "[%s] Source changed (or first run): %s — will rerun.", module_name, p
+                "[%s] Source file changed (%s) — will rerun.", module_name, os.path.basename(p)
             )
             return False
 
-    logger.info("[%s] All sources unchanged and outputs exist — skipping.", module_name)
+    output_names = [os.path.basename(p) for p in output_paths]
+    logger.info("[%s] Skipping — outputs up to date: %s", module_name, ", ".join(output_names))
     return True
 
 

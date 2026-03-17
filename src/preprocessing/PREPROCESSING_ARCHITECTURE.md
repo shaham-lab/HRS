@@ -1,144 +1,120 @@
-# CDSS-ML Preprocessing — Design & Architecture
+# CDSS-ML Preprocessing — Architecture
 
 ## Table of Contents
 
 1. [Overview](#1-overview)
-2. [Identifier Hierarchy](#2-identifier-hierarchy)
-3. [Data Splits](#3-data-splits)
+2. [Prediction Targets](#2-prediction-targets)
+3. [Data](#3-data)
 4. [Feature Set](#4-feature-set)
-5. [Pipeline Architecture](#5-pipeline-architecture)
-6. [Module Reference](#6-module-reference)
-7. [Feature Extraction Detail](#7-feature-extraction-detail)
-8. [Embedding Architecture](#8-embedding-architecture)
-9. [Final Dataset Assembly](#9-final-dataset-assembly)
-10. [Configuration Reference](#10-configuration-reference)
-11. [Design Principles](#11-design-principles)
-12. [Directory Structure](#12-directory-structure)
+5. [Pipeline Overview](#5-pipeline-overview)
+6. [Module Summary](#6-module-summary)
+7. [Embedding Strategy](#7-embedding-strategy)
+8. [Final Dataset](#8-final-dataset)
+9. [Design Principles](#9-design-principles)
+10. [Directory Structure](#10-directory-structure)
+11. [SLURM Execution](#11-slurm-execution)
 
 ---
 
 ## 1. Overview
 
-The CDSS-ML preprocessing pipeline transforms raw MIMIC-IV clinical data into a fixed-schema feature dataset ready for supervised classification and reinforcement learning. Two prediction targets are produced:
+The CDSS-ML preprocessing pipeline transforms raw MIMIC-IV clinical data into a fixed-schema parquet dataset ready for supervised classification and reinforcement learning.
 
-| Target | Name | Definition | Output column |
-|--------|------|------------|---------------|
-| Y1 | In-hospital mortality | `admissions.hospital_expire_flag` | `y1_mortality` |
-| Y2 | 30-day readmission | Subsequent admission within 30 days of `dischtime`; NaN for deceased patients | `y2_readmission` |
+**Input:** MIMIC-IV v3.1 raw CSV tables  
+**Output:** `final_cdss_dataset.parquet` — one row per hospital admission, 24 columns
 
-The output is a single parquet file (`final_cdss_dataset.parquet`) with one row per hospital admission, containing 19 feature representations (1 structured vector + 18 embeddings), 2 labels, and a split assignment column.
+The pipeline is fully configuration-driven, resumable, and runs on a SLURM cluster with multi-GPU embedding support.
 
 ---
 
-## 2. Identifier Hierarchy
+## 2. Prediction Targets
 
-MIMIC-IV uses three nested identifiers:
-
-```
-subject_id   (patient — persistent across all visits)
-  └── hadm_id    (hospital admission — the unit of prediction)
-        └── stay_id    (ICU stay within an admission)
-```
-
-**`hadm_id` is the primary join key** throughout the pipeline. All feature parquets carry `(subject_id, hadm_id)` as their key columns.
-
-**`stay_id`** is encountered in ICU module tables (`chartevents`, `inputevents`, `procedureevents`). In the current Phase 1 pipeline it appears only indirectly via `chartevents` in the demographics fallback — the join is performed on `hadm_id`, so `stay_id` does not need explicit handling. It becomes critical in the MDP phase for modelling clinical interventions.
-
-### Missing `hadm_id`
-
-Several tables contain records with null `hadm_id` (~10–20% of `labevents`, lower rates in `note` and `chartevents`). Handling is configurable:
-
-| Strategy | Behaviour |
-|----------|-----------|
-| `"drop"` *(default)* | Exclude records with null `hadm_id`. Count and percentage logged per module. |
-| `"link"` | Attempt time-window linkage: match `charttime` against patient admission windows within `HADM_LINKAGE_TOLERANCE_HOURS` tolerance. Assign if exactly one match; assign closest if multiple; drop if none. All outcomes logged to `hadm_linkage_stats.json`. |
+| Target | Column | Definition |
+|--------|--------|------------|
+| Y1 — In-hospital mortality | `y1_mortality` | `admissions.hospital_expire_flag` |
+| Y2 — 30-day readmission | `y2_readmission` | Subsequent admission within 30 days of `dischtime`; **NaN for deceased patients** |
 
 ---
 
-## 3. Data Splits
+## 3. Data
 
-Splitting is performed **at the patient level** (`subject_id`), not at the admission level. This prevents features derived from prior admissions (F2, F3) from creating leakage between splits.
+**Source:** MIMIC-IV v3.1 — 546,028 admissions, 223,452 patients
 
-```
-All admissions
-      │
-      ▼
-Group by subject_id
-      │
-      ▼
-Stratify by: binary flag — does any admission have hospital_expire_flag = 1?
-      │
-      ├──► Train  (default 80%)
-      ├──► Dev    (default 10%)
-      └──► Test   (default 10%)
-```
+**Splits** (patient-level stratified, seed 42):
 
-All admissions of a given patient are assigned to the same split. Split ratios are configurable via `SPLIT_TRAIN`, `SPLIT_DEV`, `SPLIT_TEST`. Random seed is fixed at 42.
+| Split | Patients | Admissions |
+|-------|----------|------------|
+| Train (80%) | 178,761 | 435,160 |
+| Dev (10%) | 22,345 | 54,934 |
+| Test (10%) | 22,346 | 55,934 |
 
-**Why Y1 only for stratification:** Deceased patients receive NaN for Y2 (they cannot be readmitted). Including Y2 in stratification would create degenerate strata, so only Y1 is used.
+Splitting is at the **patient level** (`subject_id`) — all admissions of a patient are in the same split, preventing leakage from prior-visit features (F2, F3). Stratification uses Y1 only (Y2 is NaN for deceased patients and would create degenerate strata).
 
-Output: `data_splits.parquet` — columns: `subject_id`, `hadm_id`, `split`.
+**Label statistics:**
+- Y1 positive rate: 2.16% (11,801 deceased admissions)
+- Y2 positive rate (excl. deaths): 20.14% (107,617 readmitted)
 
 ---
 
 ## 4. Feature Set
 
-The input feature vector X covers 19 feature slots across two representation types:
+The design specifies **19 feature slots**: 1 structured vector + 18 embeddings (5 text + 13 lab groups), each embedding 768-dimensional.
 
-| ID | Feature | Source | Type | Representation | Visible at episode start |
-|----|---------|--------|------|----------------|--------------------------|
-| F1 | Demographics | `patients`, `admissions`, `omr`, `chartevents` | Numeric | 8-float vector | ✓ Always |
-| F2 | Diagnosis History (prior visits) | `diagnoses_icd`, `d_icd_diagnoses` | Coded text | 768-d mean-pool embedding | ✓ Always |
-| F3 | Discharge History (prior visits) | `note/discharge` | Free text | 768-d mean-pool embedding | ✓ Always |
-| F4 | Triage (current visit) | `triage`, `edstays` | Structured→text | 768-d mean-pool embedding | ✓ Always |
-| F5 | Chief Complaint (current visit) | `triage.chiefcomplaint` | Free text | 768-d mean-pool embedding | ✓ Always |
-| F6 | Labs — Blood Gas | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F7 | Labs — Blood Chemistry | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F8 | Labs — Blood Hematology | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F9 | Labs — Urine Chemistry | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F10 | Labs — Urine Hematology | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F11 | Labs — Other Body Fluid Chemistry | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F12 | Labs — Other Body Fluid Hematology | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F13 | Labs — Ascites | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F14 | Labs — Pleural | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F15 | Labs — CSF | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F16 | Labs — Bone Marrow | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F17 | Labs — Joint Fluid | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F18 | Labs — Stool | `labevents` | Structured→text | 768-d mean-pool embedding | ✗ Maskable |
-| F19 | Radiology Note (current visit) | `note/radiology` | Free text | 768-d mean-pool embedding | ✗ Maskable |
+| ID | Feature | Representation | MDP Visibility |
+|----|---------|----------------|----------------|
+| F1 | Demographics | 8-float vector | ✓ Always visible |
+| F2 | Diagnosis History (prior visits) | 768-d embedding | ✓ Always visible |
+| F3 | Discharge History (prior visits) | 768-d embedding | ✓ Always visible |
+| F4 | Triage (current visit) | 768-d embedding | ✓ Always visible |
+| F5 | Chief Complaint (current visit) | 768-d embedding | ✓ Always visible |
+| F6–F18 | Lab Results — **13 groups** (current visit) | 768-d embedding per group | ✗ Maskable |
+| F19 | Radiology Note (current visit) | 768-d embedding | ✗ Maskable |
 
-**F1–F5** are always visible to both the classifier and the MDP agent. **F6–F19** are maskable — the MDP agent selects which to unlock during an episode; each is an independent feature slot with its own projection layer in the neural network.
+F1–F5 are always available to both the classifier and MDP agent. F6–F19 are maskable — the MDP agent selects which to unlock per episode; each is an independent feature slot with its own projection layer.
+
+**Lab group design:** Groups are derived from unique `(fluid, category)` combinations in `d_labitems`. Fluids spanning multiple categories (Ascites, Pleural, Cerebrospinal Fluid, Joint Fluid, Bone Marrow, Stool) are merged into a single group per fluid, yielding 13 canonical groups. See `PREPROCESSING_DETAILED_DESIGN.md` for the full group table.
 
 ---
 
-## 5. Pipeline Architecture
+## 5. Pipeline Overview
 
-### Execution Order
+### Execution DAG
 
 ```
-                    ┌─────────────────────┐
-                    │   create_splits.py   │
-                    │  data_splits.parquet │
-                    └──────────┬──────────┘
-                               │  (all extract_* depend on this)
-              ┌────────────────┼────────────────────┐
-              │                │                    │
-              ▼                ▼                    ▼
-   extract_demographics   extract_labs       extract_y_data
-   extract_diag_history   (requires          y_labels.parquet
-   extract_discharge_     build_lab_panel_
-   history                config first)
-   extract_triage_and_
-   complaint
-   extract_radiology
-              │                │
-              └────────────────┘
-                      │
-                      ▼
-              ┌───────────────┐
-              │ embed_features │
-              │  (18 parquets) │
-              └───────┬───────┘
+                    ┌───────────────────────┐
+                    │   create_splits.py     │
+                    │   data_splits.parquet  │
+                    └──────────┬────────────┘
+                               │
+                    ┌──────────▼────────────┐
+                    │ build_lab_panel_       │
+                    │ config.py              │
+                    │ lab_panel_config.yaml  │
+                    └──────────┬────────────┘
+                               │
+          ┌────────────────────┼──────────────────────┐
+          │                    │                      │
+          ▼                    ▼                      ▼
+ extract_demographics    extract_labs          extract_y_data
+ extract_diag_history    extract_triage_       y_labels.parquet
+ extract_discharge_      and_complaint
+ history                 extract_radiology
+          │                    │
+          └────────────────────┘
+                     │
+                     ▼
+       ┌─────────────────────────────┐
+       │    embed_features.py         │
+       │    admission-slice batching  │
+       │                             │
+       │  Slice 0  (hadm 0–40k)      │
+       │  Slice 1  (hadm 40k–80k)    │
+       │  ...                         │
+       │  Slice 13 (hadm 520k–546k)  │
+       │                             │
+       │  Each slice: 2 GPUs         │
+       │  Each GPU: 20k admissions   │
+       └──────────────┬──────────────┘
                       │
                       ▼
               ┌───────────────────┐
@@ -147,490 +123,185 @@ The input feature vector X covers 19 feature slots across two representation typ
               └───────────────────┘
 ```
 
-**Rules:**
-- `create_splits.py` must run first
-- `build_lab_panel_config.py` must run before `extract_labs.py`
-- All `extract_*` modules are independent of each other and can run in parallel
-- `embed_features.py` requires all `extract_*` modules to have completed
-- `combine_dataset.py` requires `embed_features.py` and `extract_y_data.py`
+### Dependency Rules
 
-### Module Summary
+- `create_splits` → must run first
+- `build_lab_panel_config` → must run before any `extract_*`
+- All `extract_*` → independent of each other, can run in parallel
+- `embed_features` → requires all `extract_*` complete; runs as **7 sequential SLURM jobs**
+- `combine_dataset` → requires all embed slices complete
 
-| Step | Module | Output |
-|------|--------|--------|
-| 0 | `build_lab_panel_config.py` | `lab_panel_config.yaml` |
-| 1 | `create_splits.py` | `data_splits.parquet` |
-| 2 | `extract_demographics.py` | `demographics_features.parquet` |
-| 3 | `extract_diag_history.py` | `diag_history_features.parquet` |
-| 4 | `extract_discharge_history.py` | `discharge_history_features.parquet` |
-| 5 | `extract_triage_and_complaint.py` | `triage_features.parquet`, `chief_complaint_features.parquet` |
-| 6 | `extract_labs.py` | `labs_features.parquet` (long format) |
-| 7 | `extract_radiology.py` | `radiology_features.parquet` |
-| 8 | `extract_y_data.py` | `y_labels.parquet` |
-| 9 | `embed_features.py` | 18 embedding parquets |
-| 10 | `combine_dataset.py` | `final_cdss_dataset.parquet` |
+### Runtime (SLURM, L4 GPU, 64 GB RAM)
+
+| Phase | Jobs | Time per job | Total |
+|-------|------|-------------|-------|
+| Preprocessing (steps 0–8) | 1 | ~18 min | ~18 min |
+| Embedding (step 9, 14 slices) | 14 | ≤6 hrs | ≤84 hrs wall, runs sequentially (2 GPUs parallel within each job) |
+| Combine (step 10) | 1 | ~1 min | ~1 min |
 
 ---
 
-## 6. Module Reference
+## 6. Module Summary
 
-### `build_lab_panel_config.py`
+| Step | Module | Output | Notes |
+|------|--------|--------|-------|
+| 0 | `build_lab_panel_config.py` | `lab_panel_config.yaml` | Must run before extract_labs |
+| 1 | `create_splits.py` | `data_splits.parquet` | Patient-level, stratified, seed 42 |
+| 2 | `extract_demographics.py` | `demographics_features.parquet` | 8-float vector per admission |
+| 3 | `extract_diag_history.py` | `diag_history_features.parquet` | Prior visits only |
+| 4 | `extract_discharge_history.py` | `discharge_history_features.parquet` | Prior visits only |
+| 5 | `extract_triage_and_complaint.py` | `triage_features.parquet`, `chief_complaint_features.parquet` | ED visit linkage |
+| 6 | `extract_labs.py` | `labs_features.parquet` | Long format, 16.8M rows |
+| 7 | `extract_radiology.py` | `radiology_features.parquet` | Most recent note per admission |
+| 8 | `extract_y_data.py` | `y_labels.parquet` | Y1 + Y2 labels |
+| 9 | `embed_features.py` | 18 embedding parquets | 14 SLURM jobs × 2 GPUs × 20k admissions |
+| 10 | `combine_dataset.py` | `final_cdss_dataset.parquet` | Left-join all features |
 
-Reads `d_labitems`, groups items by `(fluid × category)`, and writes `lab_panel_config.yaml` mapping each of the 13 group names to a list of `itemid` integers. Artefact rows where `fluid` is in `["I", "Q", "fluid"]` are removed before grouping. Groups where a single fluid spans multiple categories (Ascites, Pleural, CSF, Bone Marrow, Joint Fluid, Stool) are merged into a single group keyed by fluid name.
-
-### `create_splits.py`
-
-Patient-level stratified 3-way split. Stratification variable: binary flag — does any admission for the patient have `hospital_expire_flag = 1`? Random seed 42. Output is one row per `hadm_id` with a `split` column.
-
-### `extract_demographics.py`
-
-Produces an 8-float vector per admission. Sources: `patients` (age, gender), `omr` (preferred height/weight/BMI), `chartevents` (fallback height/weight). Missingness flags created before imputation. Imputation statistics computed on train split only and saved to `imputation_stats.json`. Missing height/weight imputed by sampling from `N(mean, std)` per `(age_bin × gender)` stratum. BMI derived from imputed height/weight when absent, never imputed independently.
-
-### `extract_diag_history.py`
-
-Builds a structured text block of ICD diagnoses from all prior admissions (strictly before current `admittime`). Formatted with dated section headers and one `long_title` per line per visit. Empty string for first-time admissions.
-
-### `extract_discharge_history.py`
-
-Concatenates discharge notes from all prior admissions with dated headers. Text cleaning removes everything before the first `"Allergies:"` marker in each note. Empty string for first-time admissions.
-
-### `extract_triage_and_complaint.py`
-
-Extracts triage structured fields and chief complaint from the ED visit corresponding to the current admission. `hadm_id` is resolved via `edstays` (primary: `stay_id → hadm_id`) with a fallback to the closest admission by `intime` for ED visits not linked to an inpatient admission. Non-admitted ED visits are excluded.
-
-### `extract_labs.py`
-
-Streams `labevents` in chunks, filters to current admission window, formats each event as a timestamped text line. Output is long-format (one row per event) with a `lab_text_line` column. Used as input to `embed_features.py` for group-level embedding.
-
-### `extract_radiology.py`
-
-Selects the most recent radiology note within the current admission window. Text cleaning removes everything before the first `"EXAMINATION:"` marker. Empty string if no radiology notes exist for the admission.
-
-### `extract_y_data.py`
-
-Y1: `hospital_expire_flag` directly from `admissions`. Y2: 1 if any subsequent admission has `admittime` within 30 days of `dischtime`; NaN for patients with `hospital_expire_flag = 1`.
-
-### `embed_features.py`
-
-Embeds all 18 text features using Clinical_ModernBERT with mean pooling. For the 5 non-lab features, reads the corresponding text parquet directly. For each of the 13 lab groups, filters `labs_features.parquet` to the group's `itemid` list, concatenates text lines per admission chronologically, and embeds the resulting text. Admissions with no events in a given group receive a zero vector.
-
-### `combine_dataset.py`
-
-Starts from `data_splits.parquet` as the admission universe. Left-joins `y_labels.parquet`, `demographics_features.parquet`, and all `*.parquet` files discovered in `EMBEDDINGS_DIR`. The 13 lab group embedding parquets are joined as independent nullable columns alongside the 5 non-lab embeddings.
+Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`).
 
 ---
 
-## 7. Feature Extraction Detail
+## 7. Embedding Strategy
 
-### F1 — Demographics
+**Model:** `Simonlee711/Clinical_ModernBERT` — trained on PubMed, MIMIC-IV notes, and medical ontologies. 8,192-token context window, 768-d hidden size. Used as a **frozen feature extractor** (not fine-tuned).
 
-```
-Output: demographic_vec — [age, gender, height_cm, weight_kg, bmi,
-                           height_missing, weight_missing, bmi_missing]
-```
+**Pooling:** Mean pooling over all non-padding content tokens from the final hidden layer. Preferred over `[CLS]` because the model is not fine-tuned — mean pooling ensures every token contributes equally, which is critical for long clinical texts.
 
-**Age:** `anchor_age + (admit_year − anchor_year)` — corrects for the year shift in MIMIC-IV anonymisation.
+**Missing features:** Zero vector (768 floats). Lab groups with no events for an admission receive a zero vector, never null.
 
-**Gender:** `M = 1.0`, `F = 0.0`.
+**Performance:** Per-feature token length caps (64–4,096) prevent padding short texts to 8,192 tokens. Batch size auto-scales inversely with sequence length.
 
-**Height / Weight source priority:**
+**Multi-GPU within a job:** The slice's admissions are split evenly between 2 GPU workers (~20k each). Both workers run **in parallel** — each embeds all 18 features for its own admission half, writing to per-worker temporary parquets. The main process merges the per-worker parquets into the shared output parquets after both workers complete. LPT ordering within each worker (features sorted by estimated compute cost descending) ensures the most expensive features start first for better progress visibility. Each GPU worker loads its own model copy.
 
-| Priority | Source | Notes |
-|----------|--------|-------|
-| 1 | `omr` — `result_name` contains "Height"/"Weight" | `chartdate ≤ admittime` (leakage control). Inches → cm (×2.54). Lbs → kg (×0.453592). |
-| 2–5 | `chartevents` itemids (height: 226707, 226730; weight: 226512, 224639, 226531, 226846) | First value within admission window. Unit conversion per itemid. |
+**Admission-slice batching:** The full admission corpus is divided into slices based on `BERT_SLICE_SIZE_PER_GPU` (default: 20,000 admissions per GPU). With 2 GPUs, each slice covers 40,000 admissions, giving **14 slices** for 546,028 admissions. Each slice runs as a separate SLURM job (≤12h). Slices run sequentially and append their results into the same output parquets via `fastparquet` append mode. Adjusting `BERT_SLICE_SIZE_PER_GPU` is the only knob needed to fit different partition time limits.
 
-Plausibility filters: height 50–250 cm, weight 20–400 kg.
-
-**Imputation** (height and weight only):
-- Missingness flags set **before** imputation
-- Statistics: `N(mean, std)` per `(age_bin × gender)` stratum, computed on **train split only**
-- Saved to `imputation_stats.json`; applied identically to dev/test
-- Age bins: 18–29, 30–44, 45–64, 65–74, 75+
-- Fallback to global statistics if stratum absent from training data
-
-**BMI:** Use OMR value if present. Derive as `weight_kg / (height_cm / 100)²` if absent. Never imputed independently.
+**Resume:** Three levels — (1) slice-level: a completed slice is detected by row count and skipped; (2) feature-level: within a slice, completed feature-parquet segments are skipped; (3) record-level: within a feature in a slice, already-embedded rows are skipped via incremental checkpointing.
 
 ---
 
-### F2 — Diagnosis History
+## 8. Final Dataset
 
-```
-Output: diag_history_text — single string per admission
-Leakage control: prior admissions only (admittime < current admittime)
-```
+`final_cdss_dataset.parquet` — 546,028 rows × 24 columns:
 
-Text format:
-```
-Past Diagnoses:
+| Group | Count | Type |
+|-------|-------|------|
+| Metadata (`subject_id`, `hadm_id`, `split`) | 3 | int / str |
+| Labels (`y1_mortality`, `y2_readmission`) | 2 | int / float |
+| Demographics (`demographic_vec`) | 1 | float[8] |
+| Text embeddings (F2–F5, F19) | 5 | float[768] each |
+| Lab group embeddings (F6–F18, 13 groups) | 13 | float[768] each |
 
-Visit (2018-03-12):
-Chronic kidney disease, stage 3
-Hypertension
-
-Visit (2019-07-24):
-Acute kidney injury
-```
+Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardcoded list.
 
 ---
 
-### F3 — Discharge History
+## 9. Design Principles
 
-```
-Output: discharge_history_text — single string per admission
-Leakage control: prior admissions only (admittime < current admittime)
-Cleaning: remove everything before first "Allergies:" marker in each note
-```
+**No target leakage** — prior-visit features use only admissions strictly before current `admittime`. Lab events restricted to current admission window. Imputation statistics computed on train split only, persisted and applied identically to dev/test.
 
-Text format:
-```
-Prior Discharge Summary (2018-03-12):
-Allergies: Penicillin
-[clinical note body...]
+**No hardcoding** — all paths, model names, split ratios, batch sizes, and thresholds in `config/preprocessing.yaml`. Lab groups derived dynamically from `d_labitems`.
 
-Prior Discharge Summary (2019-07-24):
-Allergies: None known
-[clinical note body...]
-```
+**Reproducibility** — random seed 42. Imputation stats and source MD5 hashes persisted. Incremental runs skip modules whose source hashes match and outputs exist.
+
+**Memory safety** — `labevents` and `chartevents` streamed in 500k-row chunks. 64 GB RAM required for both pipeline and embed SLURM jobs.
+
+**Time-window safety** — embedding is split into admission slices of ≤80k records (≤40k per GPU) to fit within the 12-hour SLURM partition limit. Each slice is a self-contained job that appends to the shared output parquets.
+
+**Graceful degradation** — missing OMR/chartevents falls back gracefully. Missing CUDA falls back to CPU. Missing lab events → zero vector. Missing `lab_panel_config.yaml` → lab embeddings skipped with warning.
 
 ---
 
-### F4 — Triage
-
-```
-Output: triage_text — single string per admission
-```
-
-Template:
-```
-Triage assessment: temperature {T}°C, heart rate {HR} bpm,
-respiratory rate {RR} breaths/min, O2 saturation {O2}%,
-blood pressure {SBP}/{DBP} mmHg, pain score {pain}/10, acuity level {acuity}.
-```
-
-Missing fields rendered as `"N/A"`.
-
-**`hadm_id` resolution:** Primary via `edstays.stay_id → hadm_id`. Fallback via closest `admittime ≥ intime` for same `subject_id`. Non-admitted ED visits excluded.
-
----
-
-### F5 — Chief Complaint
-
-```
-Output: chief_complaint_text — raw text string per admission
-Primary source: triage.chiefcomplaint
-Fallback: chartevents itemid = 223112
-No cleaning or templating applied.
-```
-
----
-
-### F6–F18 — Laboratory Results (13 independent groups)
-
-```
-Output: labs_features.parquet — long format (one row per lab event)
-Leakage control: current admission only, within LAB_ADMISSION_WINDOW
-```
-
-**Lab groups** (derived from `d_labitems` fluid × category, stored in `lab_panel_config.yaml`):
-
-| Group name | Fluid | Category |
-|------------|-------|----------|
-| `blood_gas` | Blood | Blood Gas |
-| `blood_chemistry` | Blood | Chemistry |
-| `blood_hematology` | Blood | Hematology |
-| `urine_chemistry` | Urine | Chemistry |
-| `urine_hematology` | Urine | Hematology |
-| `other_body_fluid_chemistry` | Other Body Fluid | Chemistry |
-| `other_body_fluid_hematology` | Other Body Fluid | Hematology |
-| `ascites` | Ascites | Chemistry + Hematology |
-| `pleural` | Pleural | Chemistry + Hematology |
-| `csf` | Cerebrospinal Fluid | Chemistry + Hematology |
-| `bone_marrow` | Bone Marrow | Hematology |
-| `joint_fluid` | Joint Fluid | Blood Gas + Chemistry + Hematology |
-| `stool` | Stool | Chemistry + Hematology |
-
-**Admission window:** Configurable via `LAB_ADMISSION_WINDOW` — integer hours (e.g. `24`) or `"full"` for entire admission. Default: 24 hours.
-
-**Text line format per event:**
-```
-[HH:MM] {label}: {value} {unit} (ref: lower-upper) [ABNORMAL]
-```
-
-- `[HH:MM]` = elapsed time since `admittime` (not absolute clock time)
-- `valuenum` formatted to 2 dp when available; text `value` field otherwise
-- `(ref: lower-upper)` omitted when either bound is null
-- `[ABNORMAL]` appended when `flag == "abnormal"` OR when `valuenum` falls outside `[ref_range_lower, ref_range_upper]`
-
-Example (`blood_chemistry` group):
-```
-[00:14] Glucose: 8.20 mmol/L [ABNORMAL]
-[00:14] Sodium: 138.00 mEq/L
-[00:14] Potassium: 6.10 mEq/L [ABNORMAL]
-[08:32] Creatinine: 1.80 mg/dL [ABNORMAL]
-```
-
----
-
-### F19 — Radiology
-
-```
-Output: radiology_text — single string per admission
-Selection: most recent note within admission window
-Cleaning: remove everything before first "EXAMINATION:" marker
-```
-
----
-
-## 8. Embedding Architecture
-
-### Model
-
-| Property | Value |
-|----------|-------|
-| Model | `Simonlee711/Clinical_ModernBERT` |
-| Pre-training | PubMed abstracts, MIMIC-IV clinical notes, medical ontologies (ICD codes) |
-| Context window | 8,192 tokens (RoPE positional encoding + Flash Attention) |
-| Hidden size | 768 |
-| Config key | `BERT_MODEL_NAME` |
-
-### Pooling method: Mean pooling
-
-All embeddings use **mean pooling** over the final hidden states of all non-padding content tokens:
-
-```
-token hidden states (final layer):
-  t₁    t₂    t₃   ...   tₙ   [PAD] [PAD]
-   │     │     │           │
-   └─────┴─────┴─────...───┘
-              mean
-               │
-               ▼
-         768-d embedding
-```
-
-Mean pooling is used because Clinical_ModernBERT is deployed as a **frozen feature extractor** — not fine-tuned end-to-end on the classification task. In this regime, the `[CLS]` token does not reliably encode full-sequence semantics; mean pooling ensures every content token contributes equally to the final vector. This is especially important for long clinical texts: a multi-visit diagnosis history, a discharge note with 600+ tokens, or a lab timeline with 40+ measurements.
-
-**Empty / missing features:** Zero vector of dimension 768.
-
-### Embedding inputs per feature
-
-| Feature | Input to embedding model |
-|---------|--------------------------|
-| F2 Diagnosis history | Full structured text block (all prior visits concatenated) |
-| F3 Discharge history | Full concatenated prior discharge notes |
-| F4 Triage | Natural-language triage template string |
-| F5 Chief complaint | Raw chief complaint text |
-| F6–F18 Lab groups | Text lines for the group's events, concatenated chronologically, one text per admission per group |
-| F19 Radiology | Cleaned radiology note text |
-
-### Configuration
-
-| Key | Default | Description |
-|-----|---------|-------------|
-| `BERT_MODEL_NAME` | `Simonlee711/Clinical_ModernBERT` | HuggingFace model identifier |
-| `BERT_MAX_LENGTH` | `8192` | Maximum token length; inputs truncated if exceeded |
-| `BERT_BATCH_SIZE` | `32` | Samples per inference call |
-| `BERT_DEVICE` | `cuda` | Falls back to CPU automatically if CUDA unavailable |
-
----
-
-## 9. Final Dataset Assembly
-
-`combine_dataset.py` builds the final flat dataset by left-joining all features onto the admission universe from `data_splits.parquet`:
-
-```
-data_splits.parquet          (admission universe — subject_id, hadm_id, split)
-        │
-        ├── LEFT JOIN y_labels.parquet
-        │       y1_mortality, y2_readmission
-        │
-        ├── LEFT JOIN demographics_features.parquet
-        │       demographic_vec  (8 floats)
-        │
-        ├── LEFT JOIN diag_history_embeddings.parquet
-        │       diag_history_embedding  (768 floats)
-        │
-        ├── LEFT JOIN discharge_history_embeddings.parquet
-        │       discharge_history_embedding  (768 floats)
-        │
-        ├── LEFT JOIN triage_embeddings.parquet
-        │       triage_embedding  (768 floats)
-        │
-        ├── LEFT JOIN chief_complaint_embeddings.parquet
-        │       chief_complaint_embedding  (768 floats)
-        │
-        ├── LEFT JOIN lab_blood_gas_embeddings.parquet
-        ├── LEFT JOIN lab_blood_chemistry_embeddings.parquet
-        ├── LEFT JOIN lab_blood_hematology_embeddings.parquet
-        ├── LEFT JOIN lab_urine_chemistry_embeddings.parquet
-        ├── LEFT JOIN lab_urine_hematology_embeddings.parquet
-        ├── LEFT JOIN lab_other_body_fluid_chemistry_embeddings.parquet
-        ├── LEFT JOIN lab_other_body_fluid_hematology_embeddings.parquet
-        ├── LEFT JOIN lab_ascites_embeddings.parquet
-        ├── LEFT JOIN lab_pleural_embeddings.parquet
-        ├── LEFT JOIN lab_csf_embeddings.parquet
-        ├── LEFT JOIN lab_bone_marrow_embeddings.parquet
-        ├── LEFT JOIN lab_joint_fluid_embeddings.parquet
-        ├── LEFT JOIN lab_stool_embeddings.parquet
-        │       lab_{group}_embedding  (768 floats each, zero vector if no events)
-        │
-        └── LEFT JOIN radiology_embeddings.parquet
-                radiology_embedding  (768 floats)
-```
-
-The 13 lab group embeddings are discovered dynamically by scanning `EMBEDDINGS_DIR` for `*.parquet` files — no hardcoded list. All left joins mean admissions missing a non-lab feature receive null for that column. Lab group embedding columns are always a 768-float array — admissions with no events in a given group receive a zero vector, consistent with the empty-text convention used throughout the pipeline.
-
-**Intentionally excluded from final dataset:**
-- `labs_features.parquet` — superseded by the 13 per-group embedding parquets
-- Raw text parquets — superseded by embedding parquets
-
-**Final schema summary:**
-
-| Column | Type | Source |
-|--------|------|--------|
-| `subject_id` | int | `data_splits.parquet` |
-| `hadm_id` | int | `data_splits.parquet` |
-| `split` | str | `data_splits.parquet` |
-| `y1_mortality` | int | `y_labels.parquet` |
-| `y2_readmission` | float (NaN for deceased) | `y_labels.parquet` |
-| `demographic_vec` | float[8] | `demographics_features.parquet` |
-| `diag_history_embedding` | float[768] | `diag_history_embeddings.parquet` |
-| `discharge_history_embedding` | float[768] | `discharge_history_embeddings.parquet` |
-| `triage_embedding` | float[768] | `triage_embeddings.parquet` |
-| `chief_complaint_embedding` | float[768] | `chief_complaint_embeddings.parquet` |
-| `lab_{group}_embedding` ×13 | float[768] | `lab_{group}_embeddings.parquet` |
-| `radiology_embedding` | float[768] | `radiology_embeddings.parquet` |
-
----
-
-## 10. Configuration Reference
-
-All configuration is centralised in `preprocessing.yaml`. No module reads this file directly — `run_pipeline.py` loads it and passes the resulting dict to each module's `run()` function.
-
-| Key | Type | Default | Description |
-|-----|------|---------|-------------|
-| `MIMIC_DATA_DIR` | str | — | Root of the MIMIC-IV download (`hosp/`, `icu/` subdirs) |
-| `MIMIC_NOTE_DIR` | str | `MIMIC_DATA_DIR` | Root of `mimic-iv-note` module (`note/` subdir) |
-| `MIMIC_ED_DIR` | str | `MIMIC_DATA_DIR` | Root of `mimic-iv-ed` module (`ed/` subdir) |
-| `SPLIT_TRAIN` | float | `0.80` | Fraction of patients for training |
-| `SPLIT_DEV` | float | `0.10` | Fraction of patients for development |
-| `SPLIT_TEST` | float | `0.10` | Fraction of patients for test |
-| `BERT_MODEL_NAME` | str | `Simonlee711/Clinical_ModernBERT` | HuggingFace model identifier |
-| `BERT_MAX_LENGTH` | int | `8192` | Maximum tokeniser length |
-| `BERT_BATCH_SIZE` | int | `32` | Embedding batch size |
-| `BERT_DEVICE` | str | `cuda` | Inference device; falls back to CPU if unavailable |
-| `LAB_ADMISSION_WINDOW` | int or `"full"` | `24` | Hours of lab events to include from `admittime`; `"full"` = entire admission |
-| `HADM_LINKAGE_STRATEGY` | str | `"drop"` | How to handle null `hadm_id` records: `"drop"` or `"link"` |
-| `HADM_LINKAGE_TOLERANCE_HOURS` | int | `1` | Tolerance in hours for time-window linkage (only used when strategy is `"link"`) |
-| `FEATURES_DIR` | str | `data/preprocessing/features` | Output directory for raw feature parquets |
-| `EMBEDDINGS_DIR` | str | `data/preprocessing/features/embeddings` | Output directory for embedding parquets |
-| `CLASSIFICATIONS_DIR` | str | `data/preprocessing/classifications` | Output directory for labels and final dataset |
-| `HASH_REGISTRY_PATH` | str | `data/preprocessing/source_hashes.json` | Path to MD5 hash registry for incremental run detection |
-| `LAB_PANEL_CONFIG_PATH` | str | `config/lab_panel_config.yaml` | Path to generated lab group config (written by Step 0) |
-
----
-
-## 11. Design Principles
-
-### No target leakage
-
-| Rule | Enforcement |
-|------|-------------|
-| Prior-visit features (F2, F3) use only admissions strictly before current `admittime` | Temporal filter in `extract_diag_history.py`, `extract_discharge_history.py` |
-| Lab events restricted to current admission window | `admittime ≤ charttime ≤ admittime + LAB_ADMISSION_WINDOW` |
-| OMR vitals restricted to `chartdate ≤ admittime` | Prevents current-admission measurements entering F1 |
-| Imputation statistics computed on train split only | Saved to `imputation_stats.json`; applied identically to dev/test |
-| No normalisation before split | Normalisation deferred to model training |
-
-### No hardcoding
-
-All file paths, model names, split ratios, batch sizes, window sizes, and thresholds are read from `preprocessing.yaml`. No pipeline module contains a hardcoded path or tunable parameter.
-
-### Reproducibility
-
-- Random seed 42 fixed for all train/dev/test splits
-- Imputation statistics persisted to `imputation_stats.json`
-- Source file MD5 hashes persisted to `source_hashes.json` after each successful module run
-- Incremental runs: a module is skipped if all source hashes match and all output files exist; hashes are written only after successful completion, so crashes leave no stale state
-
-### Memory safety
-
-- `labevents` and `chartevents` are streamed in chunks (500,000 rows default)
-- Post-chunk merges are performed in memory; minimum 32 GB RAM recommended
-- Chunk size is configurable per module (not a global config key — set in module source)
-
-### Graceful degradation
-
-| Missing resource | Behaviour |
-|-----------------|-----------|
-| `omr` table | Warning logged; falls back to `chartevents` only for height/weight |
-| `chartevents` table | Warning logged; demographics module completes with higher missingness |
-| CUDA unavailable | Warning logged; automatic fallback to CPU in `embed_features.py` |
-| Imputation stratum absent from train data | Falls back to global training statistics |
-| No lab events for an admission in a given group | Empty string → zero vector |
-
----
-
-## 12. Directory Structure
+## 10. Directory Structure
 
 ```
 HRS/
 ├── config/
-│   ├── preprocessing.yaml                  # Central configuration
-│   └── lab_panel_config.yaml               # Generated by build_lab_panel_config.py (Step 0)
-├── src/
-│   └── preprocessing/
-│       ├── run_pipeline.py                     # Orchestrator CLI
-│       ├── inspect_data.py                     # Read-only diagnostic utility
-│       ├── preprocessing_utils.py              # Shared utilities (hashing, CSV loading)
-│       ├── build_lab_panel_config.py           # Step 0 — generates config/lab_panel_config.yaml
-│       ├── create_splits.py                    # Step 1
-│       ├── extract_demographics.py             # Step 2
-│       ├── extract_diag_history.py             # Step 3
-│       ├── extract_discharge_history.py        # Step 4
-│       ├── extract_triage_and_complaint.py     # Step 5
-│       ├── extract_labs.py                     # Step 6
-│       ├── extract_radiology.py                # Step 7
-│       ├── extract_y_data.py                   # Step 8
-│       ├── embed_features.py                   # Step 9
-│       ├── combine_dataset.py                  # Step 10
-│       └── build_lab_text_lines.py             # Helper — called by extract_labs.py
-│
-└── data/
-    └── preprocessing/                              # Generated artefacts (git-ignored)
-        ├── data_splits.parquet
+│   └── preprocessing.yaml              # All configuration — single source of truth
+├── src/preprocessing/
+│   ├── pipeline_job.sh                 # SLURM: preprocessing (no GPU, 64G)
+│   ├── embed_job.sh                    # SLURM: one embed slice (2× L4 GPU, 64G)
+│   ├── combine_job.sh                  # SLURM: combine (no GPU, 32G)
+│   ├── submit_all.sh                   # Auto-submit with state detection
+│   ├── run_pipeline.py                 # Orchestrator CLI
+│   ├── check_embed_status.py           # State detection for submit_all.sh
+│   ├── preprocessing_utils.py          # Shared utilities
+│   ├── build_lab_panel_config.py       # Step 0
+│   ├── create_splits.py                # Step 1
+│   ├── extract_demographics.py         # Step 2
+│   ├── extract_diag_history.py         # Step 3
+│   ├── extract_discharge_history.py    # Step 4
+│   ├── extract_triage_and_complaint.py # Step 5
+│   ├── extract_labs.py                 # Step 6
+│   ├── extract_radiology.py            # Step 7
+│   ├── extract_y_data.py               # Step 8
+│   ├── embed_features.py               # Step 9 — accepts --slice-index
+│   ├── combine_dataset.py              # Step 10
+│   └── build_lab_text_lines.py         # Helper for extract_labs
+└── data/preprocessing/                 # Generated artefacts (git-ignored)
+    ├── data_splits.parquet
+    ├── source_hashes.json
+    ├── features/
+    │   ├── [feature parquets ×7]
+    │   └── embeddings/
+    │       └── [embedding parquets ×18]
+    └── classifications/
+        ├── y_labels.parquet
+        ├── final_cdss_dataset.parquet
+        ├── lab_panel_config.yaml
         ├── imputation_stats.json
-        ├── source_hashes.json
-        ├── hadm_linkage_stats.json
-        ├── features/
-        │   ├── demographics_features.parquet
-        │   ├── diag_history_features.parquet
-        │   ├── discharge_history_features.parquet
-        │   ├── triage_features.parquet
-        │   ├── chief_complaint_features.parquet
-        │   ├── labs_features.parquet           # Long format — input to embed_features
-        │   ├── radiology_features.parquet
-        │   └── embeddings/
-        │       ├── diag_history_embeddings.parquet
-        │       ├── discharge_history_embeddings.parquet
-        │       ├── triage_embeddings.parquet
-        │       ├── chief_complaint_embeddings.parquet
-        │       ├── radiology_embeddings.parquet
-        │       ├── lab_blood_gas_embeddings.parquet
-        │       ├── lab_blood_chemistry_embeddings.parquet
-        │       ├── lab_blood_hematology_embeddings.parquet
-        │       ├── lab_urine_chemistry_embeddings.parquet
-        │       ├── lab_urine_hematology_embeddings.parquet
-        │       ├── lab_other_body_fluid_chemistry_embeddings.parquet
-        │       ├── lab_other_body_fluid_hematology_embeddings.parquet
-        │       ├── lab_ascites_embeddings.parquet
-        │       ├── lab_pleural_embeddings.parquet
-        │       ├── lab_csf_embeddings.parquet
-        │       ├── lab_bone_marrow_embeddings.parquet
-        │       ├── lab_joint_fluid_embeddings.parquet
-        │       └── lab_stool_embeddings.parquet
-        └── classifications/
-            ├── y_labels.parquet
-            └── final_cdss_dataset.parquet
+        └── hadm_linkage_stats.json
 ```
+
+---
+
+## 11. SLURM Execution
+
+**Cluster:** BIU SLURM — `slurm-login1/2/3.lnx.biu.ac.il`  
+**Partitions:**
+- `L4-12h` — NVIDIA L4 (sm_89), **12-hour** limit, max 2 GPUs per user
+- `L4-4h` — same hardware, **4-hour** limit (shorter queue wait)
+
+### Capacity Sizing
+
+136,507 admissions failed to complete in 12 hours on 2 GPUs. The safe per-GPU limit is therefore ~20,000 admissions, giving ~40,000 per 2-GPU SLURM job. This is controlled by `BERT_SLICE_SIZE_PER_GPU` in config — the number of slices is computed automatically at runtime.
+
+| Total admissions | Per-GPU limit (`BERT_SLICE_SIZE_PER_GPU`) | Per-job (2 GPUs) | Jobs required |
+|-----------------|------------------------------------------|-----------------|--------------|
+| 546,028 | 20,000 | 40,000 | **14** |
+
+### Scripts
+
+All four scripts live in `src/preprocessing/` alongside the Python modules they invoke.
+
+| Script | GPUs | RAM | Purpose |
+|--------|------|-----|---------|
+| `pipeline_job.sh` | 0 | 64G | Steps 0–8 (CPU only) |
+| `embed_job.sh` | 2 | 64G | One admission slice — takes `--slice-index N` (passed by `submit_all.sh`) |
+| `combine_job.sh` | 0 | 32G | Step 10 — combine only (CPU) |
+| `submit_all.sh` | — | — | Detects state, submits all pending slices chained via `--dependency=afterok` |
+
+### Auto-submit State Detection and Job Chaining
+
+```bash
+cd ~/Python/HRS
+bash src/preprocessing/submit_all.sh
+```
+
+`check_embed_status.py` scans embedding parquets for total row count, determines which slices are complete, and exits with:
+- **2** → preprocessing incomplete → submits pipeline → 7 embed slices → combine
+- **1** → embedding incomplete → submits remaining slice jobs → combine
+- **0** → all embeddings complete → submits combine only
+
+The 14 embed slice jobs are submitted as a dependency chain:
+
+```
+embed_slice_0
+    └──(afterok)── embed_slice_1
+                       └──(afterok)── embed_slice_2
+                                          └──(afterok)── ... embed_slice_13
+                                                                   └──(afterok)── combine
+```
+
+Re-running `submit_all.sh` is always safe. Each slice job detects its already-completed rows via record-level resume and skips them, so a re-submitted slice only processes what remains.
+
+> See `PREPROCESSING_DETAILED_DESIGN.md` for full per-module implementation details, embedding internals, admission-slice batching design, and configuration reference.

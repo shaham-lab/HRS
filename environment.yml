@@ -21,6 +21,7 @@ dependencies:
   - ipywidgets
   - ipykernel
   - tqdm
+  - fastparquet
   - pip
   - pip:
     - openai==2.9.0
@@ -32,5 +33,6 @@ dependencies:
     - torchvision
     - transformers
     - seaborn
+    - fastparquet
 
 
