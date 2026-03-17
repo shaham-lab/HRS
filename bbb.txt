@@ -1,5 +1,5 @@
 pyyaml
-pandas==2.3.3
+pandas>=2.2.0,<2.3.0
 protobuf
 Flask==3.1.2
 gunicorn==23.0.0
