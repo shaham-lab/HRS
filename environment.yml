@@ -3,9 +3,10 @@ channels:
   - conda-forge
   - defaults
 dependencies:
-  - python=3.12
+  - python=3.13
   - pyyaml
-  - pandas>=2.2.0,<2.3.0
+#  - pandas>=2.2.0,<2.3.0
+  - pandas
   - protobuf
   - flask=3.1.2
   #- gunicorn=23.0.0
