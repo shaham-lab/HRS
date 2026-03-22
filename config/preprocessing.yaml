@@ -47,7 +47,7 @@ BERT_CHECKPOINT_INTERVAL: 10000
 # "link": attempt to assign hadm_id by matching charttime against admission
 #         windows within HADM_LINKAGE_TOLERANCE_HOURS hours.
 HADM_LINKAGE_STRATEGY: "drop"
-HADM_LINKAGE_TOLERANCE_HOURS: 1
+HADM_LINKAGE_TOLERANCE_HOURS: 2
 
 # Lab event admission window.
 # Integer: include only lab events within this many hours of admittime
