@@ -82,6 +82,7 @@ _MAX_LENGTH_CAP: dict[str, int] = {
     # lab groups: capped at _LAB_MAX_LENGTH, applied in _worker
 }
 _LAB_MAX_LENGTH = 2048
+_MICRO_MAX_LENGTH = 512
 _REFERENCE_LENGTH = 512   # batch size is calibrated for this sequence length
 
 
@@ -307,20 +308,70 @@ def _build_lab_feature_tasks(
     return tasks
 
 
+def _build_micro_feature_tasks(
+    config: dict,
+    micro_panel_names: list[str],
+    splits_df,    # pd.DataFrame — already filtered to the current slice
+) -> list[dict]:
+    """Build feature task dicts for the 37 micro panel features."""
+    features_dir = str(config["FEATURES_DIR"])
+    embeddings_dir = str(config["EMBEDDINGS_DIR"])
+    tasks = []
+
+    for panel_name in micro_panel_names:
+        input_path = os.path.join(features_dir, f"micro_{panel_name}.parquet")
+        embedding_col = f"micro_{panel_name}_embedding"
+        output_path = os.path.join(embeddings_dir, f"micro_{panel_name}_embeddings.parquet")
+
+        if not os.path.exists(input_path):
+            logger.warning("Micro panel parquet not found, skipping: %s", input_path)
+            continue
+
+        df = pd.read_parquet(input_path)
+        if "text" not in df.columns:
+            logger.warning("Column 'text' not found in %s, skipping.", input_path)
+            continue
+
+        df = splits_df.merge(
+            df[["subject_id", "hadm_id", "text"]],
+            on=["subject_id", "hadm_id"],
+            how="left",
+        )
+        df["text"] = df["text"].fillna("")
+
+        n_with_events = int((df["text"] != "").sum())
+        logger.info(
+            "  micro_%s: %d admissions (%d with events, %d zero vectors)",
+            panel_name, len(df), n_with_events, len(df) - n_with_events,
+        )
+        tasks.append({
+            "kind":          "micro",
+            "text_col":      "text",
+            "output_path":   output_path,
+            "embedding_col": embedding_col,
+            "texts":         df["text"].tolist(),
+            "subject_hadm":  df[["subject_id", "hadm_id"]].copy().reset_index(drop=True),
+        })
+
+    return tasks
+
+
 def _build_feature_tasks(
     config: dict,
     lab_panel_config: dict,
-    labs_df,      # pd.DataFrame | None
-    splits_df,    # pd.DataFrame — already filtered to the current slice
+    labs_df,            # pd.DataFrame | None
+    micro_panel_names: list[str],
+    splits_df,          # pd.DataFrame — already filtered to the current slice
 ) -> list[dict]:
     """
-    Build the full list of feature task dicts (up to 18).
+    Build the full list of feature task dicts (up to 55).
     Loads all input text on the main process once, filtered to splits_df rows.
     Each dict contains everything a worker needs to embed one feature.
     """
     text_tasks = _build_text_feature_tasks(config, splits_df)
     lab_tasks = _build_lab_feature_tasks(config, lab_panel_config, labs_df, splits_df)
-    return text_tasks + lab_tasks
+    micro_tasks = _build_micro_feature_tasks(config, micro_panel_names, splits_df)
+    return text_tasks + lab_tasks + micro_tasks
 
 
 def _worker_load_model(
@@ -360,6 +411,8 @@ def _worker_compute_effective_params(
     """Return (effective_max_length, effective_batch_size) for a feature task."""
     if task["kind"] == "lab":
         effective_max_length = min(max_length, _LAB_MAX_LENGTH)
+    elif task["kind"] == "micro":
+        effective_max_length = min(max_length, _MICRO_MAX_LENGTH)
     else:
         effective_max_length = min(
             max_length,
@@ -821,17 +874,43 @@ def _load_lab_inputs(config: dict, slice_hadm_ids: set) -> tuple[dict, "pd.DataF
     return lab_panel_config, labs_df
 
 
+def _load_micro_inputs(config: dict, slice_hadm_ids: set) -> list[str]:
+    """Load micro panel config and return list of available panel names.
+
+    Returns list of panel names that have parquets in FEATURES_DIR.
+    """
+    import yaml  # type: ignore
+
+    classifications_dir = str(config["CLASSIFICATIONS_DIR"])
+    features_dir = str(config["FEATURES_DIR"])
+    micro_panel_config_path = os.path.join(classifications_dir, "micro_panel_config.yaml")
+
+    if not os.path.exists(micro_panel_config_path):
+        logger.warning("micro_panel_config.yaml not found — micro embeddings skipped.")
+        return []
+
+    with open(micro_panel_config_path, encoding="utf-8") as fh:
+        micro_cfg = yaml.safe_load(fh)
+
+    panels = list((micro_cfg or {}).get("panels", {}).keys())
+    available = [p for p in panels
+                 if os.path.exists(os.path.join(features_dir, f"micro_{p}.parquet"))]
+    logger.info("Micro panels: %d configured, %d with parquet files", len(panels), len(available))
+    return available
+
+
 def _prepare_feature_tasks(
     config: dict,
     lab_panel_config: dict,
     labs_df,
+    micro_panel_names: list[str],
     splits_df,
     n_gpus: int,
     resolved_slice_index: int,
 ) -> list[dict]:
     """Build feature tasks and annotate each with max_length for cost scheduling."""
     logger.info("Building feature task list for slice %d…", resolved_slice_index)
-    all_tasks = _build_feature_tasks(config, lab_panel_config, labs_df, splits_df)
+    all_tasks = _build_feature_tasks(config, lab_panel_config, labs_df, micro_panel_names, splits_df)
 
     logger.info(
         "Pipeline plan — %d feature(s) to embed across %d GPU(s):",
@@ -844,6 +923,8 @@ def _prepare_feature_tasks(
     for task in all_tasks:
         if task["kind"] == "lab":
             task["max_length"] = min(global_max_length, _LAB_MAX_LENGTH)
+        elif task["kind"] == "micro":
+            task["max_length"] = min(global_max_length, _MICRO_MAX_LENGTH)
         else:
             task["max_length"] = min(
                 global_max_length,
@@ -1095,9 +1176,12 @@ def run(config: dict, slice_index: int | None = None) -> None:
     # Load lab panel config and lab data
     lab_panel_config, labs_df = _load_lab_inputs(config, slice_hadm_ids)
 
+    # Load micro panel config and get available panel names
+    micro_panel_names = _load_micro_inputs(config, slice_hadm_ids)
+
     # Build feature tasks and annotate with max_length
     all_tasks = _prepare_feature_tasks(
-        config, lab_panel_config, labs_df, splits_df, n_gpus, resolved_slice_index
+        config, lab_panel_config, labs_df, micro_panel_names, splits_df, n_gpus, resolved_slice_index
     )
 
     # Partition admissions and tasks across GPUs

@@ -57,6 +57,25 @@ HADM_LINKAGE_TOLERANCE_HOURS: 1
 # Default: 24 (first 24 hours of admission).
 LAB_ADMISSION_WINDOW: 24
 
+# Microbiology event admission window.
+# Integer: include only events within this many hours of admittime
+#   (admittime <= charttime <= admittime + MICRO_WINDOW_HOURS hours).
+# "full_admission": include all events within the full admission window.
+# Default: 72 (first 72 hours of admission).
+MICRO_WINDOW_HOURS: 72
+
+# Strategy for handling microbiology records with null hadm_id.
+# "drop" (default): exclude records with null hadm_id.
+# "link": attempt time-window linkage against admissions.
+MICRO_NULL_HADM_STRATEGY: "drop"
+MICRO_LINK_TOLERANCE_HOURS: 2
+
+# Comment inclusion and cleaning settings for microbiology panels.
+# Set to false to exclude comments entirely (not recommended — see docs).
+MICRO_INCLUDE_COMMENTS: true
+MICRO_COMMENT_MAX_SENTENCES: 2
+MICRO_COMMENT_MAX_CHARS: 200
+
 # Output directory roots (relative to repository root)
 PREPROCESSING_DIR: "data/preprocessing"
 FEATURES_DIR: "data/preprocessing/features"
