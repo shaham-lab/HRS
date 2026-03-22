@@ -340,6 +340,20 @@ Produces `y_labels.parquet` with Y1 and Y2 per admission.
 
 **Y2:** For each admission where Y1 = 0, check whether any subsequent admission for the same `subject_id` has `admittime ≤ dischtime + 30 days`. Y2 = 1 if yes, 0 if no. **Y2 = NaN for all admissions where Y1 = 1** (deceased patients cannot be readmitted).
 
+**Null `dischtime` handling:** Surviving admissions (Y1=0) with null `dischtime` cannot have a valid Y2 computed. These are identified, logged with count and percentage per split, and excluded from the output entirely — they are not assigned NaN. In MIMIC-IV v3.1 no such records exist (verified by EDA), but the exclusion step is retained as a defensive check against future data versions.
+
+**Required assertions** — both must pass before writing output:
+
+```python
+assert df.loc[df['y1_mortality'] == 1, 'y2_readmission'].isna().all(), \
+    "Deceased patients must have Y2=NaN"
+
+assert df.loc[df['y1_mortality'] == 0, 'y2_readmission'].notna().all(), \
+    "Surviving patients must have a valid Y2 — check dischtime upstream"
+```
+
+The second assertion enforces that no surviving patient has a missing Y2. A surviving patient with missing Y2 is a data quality error, not a deceased patient, and must not be silently absorbed into the NaN masking.
+
 ---
 
 ### `embed_features.py`
