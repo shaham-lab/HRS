@@ -19,7 +19,7 @@ logger = logging.getLogger(__name__)
 _INTERP_PRIORITY = {"R": 0, "S": 1, "I": 2}
 
 
-def clean_comment(text, cleaning_config: dict) -> "str | None":
+def clean_comment(text, cleaning_config: dict) -> str | None:
     """Clean a microbiology comment string.
 
     Returns a cleaned string or None if the comment should be discarded.

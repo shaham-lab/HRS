@@ -364,7 +364,7 @@ def _build_feature_tasks(
     splits_df,          # pd.DataFrame — already filtered to the current slice
 ) -> list[dict]:
     """
-    Build the full list of feature task dicts (up to 55).
+    Build the full list of feature task dicts (5 text + up to 13 lab + up to 37 micro = up to 55).
     Loads all input text on the main process once, filtered to splits_df rows.
     Each dict contains everything a worker needs to embed one feature.
     """
