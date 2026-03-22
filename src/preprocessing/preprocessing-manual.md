@@ -110,7 +110,11 @@ HRS/
 │       ├── extract_y_data.py
 │       ├── embed_features.py
 │       ├── combine_dataset.py
-│       └── preprocessing_utils.py
+│       ├── preprocessing_utils.py
+│       ├── pipeline_job.sh             # Slurm: all steps except embed_features
+│       ├── embed_job.sh                # Slurm: embed one GPU slice
+│       ├── combine_job.sh              # Slurm: combine_dataset
+│       └── submit_all.sh              # Slurm: auto-submit entrypoint
 │
 └── data/
     └── preprocessing/                          # Generated artefacts (git-ignored)
@@ -168,6 +172,8 @@ from this file.
 | `HADM_LINKAGE_STRATEGY` | `str` | How to handle records with null `hadm_id`. `"drop"` excludes them (default); `"link"` attempts time-window linkage using `charttime` and admission windows.                                    | `"drop"`                                         |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | `int` | Hours of tolerance outside `admittime`/`dischtime` used when `HADM_LINKAGE_STRATEGY` is `"link"`. Ignored when strategy is `"drop"`.                                                   | `2`                                              |
 | `LAB_ADMISSION_WINDOW` | `int` or `"full"` | Hours from `admittime` to include in `labs_features.parquet`. Integer: include events within this many hours of `admittime`. `"full"`: include all events within the full admission. | `24`                                             |
+| `BERT_MAX_GPUS`        | `int` or `null`   | Number of GPUs to use per embed slice job. `null` defaults to 2. Controls how many GPU processes are spawned inside each `embed_job.sh` Slurm job.                                   | `2`                                              |
+| `BERT_SLICE_SIZE_PER_GPU` | `int`          | Number of admissions each GPU processes per embed slice. Together with `BERT_MAX_GPUS` and the total admission count, determines how many Slurm embed slice jobs are created: `ceil(total_admissions / (BERT_SLICE_SIZE_PER_GPU × BERT_MAX_GPUS))`. | `20000`                                          |
 
 ---
 
@@ -253,6 +259,85 @@ create_splits
 before `extract_labs`, and `build_micro_panel_config` must run before
 `extract_microbiology`. All other `extract_*` modules can run in parallel once
 splits exist.
+
+---
+
+### Running on a Slurm cluster
+
+For HPC environments, four Slurm shell scripts are provided in
+`src/preprocessing/`. The intended workflow splits the pipeline into three
+separate job types because embedding is GPU-intensive and must be
+checkpointed across many slices:
+
+| Script             | Slurm resources          | What it does                                                                                        |
+| ------------------ | ------------------------ | --------------------------------------------------------------------------------------------------- |
+| `pipeline_job.sh`  | 4 CPUs, 64 GB RAM        | Runs the full `run_pipeline.py --all --skip-modules embed_features` (all steps except embedding).   |
+| `embed_job.sh`     | 2 GPUs, 8 CPUs, 64 GB RAM | Runs `embed_features.py --slice-index <i>` for one slice of admissions.                            |
+| `combine_job.sh`   | 4 CPUs, 32 GB RAM        | Runs `run_pipeline.py --modules combine_dataset` once all embedding slices are complete.            |
+| `submit_all.sh`    | —                        | Auto-detect state and submit the correct subset of jobs with `afterok` dependency chaining.         |
+
+#### Recommended workflow: `submit_all.sh`
+
+`submit_all.sh` is the only script you normally need to call. Run it from
+the repository root:
+
+```bash
+bash src/preprocessing/submit_all.sh
+```
+
+It checks the current pipeline state, then submits only the jobs that still
+need to run:
+
+| State detected                              | Jobs submitted                                             |
+| ------------------------------------------- | ---------------------------------------------------------- |
+| Nothing done yet                            | `pipeline_job` → N embed slices (chained) → `combine_job` |
+| Preprocessing done, embedding incomplete    | Remaining embed slices (chained) → `combine_job`           |
+| All embeddings complete                     | `combine_job` only                                         |
+| Everything complete                         | Nothing — prints status and exits                          |
+
+Re-run `submit_all.sh` at any time; it always resumes from where the pipeline
+left off without duplicating work.
+
+#### How embed slices are created
+
+The number of Slurm embed slice jobs is computed automatically from
+`BERT_SLICE_SIZE_PER_GPU` and `BERT_MAX_GPUS` in `config/preprocessing.yaml`:
+
+```
+N_slices = ceil(total_admissions / (BERT_SLICE_SIZE_PER_GPU × BERT_MAX_GPUS))
+```
+
+With the default settings (`BERT_SLICE_SIZE_PER_GPU: 20000`, `BERT_MAX_GPUS: 2`)
+and ~546 k admissions this produces **14 slices**. Each slice is submitted as a
+separate `embed_job.sh` job. Slices are chained sequentially with
+`--dependency=afterok` to prevent concurrent write conflicts on the parquet
+checkpoint files.
+
+To submit an individual embed slice manually:
+
+```bash
+sbatch src/preprocessing/embed_job.sh <slice_index>
+# e.g.
+sbatch src/preprocessing/embed_job.sh 3
+```
+
+#### Monitoring and logs
+
+```bash
+# Check queued / running jobs
+squeue -u $USER
+
+# Tail preprocessing log
+tail -f logs/hrs_preprocessing_<job_id>.out
+
+# Tail an embedding slice log
+tail -f logs/hrs_embed_<job_id>.out
+
+# Tail combine log
+tail -f logs/hrs_combine_<job_id>.out
+```
+
+All logs are written to the `logs/` directory at the repository root.
 
 ---
 
