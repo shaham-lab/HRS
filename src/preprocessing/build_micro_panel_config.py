@@ -738,7 +738,10 @@ def run(config: dict) -> None:
             return
 
     panels = {
-        panel_name: {"combos": [list(combo) for combo in combos]}
+        panel_name: {
+            "description": f"Microbiology panel: {panel_name.replace('_', ' ')}",
+            "combos": [list(combo) for combo in combos]
+        }
         for panel_name, combos in PANELS_37.items()
     }
     config_data = {
