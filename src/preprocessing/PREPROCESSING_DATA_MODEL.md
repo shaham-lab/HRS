@@ -399,7 +399,7 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 | `elapsed_hours` | float32 | No | Hours since `admittime` — used for text timestamp format [HH:MM] |
 
 **Primary key:** No single-column key — (`hadm_id`, `itemid`, `charttime`) is effectively unique per event.  
-**Notes:** This is the only pipeline artefact in long format. `embed_features.py` groups by (`hadm_id`, `lab_group`) to construct per-admission per-group text blocks. Events outside the configured `LAB_WINDOW_HOURS` from `admittime` are excluded before writing.
+**Notes:** This is the only pipeline artefact in long format. `embed_features.py` groups by (`hadm_id`, `lab_group`) to construct per-admission per-group text blocks. Events outside the configured `LAB_ADMISSION_WINDOW` from `admittime` are excluded before writing (default 24 hours).
 
 ---
 
@@ -461,7 +461,7 @@ All 37 files share the same schema:
 | `micro_vaginal_genital_flora.parquet` | F55 |
 | `micro_throat_strep.parquet` | F56 |
 
-**Notes:** Admissions with no events in a panel within the time window receive an empty string in the `text` column. The empty string propagates to `embed_features.py` and produces a zero vector at embedding time. Text construction follows the three-case format (Case A: organism present, Case B: comment only, Case C: pending) defined in the feature preprocessing specification.
+**Notes:** Admissions with no events in a panel within the time window receive an empty string in the `text` column. The empty string propagates to `embed_features.py` and produces a zero vector at embedding time. Text construction follows the three-case format (Case A: organism present, Case B: comment only, Case C: pending) defined in the feature preprocessing specification. Events are filtered to within `MICRO_WINDOW_HOURS` from `admittime` (default 72 hours); `"full_admission"` includes all events from `admittime` to `dischtime`.
 
 ---
 
