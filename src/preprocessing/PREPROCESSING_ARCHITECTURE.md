@@ -21,9 +21,9 @@
 The CDSS-ML preprocessing pipeline transforms raw MIMIC-IV clinical data into a fixed-schema parquet dataset ready for supervised classification and reinforcement learning.
 
 **Input:** MIMIC-IV v3.1 raw CSV tables  
-**Output:** `final_cdss_dataset.parquet` — one row per hospital admission, 24 columns
+**Output:** `final_cdss_dataset.parquet` — one row per hospital admission, 61 columns
 
-The pipeline is fully configuration-driven, resumable, and runs on a SLURM cluster with multi-GPU embedding support.
+The pipeline is fully configuration-driven, resumable, and runs on a SLURM cluster with multi-GPU embedding support. Features span five clinical domains: demographics, clinical history (prior visits), current-visit structured data, laboratory results (13 groups), and microbiology results (37 panels).
 
 ---
 
@@ -38,27 +38,23 @@ The pipeline is fully configuration-driven, resumable, and runs on a SLURM clust
 
 ## 3. Data
 
-**Source:** MIMIC-IV v3.1 — 546,028 admissions, 223,452 patients
+**Source:** MIMIC-IV v3.1
 
 **Splits** (patient-level stratified, seed 42):
 
-| Split | Patients | Admissions |
-|-------|----------|------------|
-| Train (80%) | 178,761 | 435,160 |
-| Dev (10%) | 22,345 | 54,934 |
-| Test (10%) | 22,346 | 55,934 |
+| Split | Fraction |
+|-------|----------|
+| Train | 80% |
+| Dev   | 10% |
+| Test  | 10% |
 
 Splitting is at the **patient level** (`subject_id`) — all admissions of a patient are in the same split, preventing leakage from prior-visit features (F2, F3). Stratification uses Y1 only (Y2 is NaN for deceased patients and would create degenerate strata).
-
-**Label statistics:**
-- Y1 positive rate: 2.16% (11,801 deceased admissions)
-- Y2 positive rate (excl. deaths): 20.14% (107,617 readmitted)
 
 ---
 
 ## 4. Feature Set
 
-The design specifies **19 feature slots**: 1 structured vector + 18 embeddings (5 text + 13 lab groups), each embedding 768-dimensional.
+The design specifies **56 feature slots**: 1 structured vector + 55 embeddings (5 text + 13 lab groups + 37 microbiology panels), each embedding 768-dimensional.
 
 | ID | Feature | Representation | MDP Visibility |
 |----|---------|----------------|----------------|
@@ -69,10 +65,13 @@ The design specifies **19 feature slots**: 1 structured vector + 18 embeddings (
 | F5 | Chief Complaint (current visit) | 768-d embedding | ✓ Always visible |
 | F6–F18 | Lab Results — **13 groups** (current visit) | 768-d embedding per group | ✗ Maskable |
 | F19 | Radiology Note (current visit) | 768-d embedding | ✗ Maskable |
+| F20–F56 | Microbiology Results — **37 panels** (current visit) | 768-d embedding per panel | ✗ Maskable |
 
-F1–F5 are always available to both the classifier and MDP agent. F6–F19 are maskable — the MDP agent selects which to unlock per episode; each is an independent feature slot with its own projection layer.
+F1–F5 are always available to both the classifier and MDP agent. F6–F56 are maskable — the MDP agent selects which to unlock per episode; each is an independent feature slot with its own projection layer.
 
 **Lab group design:** Groups are derived from unique `(fluid, category)` combinations in `d_labitems`. Fluids spanning multiple categories (Ascites, Pleural, Cerebrospinal Fluid, Joint Fluid, Bone Marrow, Stool) are merged into a single group per fluid, yielding 13 canonical groups. See `PREPROCESSING_DETAILED_DESIGN.md` for the full group table.
+
+**Microbiology panel design:** Panels are keyed on `(test_name, spec_type_desc)` pairs — the same test on different specimen types is a clinically distinct event. 37 panels cover blood cultures, respiratory specimens, urine, sterile fluids, gram stains, fungal, serology, resistance screening, GI, STI, and genital workup. Post-mortem specimens are excluded entirely to prevent target leakage (Y1). Panel membership is defined in `micro_panel_config.yaml`. See `PREPROCESSING_DETAILED_DESIGN.md` for the full panel table.
 
 ---
 
@@ -86,11 +85,15 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F19 are 
                     │   data_splits.parquet  │
                     └──────────┬────────────┘
                                │
-                    ┌──────────▼────────────┐
-                    │ build_lab_panel_       │
-                    │ config.py              │
-                    │ lab_panel_config.yaml  │
-                    └──────────┬────────────┘
+               ┌───────────────┴───────────────┐
+               │                               │
+    ┌──────────▼────────────┐     ┌────────────▼────────────┐
+    │ build_lab_panel_       │     │ build_micro_panel_       │
+    │ config.py              │     │ config.py                │
+    │ lab_panel_config.yaml  │     │ micro_panel_config.yaml  │
+    └──────────┬────────────┘     └────────────┬────────────┘
+               │                               │
+               └───────────────┬───────────────┘
                                │
           ┌────────────────────┼──────────────────────┐
           │                    │                      │
@@ -99,6 +102,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F19 are 
  extract_diag_history    extract_triage_       y_labels.parquet
  extract_discharge_      and_complaint
  history                 extract_radiology
+                         extract_microbiology
           │                    │
           └────────────────────┘
                      │
@@ -126,18 +130,18 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F19 are 
 ### Dependency Rules
 
 - `create_splits` → must run first
-- `build_lab_panel_config` → must run before any `extract_*`
+- `build_lab_panel_config` and `build_micro_panel_config` → must run before any `extract_*`; independent of each other
 - All `extract_*` → independent of each other, can run in parallel
-- `embed_features` → requires all `extract_*` complete; runs as **7 sequential SLURM jobs**
+- `embed_features` → requires all `extract_*` complete; runs as **14 sequential SLURM jobs**
 - `combine_dataset` → requires all embed slices complete
 
-### Runtime (SLURM, L4 GPU, 64 GB RAM)
+### Runtime (SLURM, GPU cluster)
 
 | Phase | Jobs | Time per job | Total |
 |-------|------|-------------|-------|
-| Preprocessing (steps 0–8) | 1 | ~18 min | ~18 min |
-| Embedding (step 9, 14 slices) | 14 | ≤6 hrs | ≤84 hrs wall, runs sequentially (2 GPUs parallel within each job) |
-| Combine (step 10) | 1 | ~1 min | ~1 min |
+| Preprocessing (steps 0–9) | 1 | ~25 min | ~25 min |
+| Embedding (step 10, 14 slices) | 14 | ≤6 hrs | ≤84 hrs wall, runs sequentially (2 GPUs parallel within each job) |
+| Combine (step 11) | 1 | ~1 min | ~1 min |
 
 ---
 
@@ -145,19 +149,21 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F19 are 
 
 | Step | Module | Output | Notes |
 |------|--------|--------|-------|
-| 0 | `build_lab_panel_config.py` | `lab_panel_config.yaml` | Must run before extract_labs |
+| 0a | `build_lab_panel_config.py` | `lab_panel_config.yaml` | Must run before extract_labs |
+| 0b | `build_micro_panel_config.py` | `micro_panel_config.yaml` | Must run before extract_microbiology |
 | 1 | `create_splits.py` | `data_splits.parquet` | Patient-level, stratified, seed 42 |
 | 2 | `extract_demographics.py` | `demographics_features.parquet` | 8-float vector per admission |
 | 3 | `extract_diag_history.py` | `diag_history_features.parquet` | Prior visits only |
 | 4 | `extract_discharge_history.py` | `discharge_history_features.parquet` | Prior visits only |
 | 5 | `extract_triage_and_complaint.py` | `triage_features.parquet`, `chief_complaint_features.parquet` | ED visit linkage |
 | 6 | `extract_labs.py` | `labs_features.parquet` | Long format, 16.8M rows |
-| 7 | `extract_radiology.py` | `radiology_features.parquet` | Most recent note per admission |
-| 8 | `extract_y_data.py` | `y_labels.parquet` | Y1 + Y2 labels |
-| 9 | `embed_features.py` | 18 embedding parquets | 14 SLURM jobs × 2 GPUs × 20k admissions |
-| 10 | `combine_dataset.py` | `final_cdss_dataset.parquet` | Left-join all features |
+| 7 | `extract_microbiology.py` | `micro_<panel>.parquet` × 37 | One parquet per panel; 72h window default |
+| 8 | `extract_radiology.py` | `radiology_features.parquet` | Most recent note per admission |
+| 9 | `extract_y_data.py` | `y_labels.parquet` | Y1 + Y2 labels |
+| 10 | `embed_features.py` | 55 embedding parquets | 14 SLURM jobs × 2 GPUs × 20k admissions |
+| 11 | `combine_dataset.py` | `final_cdss_dataset.parquet` | Left-join all features; 61 columns |
 
-Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`).
+Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`), `build_micro_text.py` (helper for `extract_microbiology` — comment cleaning and text construction).
 
 ---
 
@@ -165,23 +171,25 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 
 **Model:** `Simonlee711/Clinical_ModernBERT` — trained on PubMed, MIMIC-IV notes, and medical ontologies. 8,192-token context window, 768-d hidden size. Used as a **frozen feature extractor** (not fine-tuned).
 
-**Pooling:** Mean pooling over all non-padding content tokens from the final hidden layer. Preferred over `[CLS]` because the model is not fine-tuned — mean pooling ensures every token contributes equally, which is critical for long clinical texts.
+**Pooling:** Mean pooling over all non-padding content tokens from the final hidden layer. Preferred over `[CLS]` because the model is not fine-tuned — mean pooling ensures every token contributes equally, which is critical for long clinical texts and for the dense structured-text format used in microbiology panels.
 
-**Missing features:** Zero vector (768 floats). Lab groups with no events for an admission receive a zero vector, never null.
+**Missing features:** Zero vector (768 floats). Lab groups and microbiology panels with no events for an admission receive a zero vector, never null.
 
-**Performance:** Per-feature token length caps (64–4,096) prevent padding short texts to 8,192 tokens. Batch size auto-scales inversely with sequence length.
+**Performance:** Per-feature token length caps (64–8,192) prevent padding short texts to the full context window. Batch size auto-scales inversely with sequence length.
 
-**Multi-GPU within a job:** The slice's admissions are split evenly between 2 GPU workers (~20k each). Both workers run **in parallel** — each embeds all 18 features for its own admission half, writing to per-worker temporary parquets. The main process merges the per-worker parquets into the shared output parquets after both workers complete. LPT ordering within each worker (features sorted by estimated compute cost descending) ensures the most expensive features start first for better progress visibility. Each GPU worker loads its own model copy.
+**Multi-GPU within a job:** The slice's admissions are split evenly between 2 GPU workers (~20k each). Both workers run **in parallel** — each embeds all 55 features for its own admission half, writing to per-worker temporary parquets. The main process merges the per-worker parquets into the shared output parquets after both workers complete. LPT ordering within each worker (features sorted by estimated compute cost descending) ensures the most expensive features start first for better progress visibility. Each GPU worker loads its own model copy.
 
-**Admission-slice batching:** The full admission corpus is divided into slices based on `BERT_SLICE_SIZE_PER_GPU` (default: 20,000 admissions per GPU). With 2 GPUs, each slice covers 40,000 admissions, giving **14 slices** for 546,028 admissions. Each slice runs as a separate SLURM job (≤12h). Slices run sequentially and append their results into the same output parquets via `fastparquet` append mode. Adjusting `BERT_SLICE_SIZE_PER_GPU` is the only knob needed to fit different partition time limits.
+**Admission-slice batching:** The full admission corpus is divided into slices based on `BERT_SLICE_SIZE_PER_GPU` (default: 20,000 admissions per GPU). With 2 GPUs, each slice covers 40,000 admissions. The number of slices is computed automatically at runtime. Each slice runs as a separate SLURM job (≤12h). Slices run sequentially and append their results into the same output parquets via `fastparquet` append mode. Adjusting `BERT_SLICE_SIZE_PER_GPU` is the only knob needed to fit different partition time limits.
 
 **Resume:** Three levels — (1) slice-level: a completed slice is detected by row count and skipped; (2) feature-level: within a slice, completed feature-parquet segments are skipped; (3) record-level: within a feature in a slice, already-embedded rows are skipped via incremental checkpointing.
+
+**Microbiology-specific configuration:** Microbiology panels use separate config keys from lab features — `MICRO_WINDOW_HOURS` (default 72h vs lab's 24h), `MICRO_NULL_HADM_STRATEGY`, and `MICRO_LINK_TOLERANCE_HOURS`. These are resolved at extract time; `embed_features.py` consumes the pre-extracted text parquets and is agnostic to the extraction configuration.
 
 ---
 
 ## 8. Final Dataset
 
-`final_cdss_dataset.parquet` — 546,028 rows × 24 columns:
+`final_cdss_dataset.parquet` — one row per hospital admission, 61 columns:
 
 | Group | Count | Type |
 |-------|-------|------|
@@ -190,6 +198,7 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 | Demographics (`demographic_vec`) | 1 | float[8] |
 | Text embeddings (F2–F5, F19) | 5 | float[768] each |
 | Lab group embeddings (F6–F18, 13 groups) | 13 | float[768] each |
+| Microbiology panel embeddings (F20–F56, 37 panels) | 37 | float[768] each |
 
 Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardcoded list.
 
@@ -197,17 +206,17 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 
 ## 9. Design Principles
 
-**No target leakage** — prior-visit features use only admissions strictly before current `admittime`. Lab events restricted to current admission window. Imputation statistics computed on train split only, persisted and applied identically to dev/test.
+**No target leakage** — prior-visit features use only admissions strictly before current `admittime`. Lab events restricted to current admission window. Post-mortem specimens excluded from all microbiology panels — their presence perfectly predicts Y1 (in-hospital mortality) and would introduce a direct causal shortcut. Imputation statistics computed on train split only, persisted and applied identically to dev/test.
 
-**No hardcoding** — all paths, model names, split ratios, batch sizes, and thresholds in `config/preprocessing.yaml`. Lab groups derived dynamically from `d_labitems`.
+**No hardcoding** — all paths, model names, split ratios, batch sizes, and thresholds in `config/preprocessing.yaml`. Lab groups derived dynamically from `d_labitems`. Microbiology panel membership, comment cleaning rules, excluded tests, and excluded specimen types defined in `micro_panel_config.yaml`.
 
 **Reproducibility** — random seed 42. Imputation stats and source MD5 hashes persisted. Incremental runs skip modules whose source hashes match and outputs exist.
 
-**Memory safety** — `labevents` and `chartevents` streamed in 500k-row chunks. 64 GB RAM required for both pipeline and embed SLURM jobs.
+**Memory safety** — `labevents`, `microbiologyevents`, and `chartevents` streamed in 500k-row chunks. 64 GB RAM required for both pipeline and embed SLURM jobs.
 
 **Time-window safety** — embedding is split into admission slices of ≤80k records (≤40k per GPU) to fit within the 12-hour SLURM partition limit. Each slice is a self-contained job that appends to the shared output parquets.
 
-**Graceful degradation** — missing OMR/chartevents falls back gracefully. Missing CUDA falls back to CPU. Missing lab events → zero vector. Missing `lab_panel_config.yaml` → lab embeddings skipped with warning.
+**Graceful degradation** — missing OMR/chartevents falls back gracefully. Missing CUDA falls back to CPU. Missing lab events or microbiology events → zero vector. Missing `lab_panel_config.yaml` or `micro_panel_config.yaml` → respective embeddings skipped with warning.
 
 ---
 
@@ -225,60 +234,63 @@ HRS/
 │   ├── run_pipeline.py                 # Orchestrator CLI
 │   ├── check_embed_status.py           # State detection for submit_all.sh
 │   ├── preprocessing_utils.py          # Shared utilities
-│   ├── build_lab_panel_config.py       # Step 0
+│   ├── build_lab_panel_config.py       # Step 0a
+│   ├── build_micro_panel_config.py     # Step 0b
 │   ├── create_splits.py                # Step 1
 │   ├── extract_demographics.py         # Step 2
 │   ├── extract_diag_history.py         # Step 3
 │   ├── extract_discharge_history.py    # Step 4
 │   ├── extract_triage_and_complaint.py # Step 5
 │   ├── extract_labs.py                 # Step 6
-│   ├── extract_radiology.py            # Step 7
-│   ├── extract_y_data.py               # Step 8
-│   ├── embed_features.py               # Step 9 — accepts --slice-index
-│   ├── combine_dataset.py              # Step 10
-│   └── build_lab_text_lines.py         # Helper for extract_labs
+│   ├── extract_microbiology.py         # Step 7
+│   ├── extract_radiology.py            # Step 8
+│   ├── extract_y_data.py               # Step 9
+│   ├── embed_features.py               # Step 10 — accepts --slice-index
+│   ├── combine_dataset.py              # Step 11
+│   ├── build_lab_text_lines.py         # Helper for extract_labs
+│   └── build_micro_text.py             # Helper for extract_microbiology
 └── data/preprocessing/                 # Generated artefacts (git-ignored)
     ├── data_splits.parquet
     ├── source_hashes.json
     ├── features/
-    │   ├── [feature parquets ×7]
+    │   ├── [feature parquets ×8]
     │   └── embeddings/
-    │       └── [embedding parquets ×18]
+    │       └── [embedding parquets ×55]
     └── classifications/
         ├── y_labels.parquet
         ├── final_cdss_dataset.parquet
         ├── lab_panel_config.yaml
+        ├── micro_panel_config.yaml
         ├── imputation_stats.json
-        └── hadm_linkage_stats.json
+        ├── hadm_linkage_stats.json
+        └── micro_linkage_stats.json
 ```
 
 ---
 
 ## 11. SLURM Execution
 
-**Cluster:** BIU SLURM — `slurm-login1/2/3.lnx.biu.ac.il`  
-**Partitions:**
-- `L4-12h` — NVIDIA L4 (sm_89), **12-hour** limit, max 2 GPUs per user
-- `L4-4h` — same hardware, **4-hour** limit (shorter queue wait)
+**Cluster:** University HPC cluster — login node and partition names are defined in `config/preprocessing.yaml`.  
+**Partitions:** Two GPU partitions are supported — a standard time-limit partition and a shorter queue-wait partition. Partition names, GPU type, time limits, and GPU count per job are all configurable.
 
 ### Capacity Sizing
 
-136,507 admissions failed to complete in 12 hours on 2 GPUs. The safe per-GPU limit is therefore ~20,000 admissions, giving ~40,000 per 2-GPU SLURM job. This is controlled by `BERT_SLICE_SIZE_PER_GPU` in config — the number of slices is computed automatically at runtime.
+The safe per-GPU admission limit is ~20,000 admissions per 2-GPU job, giving ~40,000 per SLURM job. This was determined empirically from cluster runs and is controlled by `BERT_SLICE_SIZE_PER_GPU` in config — the number of slices is computed automatically at runtime. The addition of 37 microbiology panels increases per-admission compute within each slice but does not change the number of slices — the admission count per slice is unchanged.
 
 | Total admissions | Per-GPU limit (`BERT_SLICE_SIZE_PER_GPU`) | Per-job (2 GPUs) | Jobs required |
 |-----------------|------------------------------------------|-----------------|--------------|
-| 546,028 | 20,000 | 40,000 | **14** |
+| Computed at runtime | 20,000 | 40,000 | **14** (based on current corpus) |
 
 ### Scripts
 
 All four scripts live in `src/preprocessing/` alongside the Python modules they invoke.
 
-| Script | GPUs | RAM | Purpose |
-|--------|------|-----|---------|
-| `pipeline_job.sh` | 0 | 64G | Steps 0–8 (CPU only) |
-| `embed_job.sh` | 2 | 64G | One admission slice — takes `--slice-index N` (passed by `submit_all.sh`) |
-| `combine_job.sh` | 0 | 32G | Step 10 — combine only (CPU) |
-| `submit_all.sh` | — | — | Detects state, submits all pending slices chained via `--dependency=afterok` |
+| Script | GPUs | Purpose |
+|--------|------|---------|
+| `pipeline_job.sh` | 0 | Steps 0a–9 (CPU only) |
+| `embed_job.sh` | 2 | One admission slice — takes `--slice-index N` (passed by `submit_all.sh`) |
+| `combine_job.sh` | 0 | Step 11 — combine only (CPU) |
+| `submit_all.sh` | — | Detects state, submits all pending slices chained via `--dependency=afterok` |
 
 ### Auto-submit State Detection and Job Chaining
 
@@ -288,7 +300,7 @@ bash src/preprocessing/submit_all.sh
 ```
 
 `check_embed_status.py` scans embedding parquets for total row count, determines which slices are complete, and exits with:
-- **2** → preprocessing incomplete → submits pipeline → 7 embed slices → combine
+- **2** → preprocessing incomplete → submits pipeline → 14 embed slices → combine
 - **1** → embedding incomplete → submits remaining slice jobs → combine
 - **0** → all embeddings complete → submits combine only
 

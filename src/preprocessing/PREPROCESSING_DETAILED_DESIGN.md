@@ -6,12 +6,14 @@
 2. [Data Splits — Implementation](#2-data-splits--implementation)
 3. [Module Implementation](#3-module-implementation)
    - [build_lab_panel_config.py](#build_lab_panel_configpy)
+   - [build_micro_panel_config.py](#build_micro_panel_configpy)
    - [create_splits.py](#create_splitspy)
    - [extract_demographics.py](#extract_demographicspy)
    - [extract_diag_history.py](#extract_diag_historypy)
    - [extract_discharge_history.py](#extract_discharge_historypy)
    - [extract_triage_and_complaint.py](#extract_triage_and_complaintpy)
    - [extract_labs.py](#extract_labspy)
+   - [extract_microbiology.py](#extract_microbiologypy)
    - [extract_radiology.py](#extract_radiologypy)
    - [extract_y_data.py](#extract_y_datapy)
    - [embed_features.py](#embed_featurespy)
@@ -73,14 +75,6 @@ closest if multiple; drop if none.
 
 All admissions of a patient go to the same split. Stratification on Y1 only — Y2 would create degenerate strata because deceased patients always have Y2=NaN.
 
-**Output statistics:**
-
-| Split | Admissions | Y1 positive |
-|-------|------------|-------------|
-| Train | 435,160 | 2.16% |
-| Dev | 54,934 | 2.16% |
-| Test | 55,934 | 2.16% |
-
 ---
 
 ## 3. Module Implementation
@@ -117,7 +111,24 @@ Derives lab groups from `d_labitems` and writes `classifications/lab_panel_confi
 
 ---
 
-### `create_splits.py`
+### `build_micro_panel_config.py`
+
+Builds the microbiology panel configuration and writes `classifications/micro_panel_config.yaml`.
+
+**Algorithm:**
+1. Load the canonical `PANELS_37` dict (curated from EDA on `microbiologyevents`)
+2. For each panel, store the description and list of `(test_name, spec_type_desc)` combo pairs
+3. Append excluded test names (`EXCLUDED_TESTS`) and excluded specimen types (`EXCLUDED_SPEC_TYPES`)
+4. Append comment cleaning rules: `discard_prefixes` and `strip_triggers` lists
+5. Write YAML: `{panels: {...}, excluded_tests: [...], excluded_spec_types: [...], comment_cleaning: {...}}`
+
+**Panel assignment key:** `(test_name.strip(), spec_type_desc.strip())` — both fields stripped of whitespace before lookup. A row matching no combo is logged as unassigned and excluded from feature extraction.
+
+**Excluded specimen types:** `POSTMORTEM CULTURE`, `BLOOD CULTURE (POST-MORTEM)` — excluded entirely to prevent target leakage (post-mortem specimens perfectly predict Y1=1).
+
+**Output — 37 panels:** See Table 3 in `feature_preprocessing_updated.docx` for full panel list with feature IDs F20–F56.
+
+This is a one-time build step. The resulting `micro_panel_config.yaml` is version-controlled and must be present before `extract_microbiology.py` runs.
 
 See [Section 2](#2-data-splits--implementation).
 
@@ -184,8 +195,6 @@ Acute kidney injury
 
 First-time admissions (no prior visits) → empty string → zero vector at embedding time.
 
-**Output:** 546,028 rows (322,399 with prior-visit content; 223,629 empty strings).
-
 ---
 
 ### `extract_discharge_history.py`
@@ -209,7 +218,7 @@ Allergies: None known
 [clinical note body...]
 ```
 
-**Output:** 546,028 rows (259,218 with prior notes; 286,810 empty strings). Source: 331,793 discharge notes.
+Admissions with no prior discharge notes → empty string → zero vector at embedding time.
 
 ---
 
@@ -266,41 +275,60 @@ Produces a long-format parquet of all lab events within the admission window.
 [08:32] Creatinine: 1.80 mg/dL [ABNORMAL]
 ```
 
-**Output:** 16,838,777 rows for 400,754 admissions (from 79,440,362 raw events). 145,274 admissions have no events in the window → zero vectors at embedding time.
-
 **Admission window:** `LAB_ADMISSION_WINDOW` — integer hours or `"full"`. Default: 24.
 
-**Lab event counts per group (MIMIC-IV v3.1):**
-
-| Group | Admissions with events | Notes |
-|-------|----------------------|-------|
-| `blood_hematology` | 375,727 | |
-| `blood_chemistry` | 370,981 | |
-| `blood_gas` | 78,524 | includes Fluid Blood Gas items (0 events) |
-| `urine_hematology` | 73,887 | includes Urine Blood Gas items (0 events) |
-| `urine_chemistry` | 47,818 | |
-| `other_body_fluid_chemistry` | 4,200 | |
-| `other_body_fluid_hematology` | 3,119 | includes Other Body Fluid Blood Gas items (1,279 events) |
-| `ascites` | 2,630 | |
-| `csf` | 4,016 | merged Chemistry (1,994) + Hematology (2,022) |
-| `pleural` | 1,908 | |
-| `joint_fluid` | 849 | |
-| `bone_marrow` | 515 | |
-| `stool` | 70 | |
+**Lab groups:** 13 groups derived from `d_labitems` — see `build_lab_panel_config.py` for full group table.
 
 ---
 
-### `extract_radiology.py`
+### `extract_microbiology.py`
+
+Produces 37 text parquets — one per microbiology panel — from `microbiologyevents`. Each parquet contains one row per admission with a `text` column holding the aggregated panel text for that admission.
+
+**Algorithm:**
+1. Load `micro_panel_config.yaml` — panel combo dict, excluded tests, excluded spec_types, comment cleaning rules
+2. Stream `microbiologyevents` (or load fully if memory permits)
+3. Drop excluded tests and excluded spec_types
+4. Apply null `hadm_id` strategy (`MICRO_NULL_HADM_STRATEGY`):
+   - `"drop"`: exclude all rows with null `hadm_id`, log count
+   - `"link"`: time-window linkage against admissions; classify as linked / ambiguous / unresolvable; save audit to `micro_linkage_stats.json`
+5. Join `admissions` on `hadm_id` to get `admittime` (and `dischtime` if `MICRO_WINDOW_HOURS = "full_admission"`)
+6. Apply time window filter based on `MICRO_WINDOW_HOURS`:
+   - Integer N: `admittime ≤ charttime ≤ admittime + N hours`
+   - `"full_admission"`: `admittime ≤ charttime ≤ dischtime`
+7. Assign panel via `(test_name.strip(), spec_type_desc.strip())` lookup; log unassigned combos
+8. Clean `comments` column via `clean_comment()` (see comment cleaning spec)
+9. Build per-event text string (Cases A/B/C — see below)
+10. Group by `(subject_id, hadm_id, panel)` — deduplicate, sort by `charttime`, concatenate with ` | `, tokenise and truncate to `BERT_MAX_LENGTH`
+11. Write one parquet per panel to `FEATURES_DIR/micro_<panel_name>.parquet`
+
+**Per-event text construction:**
+
+| Case | Condition | Format |
+|------|-----------|--------|
+| A | `org_name` present | `{test_name} [{spec_type_desc}]: {org_name} \| {susc_string} \| {cleaned_comment}` |
+| B | `org_name` null, comment present | `{test_name} [{spec_type_desc}]: {cleaned_comment}` |
+| C | `org_name` null, comment null | `{test_name} [{spec_type_desc}]: pending` |
+
+**Susceptibility string:** For each `(org_name, ab_name)` pair within an admission+panel, select interpretation by priority R > S > I. I appears only when no R or S exists. Antibiotics listed in source data order. Example: `OXACILLIN:R, VANCOMYCIN:S, CLINDAMYCIN:I`
+
+**Comment cleaning:** Six-step pipeline — null check, discard-entirely prefixes, trigger-word truncation, sentence splitting (first 2 sentences, not on `:`), artifact cleanup, hard truncation to `MICRO_COMMENT_MAX_CHARS`. Full specification in `microbiology_comments_cleaning_spec.md`. Rules configurable in `micro_panel_config.yaml` under `comment_cleaning`.
+
+**Empty panels:** Admissions with no events in a panel within the time window receive an empty string — produces a zero vector at embedding time.
+
+**Helper module:** `build_micro_text.py` — contains `clean_comment()`, `build_event_text()`, and `aggregate_panel_text()` functions, imported by `extract_microbiology.py`.
+
+---
 
 Selects the most recent radiology note within the current admission window.
 
 **Algorithm:**
-1. Load `note/radiology` — 1,144,758 notes; drop null `hadm_id` (50.7% of raw notes)
+1. Load `note/radiology` — drop null `hadm_id`
 2. Filter to notes within admission window (`admittime ≤ charttime ≤ dischtime`)
 3. Per `hadm_id`, select the note with the latest `charttime`
 4. Clean: strip everything before the first `"EXAMINATION:"` marker
 
-**Output:** 546,028 rows (220,022 with a note; 326,006 empty strings).
+Admissions with no radiology note → empty string → zero vector at embedding time.
 
 ---
 
@@ -316,7 +344,7 @@ Produces `y_labels.parquet` with Y1 and Y2 per admission.
 
 ### `embed_features.py`
 
-Embeds all 22 text features using Clinical_ModernBERT. Full implementation details in [Section 4](#4-embedding-implementation-detail).
+Embeds all 55 text features using Clinical_ModernBERT. Full implementation details in [Section 4](#4-embedding-implementation-detail).
 
 **CLI entry point:**
 ```bash
@@ -331,14 +359,17 @@ Also callable as `run(config, slice_index)` from `run_pipeline.py`.
 
 | Feature | Input parquet | Text column |
 |---------|---------------|-------------|
-| `diag_history` | `diag_history_features.parquet` | `diag_history_text` |
-| `discharge_history` | `discharge_history_features.parquet` | `discharge_history_text` |
-| `triage` | `triage_features.parquet` | `triage_text` |
-| `chief_complaint` | `chief_complaint_features.parquet` | `chief_complaint_text` |
-| `radiology` | `radiology_features.parquet` | `radiology_text` |
+| `diag_history` | `diag_history_features.parquet` | `text` |
+| `discharge_history` | `discharge_history_features.parquet` | `text` |
+| `triage` | `triage_features.parquet` | `text` |
+| `chief_complaint` | `chief_complaint_features.parquet` | `text` |
+| `radiology` | `radiology_features.parquet` | `text` |
 | `lab_{group}` ×13 | `labs_features.parquet` (filtered by group's itemid list) | `lab_text_line` (concatenated per hadm_id) |
+| `micro_{panel}` ×37 | `micro_{panel_name}.parquet` | `text` |
 
-**Labs processing:** `labs_df` (16.8M rows) is filtered to the current slice's `hadm_id` set, then scanned **once** before the 13-group embedding loop to build per-group text maps.
+**Labs processing:** `labs_df` is filtered to the current slice's `hadm_id` set, then scanned **once** before the 13-group embedding loop to build per-group text maps.
+
+**Microbiology processing:** Each of the 37 micro panel parquets is loaded and filtered to the current slice's `hadm_id` set independently. Text is already aggregated per admission — no further grouping needed.
 
 ---
 
@@ -347,16 +378,16 @@ Also callable as `run(config, slice_index)` from `run_pipeline.py`.
 Builds `final_cdss_dataset.parquet` from `data_splits.parquet` as the admission universe.
 
 **Algorithm:**
-1. Start with `data_splits.parquet` (546,028 rows)
+1. Start with `data_splits.parquet`
 2. Left-join `y_labels.parquet` on `hadm_id`
 3. Left-join `demographics_features.parquet` on `hadm_id`
 4. Scan `EMBEDDINGS_DIR` for all `*.parquet` files dynamically
 5. Left-join each embedding parquet on `hadm_id`
 6. Write `final_cdss_dataset.parquet`
 
-All joins are **left joins** — admissions missing a non-lab feature receive null for that column. Lab embedding columns are always a 768-float array (zero vector for admissions with no events — never null).
+All joins are **left joins** — admissions missing a non-lab/micro feature receive null for that column. Lab and microbiology embedding columns are always a 768-float array (zero vector for admissions with no events — never null).
 
-**Intentionally excluded:** `labs_features.parquet` (superseded by per-group embedding parquets), all raw text parquets (superseded by embedding parquets).
+**Intentionally excluded:** `labs_features.parquet` (superseded by per-group embedding parquets), all raw text parquets including `micro_<panel>.parquet` (superseded by embedding parquets).
 
 ---
 
@@ -414,7 +445,8 @@ Per-feature caps are applied as `min(BERT_MAX_LENGTH, cap)` at tokenisation time
 | `triage` | 256 | Structured template, bounded length |
 | `diag_history` | 512 | ICD label list — verbose but bounded |
 | `radiology` | 1,024 | Single report |
-| All lab groups | 2,048 | Lab timeline — longer for complex admissions |
+| All lab groups ×13 | 2,048 | Lab timeline — longer for complex admissions |
+| All microbiology panels ×37 | 512 | Dense structured text — median event text ~25 chars; 512 tokens comfortably covers even high-volume panels |
 | `discharge_history` | 4,096 | Concatenated multi-visit notes |
 
 Attention is O(n²) in sequence length. Padding chief complaint to 64 vs 8,192 tokens is ~16,000× less GPU compute per token.
@@ -427,30 +459,20 @@ Attention is O(n²) in sequence length. Padding chief complaint to 64 vs 8,192 t
 
 #### Motivation
 
-The full corpus of 546,028 admissions cannot be embedded in a single SLURM job — empirically, 136,507 admissions failed to complete within the 12-hour partition limit on 2 L4 GPUs. The safe per-GPU throughput is approximately **20,000 admissions per 12-hour window**.
+The full admission corpus cannot be embedded in a single SLURM job due to partition time limits. The safe per-GPU throughput is approximately **20,000 admissions per 12-hour window**, determined empirically from cluster runs.
 
-The `BERT_SLICE_SIZE_PER_GPU` config key sets this limit. With 2 GPUs, each SLURM job covers `BERT_SLICE_SIZE_PER_GPU × n_gpus` admissions. The total number of slices is computed at runtime — no manual counting required. Reducing `BERT_SLICE_SIZE_PER_GPU` fits shorter partition windows (e.g. `L4-4h`); increasing it reduces the number of jobs needed on faster hardware.
+The `BERT_SLICE_SIZE_PER_GPU` config key sets this limit. With 2 GPUs, each SLURM job covers `BERT_SLICE_SIZE_PER_GPU × n_gpus` admissions. The total number of slices is computed at runtime — no manual counting required. Reducing `BERT_SLICE_SIZE_PER_GPU` fits shorter partition windows; increasing it reduces the number of jobs needed on faster hardware.
 
 #### Slice Layout (default: `BERT_SLICE_SIZE_PER_GPU = 20000`, 2 GPUs)
 
-Each job covers 40,000 admissions (20,000 per GPU). 14 jobs cover the full 546,028.
+Each job covers 40,000 admissions (20,000 per GPU). The number of slices is `ceil(total_admissions / 40000)`.
 
-| Slice | `hadm_id` rows | Per-GPU rows |
+| Slice | Admission rows | Per-GPU rows |
 |-------|---------------|-------------|
-| 0 | 0 – 39,999 | 20,000 |
-| 1 | 40,000 – 79,999 | 20,000 |
-| 2 | 80,000 – 119,999 | 20,000 |
-| 3 | 120,000 – 159,999 | 20,000 |
-| 4 | 160,000 – 199,999 | 20,000 |
-| 5 | 200,000 – 239,999 | 20,000 |
-| 6 | 240,000 – 279,999 | 20,000 |
-| 7 | 280,000 – 319,999 | 20,000 |
-| 8 | 320,000 – 359,999 | 20,000 |
-| 9 | 360,000 – 399,999 | 20,000 |
-| 10 | 400,000 – 439,999 | 20,000 |
-| 11 | 440,000 – 479,999 | 20,000 |
-| 12 | 480,000 – 519,999 | 20,000 |
-| 13 | 520,000 – 546,027 | ~13,000 |
+| 0 | rows 0 – 39,999 | 20,000 |
+| 1 | rows 40,000 – 79,999 | 20,000 |
+| … | … | 20,000 |
+| N−1 | rows (N−1)×40,000 – end | ≤ 20,000 |
 
 #### CLI Interface
 
@@ -492,7 +514,7 @@ This adds a new row group to the parquet file. The resulting file is a valid mul
 
 #### Slice-Level Completeness Check
 
-`check_embed_status.py` determines whether a slice is complete by comparing the number of embedded rows in each output parquet against the expected cumulative row count after each slice. A slice is considered done if all 18 feature parquets contain rows for all `hadm_id` values in that slice's range.
+`check_embed_status.py` determines whether a slice is complete by comparing the number of embedded rows in each output parquet against the expected cumulative row count after each slice. A slice is considered done if all 55 feature parquets contain rows for all `hadm_id` values in that slice's range.
 
 Slices always run sequentially (chained via `--dependency=afterok`) — this ensures each slice appends cleanly to the previous slice's output without concurrent write conflicts.
 
@@ -506,12 +528,12 @@ Each embed SLURM job processes one slice using 2 GPUs. The slice's `hadm_ids` ar
 Main process (one slice: ~40k admissions)
 ├── Load all input parquets, filter to slice_hadm_ids
 ├── Split slice into GPU-0 half and GPU-1 half (~20k each)
-├── LPT-order 18 features within each worker (most expensive first)
+├── LPT-order 55 features within each worker (most expensive first)
 │
 ├── spawn Worker 0 (cuda:0) ─────────────────────────────────┐
-│     embeds 18 features for hadm_ids[0:20k]                 │ parallel
+│     embeds 55 features for hadm_ids[0:20k]                 │ parallel
 └── spawn Worker 1 (cuda:1) ─────────────────────────────────┘
-      embeds 18 features for hadm_ids[20k:40k]
+      embeds 55 features for hadm_ids[20k:40k]
               │
               │  both write to per-worker temp parquets:
               │    discharge_history_embeddings.worker0.parquet
@@ -523,7 +545,8 @@ Main process (one slice: ~40k admissions)
               ▼
         merge worker parquets → discharge_history_embeddings.parquet
                                → lab_blood_chemistry_embeddings.parquet
-                               → ... (18 output parquets)
+                               → micro_blood_culture_routine_embeddings.parquet
+                               → ... (55 output parquets)
 ```
 
 **Per-worker temporary parquets:** Each worker writes to
@@ -547,7 +570,7 @@ Single-GPU path runs in-process with no temporary files.
 
 ### GPU Load Balancing
 
-**Purpose:** Since both workers process the same 18 features (on different admission halves), LPT is used to order features **within each worker** so the most expensive features start first. This gives better progress visibility in logs and ensures the GPU is never idle waiting for a trivially short feature at the end.
+**Purpose:** Since both workers process the same 55 features (on different admission halves), LPT is used to order features **within each worker** so the most expensive features start first. This gives better progress visibility in logs and ensures the GPU is never idle waiting for a trivially short feature at the end.
 
 **Cost estimate per feature per worker:** `cost = len(worker_texts) × max_length_cap`
 
@@ -556,13 +579,15 @@ Single-GPU path runs in-process with no temporary files.
 worker_tasks.sort(key=lambda t: len(t["texts"]) * t["max_length"], reverse=True)
 ```
 
-Example ordering for a 20k-admission worker half:
+Example ordering for a worker half:
 ```
-discharge_history  (20k × 4096)  cost: 82M   → processed first
-lab_blood_chemistry (20k × 2048) cost: 41M
-lab_blood_hematology (20k × 2048) cost: 41M
+discharge_history     (×admissions × 4096) → processed first
+lab_blood_chemistry   (×admissions × 2048)
+lab_blood_hematology  (×admissions × 2048)
 ...
-chief_complaint    (20k × 64)    cost: 1.3M  → processed last
+micro_{panel}         (×admissions × 512)
+...
+chief_complaint       (×admissions × 64)  → processed last
 ```
 
 Both workers process features in the same LPT order, so their logs are directly comparable.
@@ -655,7 +680,7 @@ The merged result is a valid parquet readable by `pandas`/`pyarrow`.
 ### Join diagram
 
 ```
-data_splits.parquet          (546,028 rows)
+data_splits.parquet
         │
         ├── LEFT JOIN y_labels.parquet              on hadm_id
         │       y1_mortality, y2_readmission
@@ -670,8 +695,11 @@ data_splits.parquet          (546,028 rows)
         ├── LEFT JOIN radiology_embeddings.parquet
         │       {feature}_embedding  [768 floats each]
         │
-        └── LEFT JOIN lab_{group}_embeddings.parquet  ×13
-                lab_{group}_embedding  [768 floats, zero vector if no events]
+        ├── LEFT JOIN lab_{group}_embeddings.parquet  ×13
+        │       lab_{group}_embedding  [768 floats, zero vector if no events]
+        │
+        └── LEFT JOIN micro_{panel}_embeddings.parquet  ×37
+                micro_{panel}_embedding  [768 floats, zero vector if no events]
 ```
 
 ### Output schema
@@ -702,8 +730,45 @@ data_splits.parquet          (546,028 rows)
 | `lab_bone_marrow_embedding` | float32[768] | embeddings/ |
 | `lab_joint_fluid_embedding` | float32[768] | embeddings/ |
 | `lab_stool_embedding` | float32[768] | embeddings/ |
+| `micro_blood_culture_routine_embedding` | float32[768] | embeddings/ |
+| `micro_blood_bottle_gram_stain_embedding` | float32[768] | embeddings/ |
+| `micro_urine_culture_embedding` | float32[768] | embeddings/ |
+| `micro_urine_viral_embedding` | float32[768] | embeddings/ |
+| `micro_urinary_antigens_embedding` | float32[768] | embeddings/ |
+| `micro_respiratory_non_invasive_embedding` | float32[768] | embeddings/ |
+| `micro_respiratory_invasive_embedding` | float32[768] | embeddings/ |
+| `micro_respiratory_afb_embedding` | float32[768] | embeddings/ |
+| `micro_respiratory_viral_embedding` | float32[768] | embeddings/ |
+| `micro_respiratory_pcp_legionella_embedding` | float32[768] | embeddings/ |
+| `micro_gram_stain_respiratory_embedding` | float32[768] | embeddings/ |
+| `micro_gram_stain_wound_tissue_embedding` | float32[768] | embeddings/ |
+| `micro_gram_stain_csf_embedding` | float32[768] | embeddings/ |
+| `micro_wound_culture_embedding` | float32[768] | embeddings/ |
+| `micro_hardware_and_lines_culture_embedding` | float32[768] | embeddings/ |
+| `micro_pleural_culture_embedding` | float32[768] | embeddings/ |
+| `micro_peritoneal_culture_embedding` | float32[768] | embeddings/ |
+| `micro_joint_fluid_culture_embedding` | float32[768] | embeddings/ |
+| `micro_fluid_culture_embedding` | float32[768] | embeddings/ |
+| `micro_bone_marrow_culture_embedding` | float32[768] | embeddings/ |
+| `micro_csf_culture_embedding` | float32[768] | embeddings/ |
+| `micro_fungal_tissue_wound_embedding` | float32[768] | embeddings/ |
+| `micro_fungal_respiratory_embedding` | float32[768] | embeddings/ |
+| `micro_fungal_fluid_embedding` | float32[768] | embeddings/ |
+| `micro_mrsa_staph_screen_embedding` | float32[768] | embeddings/ |
+| `micro_resistance_screen_embedding` | float32[768] | embeddings/ |
+| `micro_cdiff_embedding` | float32[768] | embeddings/ |
+| `micro_stool_bacterial_embedding` | float32[768] | embeddings/ |
+| `micro_stool_parasitology_embedding` | float32[768] | embeddings/ |
+| `micro_herpesvirus_serology_embedding` | float32[768] | embeddings/ |
+| `micro_hepatitis_hiv_embedding` | float32[768] | embeddings/ |
+| `micro_syphilis_serology_embedding` | float32[768] | embeddings/ |
+| `micro_misc_serology_embedding` | float32[768] | embeddings/ |
+| `micro_herpesvirus_culture_antigen_embedding` | float32[768] | embeddings/ |
+| `micro_gc_chlamydia_sti_embedding` | float32[768] | embeddings/ |
+| `micro_vaginal_genital_flora_embedding` | float32[768] | embeddings/ |
+| `micro_throat_strep_embedding` | float32[768] | embeddings/ |
 
-**Total: 24 columns** (3 metadata + 2 labels + 1 structured vector + 18 embeddings)
+**Total: 61 columns** (3 metadata + 2 labels + 1 structured vector + 55 embeddings: 5 text + 13 lab + 37 microbiology)
 
 ---
 
@@ -729,8 +794,14 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `BERT_FORCE_REEMBED` | bool | `false` | Bypass all slice/feature/record-level resume |
 | `BERT_CHECKPOINT_INTERVAL` | int | `10000` | Rows between within-feature checkpoint appends |
 | `LAB_ADMISSION_WINDOW` | int\|`"full"` | `24` | Hours of lab events from `admittime`; `"full"` = entire admission |
-| `HADM_LINKAGE_STRATEGY` | str | `"drop"` | `"drop"` or `"link"` for null `hadm_id` records |
-| `HADM_LINKAGE_TOLERANCE_HOURS` | int | `1` | Tolerance in hours for time-window linkage |
+| `HADM_LINKAGE_STRATEGY` | str | `"drop"` | `"drop"` or `"link"` for null `hadm_id` records in lab/note/chartevents |
+| `HADM_LINKAGE_TOLERANCE_HOURS` | int | `2` | Tolerance in hours for time-window linkage (lab/note/chartevents) |
+| `MICRO_WINDOW_HOURS` | int\|`"full_admission"` | `72` | Hours of microbiology events from `admittime`; `"full_admission"` = entire admission |
+| `MICRO_NULL_HADM_STRATEGY` | str | `"drop"` | `"drop"` or `"link"` for null `hadm_id` in microbiologyevents |
+| `MICRO_LINK_TOLERANCE_HOURS` | int | `2` | Tolerance in hours for microbiology hadm_id linkage |
+| `MICRO_INCLUDE_COMMENTS` | bool | `true` | Include cleaned comments field in microbiology text representation |
+| `MICRO_COMMENT_MAX_SENTENCES` | int | `2` | Max sentences retained after comment cleaning |
+| `MICRO_COMMENT_MAX_CHARS` | int | `200` | Hard character limit applied after sentence extraction |
 | `PREPROCESSING_DIR` | str | `data/preprocessing` | Root output directory |
 | `FEATURES_DIR` | str | `data/preprocessing/features` | Raw feature parquets |
 | `EMBEDDINGS_DIR` | str | `data/preprocessing/features/embeddings` | Embedding parquets |
@@ -741,14 +812,36 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 
 ## 7. Memory Requirements
 
-| Process | Peak RAM | Bottleneck |
-|---------|----------|------------|
-| `pipeline_job` | ~45 GB | `extract_discharge_history` loading 331k notes |
-| `embed_job` main process (per slice) | ~8 GB | Loading slice-filtered feature parquets + subset of 16.8M lab rows |
-| `embed_job` per GPU worker | ~2.5 GB | Model weights (570 MB) + embedding accumulation + batch buffers |
-| `embed_job` total (2 GPUs, one slice) | ~13 GB | Both workers run simultaneously; per-worker temp parquets add ~1 GB each |
-| `combine_job` | ~8 GB | Loading all 18 embedding parquets simultaneously |
+Memory is expressed as formulas based on config parameters so estimates remain valid as the corpus size changes. Let **A** = total admissions, **S** = `BERT_SLICE_SIZE_PER_GPU`, **G** = number of GPUs per job, **M** = model hidden size (768).
 
-All embed SLURM jobs allocated 64 GB for safe headroom. The main-process memory footprint is substantially lower per slice than for the full dataset, since feature parquets are filtered to `slice_hadm_ids` before spawning workers.
+### pipeline_job (CPU only)
 
-`labevents` (79M rows) and `chartevents` are never loaded fully — streamed in 500k-row chunks in the extract phase. The embed phase loads the already-filtered `labs_features.parquet` (16.8M rows total), further trimmed to the slice's admission subset.
+| Process | Formula | Dominant term |
+|---------|---------|---------------|
+| `extract_discharge_history` | O(total discharge notes × avg note length) | All discharge notes loaded into memory before concatenation |
+| All other extract modules | O(A) | Admission-indexed joins; well within available RAM |
+| **Recommended allocation** | **64 GB** | Discharge history is the bottleneck |
+
+### embed_job (2 GPUs, one slice)
+
+Let **W** = S × G = admissions per job (default: 40,000).
+
+| Component | Formula | Notes |
+|-----------|---------|-------|
+| Main process — feature parquets | O(W × 55 features × avg text length) | Filtered to slice hadm_ids before worker spawn |
+| Main process — labs parquet | O(W × avg lab events per admission) | Long-format, filtered to slice |
+| Per GPU worker — model weights | ~570 MB fixed | Clinical_ModernBERT frozen weights |
+| Per GPU worker — embedding buffer | O(S × M × 4 bytes) = O(S × 3072 bytes) | float32[768] per admission per feature batch |
+| Per GPU worker — batch buffer | O(batch_size × max_length_cap × 4 bytes) | Scales with `BERT_BATCH_SIZE` and per-feature cap |
+| Per-worker temp parquets | O(S × 55 × M × 4 bytes) per worker | Written incrementally; peak = one full feature written |
+| **Recommended allocation** | **64 GB per job** | Headroom for both workers + main process simultaneously |
+
+### combine_job (CPU only)
+
+| Component | Formula | Notes |
+|-----------|---------|-------|
+| All embedding parquets in memory | O(A × 55 × M × 4 bytes) | All 55 parquets joined simultaneously |
+| At default A=546k, M=768 | ≈ 546,000 × 55 × 768 × 4 ≈ **92 GB** | Exceeds 64 GB — load and join incrementally per parquet |
+| **Recommended allocation** | **32 GB** | Incremental join keeps peak well below full load |
+
+**Note on combine_job:** `combine_dataset.py` joins embedding parquets one at a time rather than loading all 55 simultaneously, keeping peak memory proportional to a single parquet (O(A × M × 4 bytes) ≈ 1.7 GB at default settings) plus the growing output dataframe.
