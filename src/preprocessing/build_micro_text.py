@@ -25,7 +25,7 @@ def clean_comment(text, cleaning_config: dict) -> str | None:
     Returns a cleaned string or None if the comment should be discarded.
     """
     # Step 1: discard null/blank/dash-only strings
-    if text is None:
+    if text is None or (not isinstance(text, str) and pd.isna(text)):
         return None
     text = str(text)
     if not text.strip():
@@ -137,35 +137,32 @@ def aggregate_panel_text(panel_df: pd.DataFrame, cleaning_config: dict) -> pd.Da
     for group_keys, group in panel_df.groupby(event_group_keys, dropna=False, sort=False):
         subject_id, hadm_id, charttime, test_name, spec_type_desc, org_name = group_keys
 
-        # Collect best interpretation per antibiotic
+        # Collect best interpretation per antibiotic (vectorized)
         ab_interps: dict[str, str] = {}
         ab_order: list[str] = []
-        for _, row in group.iterrows():
-            ab = row.get("ab_name") if hasattr(row, "get") else row["ab_name"]
-            interp = row.get("interpretation") if hasattr(row, "get") else row["interpretation"]
-            if not (pd.notna(ab) and str(ab).strip()):
-                continue
-            ab_str = str(ab)
-            interp_str = str(interp) if pd.notna(interp) else ""
+        ab_valid = group[group["ab_name"].notna() & (group["ab_name"].astype(str).str.strip() != "")]
+        for ab_str, interp_val in zip(
+            ab_valid["ab_name"].astype(str),
+            ab_valid["interpretation"],
+        ):
+            interp_str = str(interp_val) if pd.notna(interp_val) else ""
             if ab_str not in ab_interps:
                 ab_interps[ab_str] = interp_str
                 ab_order.append(ab_str)
             else:
-                existing = ab_interps[ab_str]
-                existing_pri = _INTERP_PRIORITY.get(existing, 99)
+                existing_pri = _INTERP_PRIORITY.get(ab_interps[ab_str], 99)
                 new_pri = _INTERP_PRIORITY.get(interp_str, 99)
                 if new_pri < existing_pri:
                     ab_interps[ab_str] = interp_str
 
         susc_string = ", ".join(f"{ab}:{ab_interps[ab]}" for ab in ab_order) if ab_order else ""
 
-        # Take first non-None cleaned comment across all rows in the group
+        # Take first non-None cleaned comment across all rows in the group (vectorized)
         cleaned_comment = None
-        for _, row in group.iterrows():
-            comment_raw = row.get("comments") if hasattr(row, "get") else row["comments"]
-            cleaned_comment = clean_comment(comment_raw, cleaning_config)
-            if cleaned_comment is not None:
-                break
+        cleaned_series = group["comments"].apply(lambda c: clean_comment(c, cleaning_config))
+        non_null = cleaned_series.dropna()
+        if not non_null.empty:
+            cleaned_comment = non_null.iloc[0]
 
         has_org = pd.notna(org_name) and bool(str(org_name).strip())
         if has_org:

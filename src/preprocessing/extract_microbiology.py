@@ -102,7 +102,15 @@ def run(config: dict) -> None:
     panels = micro_cfg.get("panels", {})
     excluded_tests = set(micro_cfg.get("excluded_tests", []))
     excluded_spec_types = set(micro_cfg.get("excluded_spec_types", []))
-    cleaning_config = micro_cfg.get("comment_cleaning", {})
+    cleaning_config = dict(micro_cfg.get("comment_cleaning", {}))
+
+    # Allow config overrides for comment cleaning parameters
+    if not config.get("MICRO_INCLUDE_COMMENTS", True):
+        cleaning_config["max_chars"] = 0
+    if "MICRO_COMMENT_MAX_SENTENCES" in config:
+        cleaning_config["max_sentences"] = int(config["MICRO_COMMENT_MAX_SENTENCES"])
+    if "MICRO_COMMENT_MAX_CHARS" in config:
+        cleaning_config["max_chars"] = int(config["MICRO_COMMENT_MAX_CHARS"])
 
     # Build combo → panel lookup
     combo_to_panel = {
@@ -218,13 +226,15 @@ def run(config: dict) -> None:
         micro["hadm_id"].nunique(),
     )
 
-    # Assign panels
-    def _assign_panel(row):
-        return combo_to_panel.get(
-            (str(row["test_name"]).strip(), str(row["spec_type_desc"]).strip())
-        )
-
-    micro["panel"] = micro.apply(_assign_panel, axis=1)
+    # Assign panels via vectorized merge on stripped (test_name, spec_type_desc) pairs
+    micro["_test_name_s"] = micro["test_name"].str.strip()
+    micro["_spec_type_s"] = micro["spec_type_desc"].str.strip()
+    combo_df = pd.DataFrame(
+        [(t, s, p) for (t, s), p in combo_to_panel.items()],
+        columns=["_test_name_s", "_spec_type_s", "panel"],
+    )
+    micro = micro.merge(combo_df, on=["_test_name_s", "_spec_type_s"], how="left")
+    micro = micro.drop(columns=["_test_name_s", "_spec_type_s"])
 
     unassigned = micro[micro["panel"].isna()].copy()
     if not unassigned.empty:
