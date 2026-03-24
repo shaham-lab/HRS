@@ -40,6 +40,7 @@ def compute_loss(
     w1: float,
     w2: float,
 ):
+    """Compute total loss and component losses for Y1 and Y2 with survivor masking."""
     pos_w1_tensor = torch.tensor(pos_weight_y1, device=logits_y1.device)
     loss_y1_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_w1_tensor)
     loss_y1 = loss_y1_fn(logits_y1.view(-1), y1.view(-1).float())
@@ -62,6 +63,7 @@ def compute_metrics(
     y1: torch.Tensor,
     y2: torch.Tensor,
 ) -> Dict[str, float]:
+    """Compute AUROC, AUPRC, and ECE metrics for both heads with survivor masking."""
     probs_y1 = torch.sigmoid(logits_y1).detach().cpu().view(-1).numpy()
     probs_y2 = torch.sigmoid(logits_y2).detach().cpu().view(-1).numpy()
 

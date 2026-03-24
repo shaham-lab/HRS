@@ -15,6 +15,7 @@ class RewardModel(nn.Module):
         dropout_rate: float,
         activation: str = "relu",
     ) -> None:
+        """Initialize the reward model MLP with configurable widths and activation."""
         super().__init__()
         widths = list(layer_widths)
         if not widths:
@@ -39,5 +40,6 @@ class RewardModel(nn.Module):
         self.head_y2 = nn.Linear(in_dim, 1)
 
     def forward(self, x: torch.Tensor):
+        """Compute logits for Y1 and Y2 given input features."""
         features = self.backbone(x)
         return self.head_y1(features), self.head_y2(features)

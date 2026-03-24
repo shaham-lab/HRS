@@ -1,8 +1,9 @@
 import logging
 import math
 import os
-from collections import OrderedDict, namedtuple
-from typing import Dict, Iterable, List, Optional, Tuple
+from bisect import bisect_right
+from collections import OrderedDict
+from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
 import pyarrow as pa
 import pyarrow.parquet as pq
@@ -149,7 +150,6 @@ _MICRO_EMBEDDINGS = {
 
 
 class RewardModelConfig(BaseModel):
-    INPUT_DIM: int
     LAYER_WIDTHS: List[int]
     DROPOUT_RATE: float
     ACTIVATION: str
@@ -230,6 +230,7 @@ class RewardModelConfig(BaseModel):
 
 
 def load_and_validate_config(path: str) -> RewardModelConfig:
+    """Load YAML config and validate it against the RewardModelConfig schema."""
     with open(path, "r", encoding="utf-8") as handle:
         data = yaml.safe_load(handle) or {}
     try:
@@ -239,6 +240,7 @@ def load_and_validate_config(path: str) -> RewardModelConfig:
 
 
 def build_feature_index_map(columns: Iterable[str]) -> Dict[str, Tuple[int, int]]:
+    """Derive feature index ranges from ordered dataset columns."""
     feature_columns: List[str] = []
     for name in columns:
         if name in {"subject_id", "hadm_id", "split", "y1_mortality", "y2_readmission"}:
@@ -292,6 +294,7 @@ def build_feature_index_map(columns: Iterable[str]) -> Dict[str, Tuple[int, int]
 
 
 def compute_pos_weights(df_train) -> Tuple[float, float]:
+    """Compute positive class weights for Y1 (all) and Y2 (survivors)."""
     y1 = df_train["y1_mortality"].astype(float)
     pos_y1 = float((y1 == 1).sum())
     neg_y1 = float((y1 == 0).sum())
@@ -317,6 +320,7 @@ def sigmoid_crossover(
     end_ratios: Dict[str, float],
     midpoint: float,
 ) -> Tuple[float, float, float]:
+    """Compute masking probabilities for the given epoch using a sigmoid crossover."""
     clamped_epoch = max(0, min(epoch, total_epochs))
     scale = max(total_epochs * 0.1, 1.0)
     progress = 1.0 / (1.0 + math.exp(-(clamped_epoch - midpoint) / scale))
@@ -325,20 +329,23 @@ def sigmoid_crossover(
         start = start_ratios[key]
         end = end_ratios[key]
         probs.append(start + (end - start) * progress)
-    return tuple(probs)  # type: ignore[return-value]
+    return (probs[0], probs[1], probs[2])
 
 
 def get_device(local_rank: int) -> torch.device:
+    """Return CUDA device at local_rank if available, else CPU."""
     if torch.cuda.is_available():
         return torch.device("cuda", local_rank)
     return torch.device("cpu")
 
 
 def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap a DDP-wrapped model to its underlying module."""
     return model.module if hasattr(model, "module") else model
 
 
 def broadcast_tensor(tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
+    """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.broadcast(tensor, src=src_rank)
     return tensor
@@ -352,6 +359,7 @@ class ParquetDataset(torch.utils.data.Dataset):
         feature_index_map: Dict[str, Tuple[int, int]],
         cache_size: int,
     ) -> None:
+        """Create a lazy Parquet-backed dataset with LRU row-group cache."""
         self._parquet_file = parquet_file
         self._row_indices = list(row_indices)
         self._feature_index_map = feature_index_map
@@ -361,16 +369,19 @@ class ParquetDataset(torch.utils.data.Dataset):
 
         metadata = parquet_file.metadata
         self._row_group_boundaries: List[Tuple[int, int]] = []
+        self._rg_starts: List[int] = []
         start = 0
         for i in range(metadata.num_row_groups):
             num_rows = metadata.row_group(i).num_rows
             self._row_group_boundaries.append((start, start + num_rows))
+            self._rg_starts.append(start)
             start += num_rows
 
     def __len__(self) -> int:
         return len(self._row_indices)
 
     def __getitem__(self, idx: int):
+        """Return feature tensor and labels for the idx-th split row."""
         row_idx = self._row_indices[idx]
         rg_index, rg_start = self._locate_row_group(row_idx)
         table = self._get_row_group(rg_index)
@@ -393,10 +404,13 @@ class ParquetDataset(torch.utils.data.Dataset):
         return X, y1_tensor, y2_tensor
 
     def _locate_row_group(self, row_idx: int) -> Tuple[int, int]:
-        for i, (start, end) in enumerate(self._row_group_boundaries):
-            if start <= row_idx < end:
-                return i, start
-        raise IndexError(f"Row index {row_idx} out of bounds for dataset")
+        i = bisect_right(self._rg_starts, row_idx) - 1
+        if i < 0 or i >= len(self._row_group_boundaries):
+            raise IndexError(f"Row index {row_idx} out of bounds for dataset")
+        start, end = self._row_group_boundaries[i]
+        if not (start <= row_idx < end):
+            raise IndexError(f"Row index {row_idx} out of bounds for dataset")
+        return i, start
 
     def _get_row_group(self, rg_index: int) -> pa.Table:
         if rg_index in self._cache:
@@ -411,10 +425,70 @@ class ParquetDataset(torch.utils.data.Dataset):
         return table
 
 
-DatasetBundle = namedtuple(
-    "DatasetBundle",
-    ["train_dataset", "dev_dataset", "test_dataset", "feature_index_map", "pos_weight_y1", "pos_weight_y2"],
-)
+class DatasetBundle(NamedTuple):
+    train_dataset: "ParquetDataset"
+    dev_dataset: "ParquetDataset"
+    test_dataset: "ParquetDataset"
+    feature_index_map: Dict[str, Tuple[int, int]]
+    pos_weight_y1: float
+    pos_weight_y2: float
+    input_dim: int
+
+
+def _validate_column_order(schema: pa.Schema, expected: List[str]) -> None:
+    if list(schema.names) != expected:
+        raise SchemaError(
+            "Column order or presence mismatch; expected columns per PREPROCESSING_DATA_MODEL.md Section 3.12"
+        )
+
+
+def _assert_dtype_matches(field: pa.Field, allowed_types: Tuple[pa.DataType, ...], producer: str) -> None:
+    if not any(field.type == allowed for allowed in allowed_types):
+        allowed_str = ", ".join(str(t) for t in allowed_types)
+        raise SchemaError(f"{field.name} dtype mismatch (expected one of {allowed_str}) produced by {producer}")
+
+
+def _validate_label_columns(schema: pa.Schema) -> None:
+    y1_field = schema.field("y1_mortality")
+    y2_field = schema.field("y2_readmission")
+    _assert_dtype_matches(y1_field, (pa.int8(), pa.float32()), "extract_y_data.py (y1_mortality)")
+    _assert_dtype_matches(y2_field, (pa.float32(),), "extract_y_data.py (y2_readmission)")
+
+
+def _validate_embedding_columns(schema: pa.Schema) -> None:
+    for name in schema.names:
+        if not name.endswith("_embedding"):
+            continue
+        field = schema.field(name)
+        if not (pa.types.is_fixed_size_list(field.type) and pa.types.is_float32(field.type.value_type)):
+            raise SchemaError(f"{name} type mismatch; expected float32[768] produced by combine_dataset.py")
+        if field.type.list_size != 768:
+            raise SchemaError(f"{name} length mismatch; expected fixed_size_list[768] produced by combine_dataset.py")
+
+
+def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> None:
+    for col in columns:
+        nulls = 0
+        for rg in range(parquet_file.metadata.num_row_groups):
+            idx = parquet_file.schema_arrow.get_field_index(col)
+            stats = parquet_file.metadata.row_group(rg).column(idx).statistics
+            if stats is None:
+                raise SchemaError(f"Missing statistics for column {col}; cannot validate null counts")
+            nulls += stats.null_count
+        if nulls != 0:
+            producer = "combine_dataset.py" if col.endswith("_embedding") else "extract_y_data.py"
+            raise SchemaError(f"Null values found in {col} produced by {producer}")
+
+
+def validate_schema(parquet_file: pq.ParquetFile) -> None:
+    """Validate dataset schema, dtypes, and null counts against the contract."""
+    schema = parquet_file.schema_arrow
+    expected_columns = get_expected_columns()
+    _validate_column_order(schema, expected_columns)
+    _validate_label_columns(schema)
+    _validate_embedding_columns(schema)
+    _validate_null_counts(parquet_file, ["y1_mortality"])
+    _validate_null_counts(parquet_file, [name for name in expected_columns if name.endswith("_embedding")])
 
 
 def get_expected_columns() -> List[str]:
