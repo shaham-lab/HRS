@@ -126,7 +126,9 @@ def run(config: RewardModelConfig) -> DatasetBundle:
 
     derived_dim = max(end for _, end in feature_index_map.values())
     if config.INPUT_DIM != derived_dim:
-        raise SchemaError(f"INPUT_DIM {config.INPUT_DIM} does not match derived dimension from feature index map")
+        raise SchemaError(
+            f"INPUT_DIM {config.INPUT_DIM} does not match derived dimension {derived_dim} from feature index map"
+        )
 
     cache_size = config.DATASET_ROW_GROUP_CACHE_SIZE
     train_dataset = ParquetDataset(parquet_file, train_rows, feature_index_map, cache_size)

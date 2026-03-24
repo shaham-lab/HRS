@@ -318,7 +318,7 @@ def sigmoid_crossover(
     midpoint: float,
 ) -> Tuple[float, float, float]:
     clamped_epoch = max(0, min(epoch, total_epochs))
-    scale = total_epochs if total_epochs > 0 else 1.0
+    scale = max(total_epochs * 0.1, 1.0)
     progress = 1.0 / (1.0 + math.exp(-(clamped_epoch - midpoint) / scale))
     probs = []
     for key in ("random", "adversarial", "none"):
