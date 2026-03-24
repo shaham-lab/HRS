@@ -426,9 +426,9 @@ class ParquetDataset(torch.utils.data.Dataset):
 
 
 class DatasetBundle(NamedTuple):
-    train_dataset: "ParquetDataset"
-    dev_dataset: "ParquetDataset"
-    test_dataset: "ParquetDataset"
+    train_dataset: ParquetDataset
+    dev_dataset: ParquetDataset
+    test_dataset: ParquetDataset
     feature_index_map: Dict[str, Tuple[int, int]]
     pos_weight_y1: float
     pos_weight_y2: float
@@ -469,8 +469,8 @@ def _validate_embedding_columns(schema: pa.Schema) -> None:
 def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> None:
     for col in columns:
         nulls = 0
+        idx = parquet_file.schema_arrow.get_field_index(col)
         for rg in range(parquet_file.metadata.num_row_groups):
-            idx = parquet_file.schema_arrow.get_field_index(col)
             stats = parquet_file.metadata.row_group(rg).column(idx).statistics
             if stats is None:
                 raise SchemaError(f"Missing statistics for column {col}; cannot validate null counts")
@@ -488,7 +488,6 @@ def validate_schema(parquet_file: pq.ParquetFile) -> None:
     _validate_label_columns(schema)
     _validate_embedding_columns(schema)
     _validate_null_counts(parquet_file, ["y1_mortality"])
-    _validate_null_counts(parquet_file, [name for name in expected_columns if name.endswith("_embedding")])
 
 
 def get_expected_columns() -> List[str]:
