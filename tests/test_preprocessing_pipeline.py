@@ -1941,5 +1941,614 @@ class TestEmbedFeaturesWorkerPaths(unittest.TestCase):
         self.assertEqual(n_rows, len(final_df), "n_rows must match actual file row count")
 
 
+class TestBuildMicroPanelConfig(unittest.TestCase):
+    """Tests for build_micro_panel_config.py logic."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.classifications_dir = os.path.join(self.tmp, "classifications")
+        os.makedirs(self.classifications_dir)
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_panels_yaml_created(self):
+        """micro_panel_config.yaml is written to CLASSIFICATIONS_DIR."""
+        import build_micro_panel_config
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        out_path = os.path.join(self.classifications_dir, "micro_panel_config.yaml")
+        self.assertTrue(os.path.exists(out_path))
+
+    def test_yaml_has_37_panels(self):
+        """Config contains exactly 37 panels."""
+        import build_micro_panel_config
+        import yaml
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        with open(os.path.join(self.classifications_dir, "micro_panel_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertIn("panels", cfg)
+        self.assertEqual(len(cfg["panels"]), 37)
+
+    def test_expected_panel_names_present(self):
+        """Key panel names are present."""
+        import build_micro_panel_config
+        import yaml
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        with open(os.path.join(self.classifications_dir, "micro_panel_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        panels = set(cfg["panels"].keys())
+        for expected in [
+            "blood_culture_routine", "urine_culture", "cdiff",
+            "respiratory_viral", "csf_culture", "herpesvirus_serology",
+        ]:
+            self.assertIn(expected, panels, f"Panel {expected!r} missing")
+
+    def test_combos_are_lists_of_two(self):
+        """Every combo is a list of exactly two strings."""
+        import build_micro_panel_config
+        import yaml
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        with open(os.path.join(self.classifications_dir, "micro_panel_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        for panel_name, panel_data in cfg["panels"].items():
+            for combo in panel_data["combos"]:
+                self.assertEqual(len(combo), 2,
+                                 f"Combo {combo!r} in {panel_name} has wrong length")
+                self.assertIsInstance(combo[0], str,
+                                     f"Combo[0] in {panel_name} is not a string")
+                self.assertIsInstance(combo[1], str,
+                                     f"Combo[1] in {panel_name} is not a string")
+
+    def test_excluded_tests_present(self):
+        """excluded_tests list is non-empty and contains known entries."""
+        import build_micro_panel_config
+        import yaml
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        with open(os.path.join(self.classifications_dir, "micro_panel_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertIn("excluded_tests", cfg)
+        self.assertIn("voided", cfg["excluded_tests"])
+        self.assertIn("Stool Hold Request", cfg["excluded_tests"])
+
+    def test_excluded_spec_types_present(self):
+        """excluded_spec_types list contains post-mortem specimen types."""
+        import build_micro_panel_config
+        import yaml
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        with open(os.path.join(self.classifications_dir, "micro_panel_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        self.assertIn("excluded_spec_types", cfg)
+        self.assertIn("POSTMORTEM CULTURE", cfg["excluded_spec_types"])
+        self.assertIn("BLOOD CULTURE (POST-MORTEM)", cfg["excluded_spec_types"])
+
+    def test_comment_cleaning_section_present(self):
+        """comment_cleaning section has required keys."""
+        import build_micro_panel_config
+        import yaml
+        config = {"CLASSIFICATIONS_DIR": self.classifications_dir}
+        build_micro_panel_config.run(config)
+        with open(os.path.join(self.classifications_dir, "micro_panel_config.yaml")) as fh:
+            cfg = yaml.safe_load(fh)
+        cc = cfg.get("comment_cleaning", {})
+        for key in ["max_sentences", "max_chars", "discard_prefixes", "strip_triggers"]:
+            self.assertIn(key, cc, f"comment_cleaning.{key} missing")
+        self.assertIn("TEST CANCELLED", cc["discard_prefixes"])
+        self.assertIn("Reference Range", cc["strip_triggers"])
+
+    def test_missing_config_key_raises(self):
+        """Missing CLASSIFICATIONS_DIR raises KeyError."""
+        import build_micro_panel_config
+        with self.assertRaises(KeyError):
+            build_micro_panel_config.run({})
+
+
+class TestCleanComment(unittest.TestCase):
+    """Tests for build_micro_text.clean_comment()."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+        import build_micro_text
+        self.clean = build_micro_text.clean_comment
+        self.cfg = {
+            "max_sentences": 2,
+            "max_chars": 200,
+            "discard_prefixes": [
+                "TEST CANCELLED",
+                "PATIENT CREDITED",
+                "Patient credited",
+                "Test cancelled",
+                "test cancelled",
+                "TEST NOT PERFORMED",
+                "DUPLICATE ORDER",
+                "GRAM STAIN OF THIS SPECIMEN INDICATES CONTAMINATION",
+            ],
+            "strip_triggers": [
+                "Reference Range",
+                "Reference range",
+                "Detection Range",
+                "Detection range",
+                "Linear range",
+                "Performed by",
+                "performed by",
+                "Performed using",
+                "performed using",
+                "Validated for use",
+                "validated for use",
+                "Performance characteristics",
+                "performance characteristics",
+                "A positive IgG result",
+                "A positive IgM result",
+                "This test",
+                "this test",
+                "In most population",
+                "The FDA",
+                "the FDA",
+                "screened for",
+                "Detection of viruses",
+                "PLEASE SUBMIT ANOTHER",
+                "rule out",
+                "approved",
+                "Patients",
+                "patients",
+            ],
+        }
+
+    def test_null_returns_none(self):
+        self.assertIsNone(self.clean(None, self.cfg))
+
+    def test_empty_string_returns_none(self):
+        self.assertIsNone(self.clean("", self.cfg))
+
+    def test_whitespace_only_returns_none(self):
+        self.assertIsNone(self.clean("   ", self.cfg))
+
+    def test_underscore_placeholder_returns_none(self):
+        self.assertIsNone(self.clean("___", self.cfg))
+
+    def test_dash_placeholder_returns_none(self):
+        self.assertIsNone(self.clean("---", self.cfg))
+
+    def test_discard_prefix_test_cancelled(self):
+        self.assertIsNone(self.clean("TEST CANCELLED, PATIENT CREDITED.", self.cfg))
+
+    def test_discard_prefix_gram_stain_contamination(self):
+        self.assertIsNone(
+            self.clean("GRAM STAIN OF THIS SPECIMEN INDICATES CONTAMINATION extra", self.cfg)
+        )
+
+    def test_strip_trigger_reference_range(self):
+        result = self.clean("NONREACTIVE.  Reference Range: Non-Reactive.", self.cfg)
+        self.assertEqual(result, "NONREACTIVE")
+
+    def test_strip_trigger_performed_using(self):
+        result = self.clean(
+            "HIV-1 RNA is not detected.  Performed using the ___ HIV-1 Test v2.0.", self.cfg
+        )
+        self.assertEqual(result, "HIV-1 RNA is not detected")
+
+    def test_two_sentences_kept(self):
+        result = self.clean(
+            "NO POLYMORPHONUCLEAR LEUKOCYTES SEEN.  NO MICROORGANISMS SEEN.  "
+            "This is a concentrated smear made by cytospin method.",
+            self.cfg,
+        )
+        self.assertIn("NO POLYMORPHONUCLEAR LEUKOCYTES SEEN", result)
+        self.assertIn("NO MICROORGANISMS SEEN", result)
+
+    def test_third_sentence_dropped(self):
+        result = self.clean(
+            "Sentence one.  Sentence two.  Sentence three should be dropped.",
+            self.cfg,
+        )
+        self.assertNotIn("Sentence three", result)
+
+    def test_max_chars_truncation(self):
+        cfg = dict(self.cfg, max_chars=10)
+        result = self.clean("ABCDEFGHIJKLMNOPQRSTUVWXYZ", cfg)
+        self.assertLessEqual(len(result), 10)
+
+    def test_trailing_paren_artifact_removed(self):
+        result = self.clean("NEGATIVE BY EIA.            (Reference Range-Negative).", self.cfg)
+        self.assertIsNotNone(result)
+        self.assertNotIn("(", result)
+
+    def test_mixed_flora_passes_through(self):
+        """Important: MIXED BACTERIAL FLORA comments must not be discarded."""
+        text = (
+            "MIXED BACTERIAL FLORA ( >= 3 COLONY TYPES), "
+            "CONSISTENT WITH SKIN AND/OR GENITAL CONTAMINATION."
+        )
+        result = self.clean(text, self.cfg)
+        self.assertIsNotNone(result)
+        self.assertIn("MIXED BACTERIAL FLORA", result)
+
+    def test_pandas_nan_returns_none(self):
+        result = self.clean(float("nan"), self.cfg)
+        self.assertIsNone(result)
+
+
+class TestBuildEventText(unittest.TestCase):
+    """Tests for build_micro_text.build_event_text()."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+        import build_micro_text
+        self.build = build_micro_text.build_event_text
+        self.cfg = {"max_sentences": 2, "max_chars": 200, "discard_prefixes": [], "strip_triggers": []}
+
+    def test_case_a_with_org_name(self):
+        row = {
+            "test_name": "BLOOD CULTURE",
+            "spec_type_desc": "BLOOD",
+            "org_name": "STAPHYLOCOCCUS AUREUS",
+            "ab_name": "OXACILLIN",
+            "interpretation": "R",
+            "comments": None,
+        }
+        result = self.build(row, self.cfg)
+        self.assertIn("BLOOD CULTURE [BLOOD]: STAPHYLOCOCCUS AUREUS", result)
+        self.assertIn("OXACILLIN:R", result)
+
+    def test_case_b_comment_only(self):
+        row = {
+            "test_name": "C. difficile PCR",
+            "spec_type_desc": "STOOL",
+            "org_name": None,
+            "ab_name": None,
+            "interpretation": None,
+            "comments": "NEGATIVE",
+        }
+        result = self.build(row, self.cfg)
+        self.assertEqual(result, "C. difficile PCR [STOOL]: NEGATIVE")
+
+    def test_case_c_pending(self):
+        row = {
+            "test_name": "URINE CULTURE",
+            "spec_type_desc": "URINE",
+            "org_name": None,
+            "ab_name": None,
+            "interpretation": None,
+            "comments": None,
+        }
+        result = self.build(row, self.cfg)
+        self.assertIn("pending", result)
+
+
+class TestAggregatePanelText(unittest.TestCase):
+    """Tests for build_micro_text.aggregate_panel_text()."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+        import build_micro_text
+        self.aggregate = build_micro_text.aggregate_panel_text
+        self.cfg = {"max_sentences": 2, "max_chars": 200, "discard_prefixes": [], "strip_triggers": []}
+
+    def test_empty_df_returns_empty(self):
+        df = pd.DataFrame(columns=[
+            "subject_id", "hadm_id", "charttime", "test_name", "spec_type_desc",
+            "org_name", "ab_name", "interpretation", "comments",
+        ])
+        result = self.aggregate(df, self.cfg)
+        self.assertEqual(len(result), 0)
+        self.assertListEqual(list(result.columns), ["subject_id", "hadm_id", "text"])
+
+    def test_single_event_produces_one_row(self):
+        df = pd.DataFrame([{
+            "subject_id": 1,
+            "hadm_id": 100,
+            "charttime": pd.Timestamp("2020-01-01"),
+            "test_name": "URINE CULTURE",
+            "spec_type_desc": "URINE",
+            "org_name": None,
+            "ab_name": None,
+            "interpretation": None,
+            "comments": "NEGATIVE",
+            "panel": "urine_culture",
+        }])
+        result = self.aggregate(df, self.cfg)
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result.iloc[0]["hadm_id"], 100)
+        self.assertIn("URINE CULTURE", result.iloc[0]["text"])
+
+    def test_multiple_admissions_produce_separate_rows(self):
+        rows = []
+        for hadm_id in [100, 200, 300]:
+            rows.append({
+                "subject_id": hadm_id // 100,
+                "hadm_id": hadm_id,
+                "charttime": pd.Timestamp("2020-01-01"),
+                "test_name": "URINE CULTURE",
+                "spec_type_desc": "URINE",
+                "org_name": None,
+                "ab_name": None,
+                "interpretation": None,
+                "comments": "NEGATIVE",
+                "panel": "urine_culture",
+            })
+        df = pd.DataFrame(rows)
+        result = self.aggregate(df, self.cfg)
+        self.assertEqual(len(result), 3)
+
+    def test_susceptibility_aggregation(self):
+        """Multiple antibiotic rows for same org are combined into one event."""
+        rows = [
+            {
+                "subject_id": 1, "hadm_id": 100,
+                "charttime": pd.Timestamp("2020-01-01"),
+                "test_name": "BLOOD CULTURE", "spec_type_desc": "BLOOD CULTURE",
+                "org_name": "STAPH", "ab_name": "OXACILLIN", "interpretation": "R",
+                "comments": None, "panel": "blood_culture_routine",
+            },
+            {
+                "subject_id": 1, "hadm_id": 100,
+                "charttime": pd.Timestamp("2020-01-01"),
+                "test_name": "BLOOD CULTURE", "spec_type_desc": "BLOOD CULTURE",
+                "org_name": "STAPH", "ab_name": "VANCOMYCIN", "interpretation": "S",
+                "comments": None, "panel": "blood_culture_routine",
+            },
+        ]
+        df = pd.DataFrame(rows)
+        result = self.aggregate(df, self.cfg)
+        self.assertEqual(len(result), 1)
+        text = result.iloc[0]["text"]
+        self.assertIn("OXACILLIN:R", text)
+        self.assertIn("VANCOMYCIN:S", text)
+
+    def test_events_joined_with_pipe_separator(self):
+        """Multiple events per admission are joined with ' | '."""
+        rows = [
+            {
+                "subject_id": 1, "hadm_id": 100,
+                "charttime": pd.Timestamp("2020-01-01"),
+                "test_name": "URINE CULTURE", "spec_type_desc": "URINE",
+                "org_name": None, "ab_name": None, "interpretation": None,
+                "comments": "NEGATIVE", "panel": "urine_culture",
+            },
+            {
+                "subject_id": 1, "hadm_id": 100,
+                "charttime": pd.Timestamp("2020-01-02"),
+                "test_name": "URINE CULTURE", "spec_type_desc": "URINE",
+                "org_name": None, "ab_name": None, "interpretation": None,
+                "comments": "POSITIVE", "panel": "urine_culture",
+            },
+        ]
+        df = pd.DataFrame(rows)
+        result = self.aggregate(df, self.cfg)
+        self.assertEqual(len(result), 1)
+        self.assertIn(" | ", result.iloc[0]["text"])
+
+
+class TestExtractMicrobiologyWindow(unittest.TestCase):
+    """Tests for extract_microbiology time-window and hadm_id handling."""
+
+    def setUp(self):
+        sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
+        import extract_microbiology
+        self.module = extract_microbiology
+        self.tmp = tempfile.mkdtemp()
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_parse_micro_window_int(self):
+        cfg = {"MICRO_WINDOW_HOURS": 72}
+        self.assertEqual(self.module._parse_micro_window(cfg), 72)
+
+    def test_parse_micro_window_default(self):
+        self.assertEqual(self.module._parse_micro_window({}), 72)
+
+    def test_parse_micro_window_full_admission(self):
+        cfg = {"MICRO_WINDOW_HOURS": "full_admission"}
+        self.assertEqual(self.module._parse_micro_window(cfg), "full_admission")
+
+    def test_parse_micro_window_zero_raises(self):
+        with self.assertRaises(ValueError):
+            self.module._parse_micro_window({"MICRO_WINDOW_HOURS": 0})
+
+    def test_parse_micro_window_invalid_raises(self):
+        with self.assertRaises(ValueError):
+            self.module._parse_micro_window({"MICRO_WINDOW_HOURS": "bad"})
+
+    def test_missing_config_keys_raises(self):
+        with self.assertRaises(KeyError):
+            self.module.run({})
+
+    def test_run_produces_panel_parquets(self):
+        """run() writes 37 micro_<panel>.parquet files to FEATURES_DIR."""
+        import yaml
+        # Set up directory structure
+        mimic_dir = os.path.join(self.tmp, "mimic")
+        hosp_dir = os.path.join(mimic_dir, "hosp")
+        features_dir = os.path.join(self.tmp, "features")
+        classifications_dir = os.path.join(self.tmp, "classifications")
+        os.makedirs(hosp_dir)
+        os.makedirs(features_dir)
+        os.makedirs(classifications_dir)
+
+        # Write a minimal micro_panel_config.yaml with one panel
+        panel_cfg = {
+            "panels": {
+                "urine_culture": {
+                    "combos": [["URINE CULTURE", "URINE"]],
+                }
+            },
+            "excluded_tests": [],
+            "excluded_spec_types": ["POSTMORTEM CULTURE"],
+            "comment_cleaning": {
+                "max_sentences": 2,
+                "max_chars": 200,
+                "discard_prefixes": [],
+                "strip_triggers": [],
+            },
+        }
+        with open(os.path.join(classifications_dir, "micro_panel_config.yaml"), "w") as fh:
+            yaml.dump(panel_cfg, fh)
+
+        # Write admissions
+        admissions = pd.DataFrame({
+            "subject_id": [1, 2],
+            "hadm_id": [100, 200],
+            "admittime": [pd.Timestamp("2020-01-01 08:00"), pd.Timestamp("2020-02-01 08:00")],
+            "dischtime": [pd.Timestamp("2020-01-05 08:00"), pd.Timestamp("2020-02-05 08:00")],
+        })
+        admissions.to_csv(os.path.join(hosp_dir, "admissions.csv"), index=False)
+
+        # Write microbiologyevents with one urine culture event for hadm 100
+        micro = pd.DataFrame({
+            "subject_id": [1],
+            "hadm_id": [100.0],
+            "charttime": [pd.Timestamp("2020-01-01 10:00")],
+            "spec_type_desc": ["URINE"],
+            "test_name": ["URINE CULTURE"],
+            "org_name": [None],
+            "ab_name": [None],
+            "interpretation": [None],
+            "comments": ["NEGATIVE"],
+        })
+        micro.to_csv(os.path.join(hosp_dir, "microbiologyevents.csv"), index=False)
+
+        config = {
+            "MIMIC_DATA_DIR": mimic_dir,
+            "FEATURES_DIR": features_dir,
+            "CLASSIFICATIONS_DIR": classifications_dir,
+        }
+        self.module.run(config)
+
+        out_path = os.path.join(features_dir, "micro_urine_culture.parquet")
+        self.assertTrue(os.path.exists(out_path), "urine_culture parquet not created")
+        df = pd.read_parquet(out_path)
+        self.assertListEqual(sorted(df.columns.tolist()), sorted(["subject_id", "hadm_id", "text"]))
+        self.assertEqual(len(df), 1)
+        self.assertIn("URINE CULTURE", df.iloc[0]["text"])
+
+    def test_events_outside_window_excluded(self):
+        """Events after the time window are not included."""
+        import yaml
+
+        mimic_dir = os.path.join(self.tmp, "mimic2")
+        hosp_dir = os.path.join(mimic_dir, "hosp")
+        features_dir = os.path.join(self.tmp, "features2")
+        classifications_dir = os.path.join(self.tmp, "classifications2")
+        os.makedirs(hosp_dir)
+        os.makedirs(features_dir)
+        os.makedirs(classifications_dir)
+
+        panel_cfg = {
+            "panels": {
+                "urine_culture": {"combos": [["URINE CULTURE", "URINE"]]},
+            },
+            "excluded_tests": [],
+            "excluded_spec_types": [],
+            "comment_cleaning": {
+                "max_sentences": 2, "max_chars": 200,
+                "discard_prefixes": [], "strip_triggers": [],
+            },
+        }
+        with open(os.path.join(classifications_dir, "micro_panel_config.yaml"), "w") as fh:
+            yaml.dump(panel_cfg, fh)
+
+        admissions = pd.DataFrame({
+            "subject_id": [1],
+            "hadm_id": [100],
+            "admittime": [pd.Timestamp("2020-01-01 08:00")],
+            "dischtime": [pd.Timestamp("2020-01-10 08:00")],
+        })
+        admissions.to_csv(os.path.join(hosp_dir, "admissions.csv"), index=False)
+
+        # Event is 100 hours after admittime — outside 72-hour window
+        micro = pd.DataFrame({
+            "subject_id": [1],
+            "hadm_id": [100.0],
+            "charttime": [pd.Timestamp("2020-01-05 20:00")],  # ~108h after admit
+            "spec_type_desc": ["URINE"],
+            "test_name": ["URINE CULTURE"],
+            "org_name": [None],
+            "ab_name": [None],
+            "interpretation": [None],
+            "comments": ["NEGATIVE"],
+        })
+        micro.to_csv(os.path.join(hosp_dir, "microbiologyevents.csv"), index=False)
+
+        config = {
+            "MIMIC_DATA_DIR": mimic_dir,
+            "FEATURES_DIR": features_dir,
+            "CLASSIFICATIONS_DIR": classifications_dir,
+            "MICRO_WINDOW_HOURS": 72,
+        }
+        self.module.run(config)
+
+        out_path = os.path.join(features_dir, "micro_urine_culture.parquet")
+        self.assertTrue(os.path.exists(out_path))
+        df = pd.read_parquet(out_path)
+        self.assertEqual(len(df), 0, "Event outside window should not be in output")
+
+    def test_excluded_spec_type_dropped(self):
+        """Rows with excluded spec_type_desc are excluded."""
+        import yaml
+
+        mimic_dir = os.path.join(self.tmp, "mimic3")
+        hosp_dir = os.path.join(mimic_dir, "hosp")
+        features_dir = os.path.join(self.tmp, "features3")
+        classifications_dir = os.path.join(self.tmp, "classifications3")
+        os.makedirs(hosp_dir)
+        os.makedirs(features_dir)
+        os.makedirs(classifications_dir)
+
+        panel_cfg = {
+            "panels": {
+                "urine_culture": {"combos": [["URINE CULTURE", "URINE"]]},
+            },
+            "excluded_tests": [],
+            "excluded_spec_types": ["POSTMORTEM CULTURE"],
+            "comment_cleaning": {
+                "max_sentences": 2, "max_chars": 200,
+                "discard_prefixes": [], "strip_triggers": [],
+            },
+        }
+        with open(os.path.join(classifications_dir, "micro_panel_config.yaml"), "w") as fh:
+            yaml.dump(panel_cfg, fh)
+
+        admissions = pd.DataFrame({
+            "subject_id": [1],
+            "hadm_id": [100],
+            "admittime": [pd.Timestamp("2020-01-01 08:00")],
+            "dischtime": [pd.Timestamp("2020-01-10 08:00")],
+        })
+        admissions.to_csv(os.path.join(hosp_dir, "admissions.csv"), index=False)
+
+        # Event with excluded spec type
+        micro = pd.DataFrame({
+            "subject_id": [1],
+            "hadm_id": [100.0],
+            "charttime": [pd.Timestamp("2020-01-01 10:00")],
+            "spec_type_desc": ["POSTMORTEM CULTURE"],
+            "test_name": ["URINE CULTURE"],
+            "org_name": [None],
+            "ab_name": [None],
+            "interpretation": [None],
+            "comments": ["NEGATIVE"],
+        })
+        micro.to_csv(os.path.join(hosp_dir, "microbiologyevents.csv"), index=False)
+
+        config = {
+            "MIMIC_DATA_DIR": mimic_dir,
+            "FEATURES_DIR": features_dir,
+            "CLASSIFICATIONS_DIR": classifications_dir,
+        }
+        self.module.run(config)
+
+        out_path = os.path.join(features_dir, "micro_urine_culture.parquet")
+        df = pd.read_parquet(out_path)
+        self.assertEqual(len(df), 0, "Excluded spec_type row should not appear in output")
+
+
 if __name__ == "__main__":
     unittest.main()

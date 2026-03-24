@@ -5,7 +5,7 @@ Used by submit_all.sh to decide which jobs to submit without requiring
 a manual --embed-only flag.
 
 Exit codes:
-  0 — all 18 embedding parquets complete and valid  → skip embedding
+  0 — all embedding parquets complete and valid  → skip embedding
   1 — embedding incomplete (some features missing)  → run embed only
   2 — preprocessing outputs missing                 → run full pipeline
 
@@ -51,6 +51,7 @@ def main() -> None:
         os.path.join(features_dir, "labs_features.parquet"),
         os.path.join(classifications_dir, "y_labels.parquet"),
         os.path.join(classifications_dir, "lab_panel_config.yaml"),
+        os.path.join(classifications_dir, "micro_panel_config.yaml"),
     ]
     missing_preprocess = [p for p in required_preprocess_outputs
                           if not os.path.exists(p)]
@@ -89,7 +90,20 @@ def main() -> None:
         for group_name in lab_panel_config
     ]
 
-    all_features = text_features + lab_features   # 18 total
+    # Micro panel features: one row per admission in splits (zero vector if no events)
+    micro_panel_config_path = os.path.join(classifications_dir, "micro_panel_config.yaml")
+    micro_features = []
+    if os.path.exists(micro_panel_config_path):
+        with open(micro_panel_config_path, encoding="utf-8") as fh:
+            micro_panel_config: dict = yaml.safe_load(fh)
+        micro_features = [
+            (f"micro_{panel_name}_embeddings.parquet", f"micro_{panel_name}_embedding")
+            for panel_name in micro_panel_config.get("panels", {})
+        ]
+    else:
+        print("  WARNING: micro_panel_config.yaml not found — micro embeddings not checked.")
+
+    all_features = text_features + lab_features + micro_features  # 18 + 37 = 55 total
 
     # ------------------------------------------------------------------ #
     # Check each embedding output

@@ -97,6 +97,11 @@ def main() -> None:
         help="Run build_lab_panel_config.py",
     )
     parser.add_argument(
+        "--build_micro_panel_config",
+        action="store_true",
+        help="Run build_micro_panel_config.py",
+    )
+    parser.add_argument(
         "--extract_demographics",
         action="store_true",
         help="Run extract_demographics.py",
@@ -120,6 +125,11 @@ def main() -> None:
         "--extract_labs",
         action="store_true",
         help="Run extract_labs.py",
+    )
+    parser.add_argument(
+        "--extract_microbiology",
+        action="store_true",
+        help="Run extract_microbiology.py",
     )
     parser.add_argument(
         "--extract_radiology",
@@ -200,13 +210,14 @@ def main() -> None:
         "extract_discharge_history",
         "extract_triage_and_complaint",
         "extract_labs",
+        "extract_microbiology",
         "extract_radiology",
         "extract_y_data",
     ]
 
     # Full pipeline order
     _FULL_ORDER = (
-        ["create_splits", "build_lab_panel_config"]
+        ["create_splits", "build_lab_panel_config", "build_micro_panel_config"]
         + _EXTRACT_MODULES
         + ["embed_features", "combine_dataset"]
     )

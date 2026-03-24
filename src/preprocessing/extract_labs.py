@@ -19,7 +19,7 @@ Optional config keys:
     HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
                                    null hadm_id in labevents
     HADM_LINKAGE_TOLERANCE_HOURS – hours of tolerance for time-window linkage
-                                   (default 1, only used when strategy is "link")
+                                   (default 2, only used when strategy is "link")
 """
 
 import logging
@@ -194,7 +194,7 @@ def run(config: dict) -> None:
     lab_window_hours = _parse_lab_window(config)
 
     hadm_linkage_strategy: str = str(config.get("HADM_LINKAGE_STRATEGY", "drop")).lower()
-    hadm_linkage_tolerance_hours: int = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 1))
+    hadm_linkage_tolerance_hours: int = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 2))
 
     # ------------------------------------------------------------------ #
     # Hash-based skip check
