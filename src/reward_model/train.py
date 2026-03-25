@@ -855,7 +855,7 @@ def main() -> None:
         if train_loader is None:
             break
 
-        if is_ddp and hasattr(train_loader.sampler, "set_epoch"):
+        if hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
         epoch_loss_total = 0.0
