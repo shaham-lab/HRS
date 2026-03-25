@@ -358,6 +358,8 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **Feature boundaries are derived, not declared.** The feature index map is constructed at load time from the canonical column order in `PREPROCESSING_DATA_MODEL.md` Section 3.12. No separate index map config file exists.
 
+**One class per file.** Each class definition lives in its own `*.py` module (for example, `RewardModelConfig` in `reward_model_config.py`, `ParquetDataset` in `parquet_dataset.py`). Shared helpers remain in `reward_model_utils.py`, which now only re-exports these class modules.
+
 **Rank 0 owns all I/O.** Under DDP, only rank 0 writes checkpoints, metrics, and logs. All ranks participate in forward/backward passes and gradient all-reduce. This prevents duplicate writes and ensures a consistent checkpoint state.
 
 **Resumability.** Every checkpoint saves model weights (unwrapped from DDP), optimizer state, current epoch, curriculum schedule state, and a full config snapshot. Re-running `train.py --resume` via `torchrun` continues from the last checkpoint. Schema validation runs on every start regardless of resume status.
@@ -378,7 +380,7 @@ HRS/
 │   │
 │   └── reward_model/
 │       ├── reward_model_architecture.md     # this document
-│       ├── REWARD_MODEL_DETAILED_DESIGN.md  # per-module implementation details (to be written)
+│       ├── REWARD_MODEL_DETAILED_DESIGN.md  # per-module implementation details
 │       │
 │       ├── load_dataset.py                  # step 1 — load, validate schema, derive feature index map
 │       ├── model.py                         # step 2 — RewardModel MLP definition
@@ -387,6 +389,13 @@ HRS/
 │       ├── train.py                         # step 5 — DDP training loop, curriculum, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
+│       │
+│       ├── schema_error.py                  # shared SchemaError exception (class-only file)
+│       ├── reward_model_config.py           # Pydantic RewardModelConfig + loader (class-only file)
+│       ├── parquet_dataset.py               # ParquetDataset class (lazy Parquet reader)
+│       ├── row_group_block_sampler.py       # RowGroupBlockSampler class (row-group-aware sampler)
+│       ├── dataset_bundle.py                # DatasetBundle NamedTuple (train/dev/test bundle)
+│       ├── reward_model_utils.py            # shared helpers + re-exports (no class definitions)
 │       │
 │       ├── reward_job.sh                    # SLURM: training job (2× GPU, 64G)
 │       ├── calibrate_job.sh                 # SLURM: calibration job (1× GPU, 32G)

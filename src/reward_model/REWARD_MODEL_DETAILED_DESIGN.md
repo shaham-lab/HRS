@@ -50,7 +50,7 @@ The reward model does not perform any identifier linkage. All identifier resolut
 
 ### Module boundaries
 
-Each Python file corresponds to one pipeline concern. A module may import from `reward_model_utils.py` (shared utilities) but never imports from a sibling module. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `load_dataset.py`.
+Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `load_dataset.py`.
 
 ### Class vs plain script
 
@@ -72,7 +72,7 @@ All helper functions are module-private (prefixed `_`). The public interface of 
 
 ### File naming conventions
 
-`*.py` for pipeline step modules, `reward_model_utils.py` for shared helpers, `*_job.sh` for SLURM scripts, `submit_*.sh` for submission orchestrators. All names use `snake_case`.
+`*.py` for pipeline step modules, class-only modules for each class, `reward_model_utils.py` for shared helpers/re-exports, `*_job.sh` for SLURM scripts, `submit_*.sh` for submission orchestrators. All names use `snake_case`.
 
 ---
 
@@ -82,7 +82,7 @@ All helper functions are module-private (prefixed `_`). The public interface of 
 
 ### 3.1 Configuration Loading
 
-`config/reward_model.yaml` is the single source of truth for all parameters. It is loaded and validated by any CLI entry point using a Pydantic model class defined in `reward_model_utils.py`. The Pydantic model enforces types, required vs optional fields, and value constraints at startup — a misconfigured schedule or invalid path raises before any computation begins.
+`config/reward_model.yaml` is the single source of truth for all parameters. It is loaded and validated by any CLI entry point using the Pydantic model defined in `reward_model_config.py` (re-exported by `reward_model_utils.py`). The Pydantic model enforces types, required vs optional fields, and value constraints at startup — a misconfigured schedule or invalid path raises before any computation begins.
 
 All path values are expanded with `os.path.expanduser` and resolved to absolute paths before being stored in the config object. No module calls `yaml.safe_load` directly. Config keys use `SCREAMING_SNAKE_CASE`. Boolean flags use YAML native `true`/`false`. Path keys end in `_DIR`, `_PATH`, or `_FILE`.
 
@@ -122,16 +122,18 @@ The process group is initialised with the `nccl` backend at the start of `train.
 
 | Function / Class | Purpose |
 |------------------|---------|
-| `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object |
+| `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
 | `build_feature_index_map(columns)` | Construct `{col_name: (start, end)}` from ordered column list; see Section 4 |
 | `compute_pos_weights(df_train)` | Compute `pos_weight_y1` and `pos_weight_y2` from training split; excludes deceased rows for Y2 |
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
 | `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly |
 | `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group |
-| **`ParquetDataset(Dataset)`** | `torch.utils.data.Dataset` subclass for lazy row-group reads from `final_cdss_dataset.parquet`. Constructor accepts the open PyArrow file handle, a list of row indices for the split, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Used by `load_dataset.py`, `calibrate.py`, and `validate_contract.py`. |
+| **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
+| **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
+| **`DatasetBundle(NamedTuple)`** | Class-only module `dataset_bundle.py`. Bundles `train/dev/test` `ParquetDataset` instances plus metadata. Re-exported by `reward_model_utils.py`. |
 
-A function or class belongs in `reward_model_utils.py` if and only if it is used by two or more modules and has no module-specific state. Functions used only once remain private to their module with a `_` prefix.
+A helper function belongs in `reward_model_utils.py` if and only if it is used by two or more modules and has no module-specific state. Shared classes sit in class-only modules and are re-exported by `reward_model_utils.py`. Functions used only once remain private to their module with a `_` prefix.
 
 ---
 
@@ -173,8 +175,8 @@ Loads `final_cdss_dataset.parquet`, validates the upstream data contract, constr
 6. Build the feature index map via `build_feature_index_map()` from `reward_model_utils.py`. This step also validates the 55-embedding count and per-group breakdown — see Section 4.
 7. Read the `split` column only (lightweight — metadata column) to determine row indices for each split. Produce three lists of row indices: `train_indices`, `dev_indices`, `test_indices`.
 8. Compute `pos_weight_y1` and `pos_weight_y2` from the training split rows only via `compute_pos_weights()`. This reads only `y1_mortality` and `y2_readmission` columns for the training rows — not the full feature data. These values will be broadcast to non-rank-0 processes by `train.py`.
-9. Instantiate three `ParquetDataset` objects from `reward_model_utils.py` — one per split — passing the open PyArrow file handle, the split's row index list, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Each `ParquetDataset` holds only the file handle and index metadata in memory. No feature data is read at this step.
-10. Return a `DatasetBundle` named tuple: `train_dataset`, `dev_dataset`, `test_dataset` (each a `ParquetDataset`), `feature_index_map`, `pos_weight_y1`, `pos_weight_y2`.
+9. Instantiate three `ParquetDataset` objects (class-only module `parquet_dataset.py`, re-exported by `reward_model_utils.py`) — one per split — passing the open PyArrow file handle, the split's row index list, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Each `ParquetDataset` holds only the file handle and index metadata in memory. No feature data is read at this step.
+10. Return a `DatasetBundle` named tuple (class-only module `dataset_bundle.py`, re-exported by `reward_model_utils.py`): `train_dataset`, `dev_dataset`, `test_dataset` (each a `ParquetDataset`), `feature_index_map`, `pos_weight_y1`, `pos_weight_y2`.
 
 **Config keys used:** `DATASET_PATH`, `FEATURES_DIM` (assertion only — must equal D as derived from the column schema), `DATASET_ROW_GROUP_CACHE_SIZE`.
 
@@ -474,7 +476,7 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
 | `DATASET_PATH` | (required) | `load_dataset.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
-| `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `reward_model_utils.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
+| `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `parquet_dataset.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
 
 ### Paths
 

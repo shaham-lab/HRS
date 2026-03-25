@@ -1,25 +1,21 @@
 import logging
 import math
 import os
-import random
-from bisect import bisect_right
-from collections import OrderedDict
-from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
-from torch.utils.data import Sampler
-import yaml
-from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
+
+from src.reward_model.dataset_bundle import DatasetBundle  # re-export
+from src.reward_model.parquet_dataset import ParquetDataset  # re-export
+from src.reward_model.reward_model_config import RewardModelConfig, load_and_validate_config  # re-export
+from src.reward_model.row_group_block_sampler import RowGroupBlockSampler  # re-export
+from src.reward_model.schema_error import SchemaError
 
 
 logger = logging.getLogger(__name__)
-
-
-class SchemaError(ValueError):
-    """Raised when the upstream preprocessing schema contract is violated."""
 
 
 _EXPECTED_COLUMNS: List[str] = [
@@ -162,97 +158,6 @@ ALWAYS_VISIBLE_SLOTS: frozenset = frozenset(
 )
 
 
-class RewardModelConfig(BaseModel):
-    LAYER_WIDTHS: List[int]
-    DROPOUT_RATE: float
-    ACTIVATION: str
-
-    MAX_EPOCHS: int
-    BATCH_SIZE_PER_GPU: int
-    NUM_GPUS: int = 2
-    LEARNING_RATE: float
-    WEIGHT_DECAY: float
-    ADAM_BETA1: float
-    ADAM_BETA2: float
-    LR_WARMUP_EPOCHS: int
-    LR_MIN: float
-    EARLY_STOPPING_PATIENCE: int
-    CHECKPOINT_KEEP_N: int
-
-    LOSS_WEIGHT_Y1: float
-    LOSS_WEIGHT_Y2: float
-    POS_WEIGHT_Y1: Optional[float] = Field(default=None)
-    POS_WEIGHT_Y2: Optional[float] = Field(default=None)
-
-    MASKING_START_RATIOS: Dict[str, float]
-    MASKING_END_RATIOS: Dict[str, float]
-    MASKING_TRANSITION_MIDPOINT_EPOCH: int
-    MASKING_TRANSITION_SHAPE: str
-    MASKING_K: int
-
-    DATASET_PATH: str
-    DATASET_ROW_GROUP_CACHE_SIZE: int = 2
-    DATALOADER_NUM_WORKERS: int = 4
-
-    CHECKPOINT_DIR: str
-    METRICS_PATH: str
-    CALIBRATION_PARAMS_PATH: str
-    EXPORT_PATH: str
-
-    @field_validator("ACTIVATION")
-    @classmethod
-    def _validate_activation(cls, value: str) -> str:
-        if value not in {"relu", "leaky_relu"}:
-            raise ValueError("ACTIVATION must be one of {'relu', 'leaky_relu'}")
-        return value
-
-    @field_validator("MASKING_START_RATIOS", "MASKING_END_RATIOS")
-    @classmethod
-    def _validate_ratios(cls, value: Dict[str, float]) -> Dict[str, float]:
-        expected_keys = {"random", "adversarial", "none"}
-        if set(value.keys()) != expected_keys:
-            raise ValueError(
-                f"Masking ratios must define exactly {expected_keys}, received {set(value.keys())}"
-            )
-        return value
-
-    @model_validator(mode="after")
-    def _expand_paths(self) -> "RewardModelConfig":
-        for field_name, field_value in self.__dict__.items():
-            if field_value is None:
-                continue
-            if field_name.endswith(("_PATH", "_DIR", "_FILE")):
-                expanded = os.path.abspath(os.path.expanduser(str(field_value)))
-                object.__setattr__(self, field_name, expanded)
-        start_sum = sum(self.MASKING_START_RATIOS.values())
-        end_sum = sum(self.MASKING_END_RATIOS.values())
-        if not math.isclose(start_sum, 1.0, rel_tol=1e-6, abs_tol=1e-6):
-            raise ValueError(f"MASKING_START_RATIOS must sum to 1.0, found {start_sum}")
-        if not math.isclose(end_sum, 1.0, rel_tol=1e-6, abs_tol=1e-6):
-            raise ValueError(f"MASKING_END_RATIOS must sum to 1.0, found {end_sum}")
-        return self
-
-    @field_validator("MASKING_TRANSITION_SHAPE")
-    @classmethod
-    def _validate_transition_shape(cls, value: str) -> str:
-        if value != "sigmoid":
-            raise ValueError("MASKING_TRANSITION_SHAPE must be 'sigmoid'")
-        return value
-
-    class Config:
-        extra = "forbid"
-
-
-def load_and_validate_config(path: str) -> RewardModelConfig:
-    """Load YAML config and validate it against the RewardModelConfig schema."""
-    with open(path, "r", encoding="utf-8") as handle:
-        data = yaml.safe_load(handle) or {}
-    try:
-        return RewardModelConfig(**data)
-    except ValidationError as exc:
-        raise SchemaError(f"Invalid reward model configuration: {exc}") from exc
-
-
 def build_feature_index_map(columns: Iterable[str]) -> Dict[str, Tuple[int, int]]:
     """Derive feature index ranges from ordered dataset columns."""
     feature_columns: List[str] = []
@@ -363,165 +268,6 @@ def broadcast_tensor(tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
     if torch.distributed.is_available() and torch.distributed.is_initialized():
         torch.distributed.broadcast(tensor, src=src_rank)
     return tensor
-
-
-class ParquetDataset(torch.utils.data.Dataset):
-    def __init__(
-        self,
-        parquet_file: pq.ParquetFile,
-        dataset_path: str,
-        row_indices: List[int],
-        feature_index_map: Dict[str, Tuple[int, int]],
-        cache_size: int,
-    ) -> None:
-        """Create a lazy Parquet-backed dataset with LRU row-group cache."""
-        self._parquet_file = parquet_file
-        self._dataset_path = dataset_path
-        self._row_indices = list(row_indices)
-        self._feature_index_map = feature_index_map
-        self._cache_size = max(1, cache_size)
-        self._cache: OrderedDict[int, pa.Table] = OrderedDict()
-        self._columns_needed = list(feature_index_map.keys()) + ["y1_mortality", "y2_readmission"]
-
-        metadata = parquet_file.metadata
-        self._row_group_boundaries: List[Tuple[int, int]] = []
-        self._rg_starts: List[int] = []
-        start = 0
-        for i in range(metadata.num_row_groups):
-            num_rows = metadata.row_group(i).num_rows
-            self._row_group_boundaries.append((start, start + num_rows))
-            self._rg_starts.append(start)
-            start += num_rows
-
-    def __getstate__(self) -> dict:
-        """Return picklable state — exclude the non-picklable file handle."""
-        state = self.__dict__.copy()
-        state["_parquet_file"] = None
-        state["_cache"] = OrderedDict()
-        return state
-
-    def __setstate__(self, state: dict) -> None:
-        """Restore state in worker process — reopen the Parquet file."""
-        self.__dict__.update(state)
-        self._parquet_file = pq.ParquetFile(self._dataset_path)
-        self._cache = OrderedDict()
-
-    def __len__(self) -> int:
-        return len(self._row_indices)
-
-    def __getitem__(self, idx: int):
-        """Return feature tensor and labels for the idx-th split row."""
-        row_idx = self._row_indices[idx]
-        rg_index, rg_start = self._locate_row_group(row_idx)
-        table = self._get_row_group(rg_index)
-        offset = row_idx - rg_start
-        row = table.slice(offset, 1)
-
-        features = []
-        for col in self._feature_index_map.keys():
-            value = row[col].to_pylist()[0]
-            features.append(torch.tensor(value, dtype=torch.float32))
-        X = torch.cat(features, dim=0)
-
-        y1_value = row["y1_mortality"].to_pylist()[0]
-        y1_tensor = torch.tensor(y1_value, dtype=torch.int8)
-
-        y2_value = row["y2_readmission"].to_pylist()[0]
-        y2_value = float("nan") if y2_value is None else y2_value
-        y2_tensor = torch.tensor(y2_value, dtype=torch.float32)
-
-        return X, y1_tensor, y2_tensor
-
-    def _locate_row_group(self, row_idx: int) -> Tuple[int, int]:
-        i = bisect_right(self._rg_starts, row_idx) - 1
-        if i < 0 or i >= len(self._row_group_boundaries):
-            raise IndexError(f"Row index {row_idx} out of bounds for dataset")
-        start, end = self._row_group_boundaries[i]
-        if not (start <= row_idx < end):
-            raise IndexError(f"Row index {row_idx} out of bounds for dataset")
-        return i, start
-
-    def _get_row_group(self, rg_index: int) -> pa.Table:
-        if rg_index in self._cache:
-            table = self._cache.pop(rg_index)
-            self._cache[rg_index] = table
-            return table
-
-        table = self._parquet_file.read_row_group(rg_index, columns=self._columns_needed)
-        self._cache[rg_index] = table
-        if len(self._cache) > self._cache_size:
-            self._cache.popitem(last=False)
-        return table
-
-
-class RowGroupBlockSampler(Sampler[int]):
-    """Row-group-aware sampler that shuffles at the row group level to prevent I/O thrashing on the ParquetDataset LRU cache.
-
-    Consecutive indices yielded by this sampler come from the same or adjacent
-    row groups, maximising cache hit rate.  Partitions row groups across DDP
-    ranks in round-robin order.
-    """
-
-    def __init__(
-        self,
-        dataset: ParquetDataset,
-        rank: int,
-        world_size: int,
-        shuffle: bool = True,
-        seed: int = 0,
-    ) -> None:
-        self._dataset = dataset
-        self._rank = rank
-        self._world_size = world_size
-        self._shuffle = shuffle
-        self._seed = seed
-        self._epoch = 0
-
-        # Build mapping from row group index to local dataset indices belonging to it.
-        self._rg_to_local_indices: Dict[int, List[int]] = {}
-        for local_idx, global_row_idx in enumerate(self._dataset._row_indices):
-            rg_index, _ = self._dataset._locate_row_group(global_row_idx)
-            self._rg_to_local_indices.setdefault(rg_index, []).append(local_idx)
-
-        self._num_samples = sum(len(indices) for indices in self._rg_to_local_indices.values())
-
-    def __iter__(self):
-        rng = random.Random(self._seed + self._epoch)
-
-        row_groups = [rg for rg, indices in self._rg_to_local_indices.items() if indices]
-        if self._shuffle:
-            rng.shuffle(row_groups)
-
-        # Partition row groups round-robin across ranks.
-        row_groups_for_rank = [rg for idx, rg in enumerate(row_groups) if idx % self._world_size == self._rank]
-
-        for rg in row_groups_for_rank:
-            local_indices = list(self._rg_to_local_indices[rg])
-            if self._shuffle:
-                rng.shuffle(local_indices)
-            for idx in local_indices:
-                yield idx
-
-    def __len__(self) -> int:
-        rng = random.Random(self._seed + self._epoch)
-        row_groups = [rg for rg, indices in self._rg_to_local_indices.items() if indices]
-        if self._shuffle:
-            rng.shuffle(row_groups)
-        row_groups_for_rank = [rg for idx, rg in enumerate(row_groups) if idx % self._world_size == self._rank]
-        return sum(len(self._rg_to_local_indices[rg]) for rg in row_groups_for_rank)
-
-    def set_epoch(self, epoch: int) -> None:
-        self._epoch = epoch
-
-
-class DatasetBundle(NamedTuple):
-    train_dataset: ParquetDataset
-    dev_dataset: ParquetDataset
-    test_dataset: ParquetDataset
-    feature_index_map: Dict[str, Tuple[int, int]]
-    pos_weight_y1: float
-    pos_weight_y2: float
-    input_dim: int
 
 
 def _validate_column_order(schema: pa.Schema, expected: List[str]) -> None:
