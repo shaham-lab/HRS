@@ -54,9 +54,10 @@ def _build_export_dict(
       checkpoint; maps feature column name to ``(start, end)`` index range.
     - *T_y1* — Scalar calibration temperature for the mortality head (Y1).
     - *T_y2* — Scalar calibration temperature for the readmission head (Y2).
-    - *config_snapshot* — Architecture sub-dict extracted from the
-      checkpoint's config snapshot; includes ``LAYER_WIDTHS``,
-      ``DROPOUT_RATE``, ``ACTIVATION``, and ``INPUT_DIM``.
+    - *config_snapshot* — Architecture sub-dict containing only
+      ``LAYER_WIDTHS``, ``DROPOUT_RATE``, and ``ACTIVATION``.  Input
+      dimensionality is stored separately as its own top-level key in
+      the export dict.
     - *input_dim* — Input dimensionality derived from the feature index map
       (sum of all slot widths).
 
@@ -111,6 +112,8 @@ def run(config: RewardModelConfig) -> None:
     1. Load ``best_model.pt`` from ``CHECKPOINT_DIR``.
     2. Load ``calibration_params.json`` from ``CALIBRATION_PARAMS_PATH``.
     3. Assemble an export dict via ``_build_export_dict()``.
+    3a. Creates the parent directory of ``EXPORT_PATH`` if it does not
+        exist (``mkdir(parents=True, exist_ok=True)``).
     4. Write the export dict to ``EXPORT_PATH`` as a PyTorch ``.pt`` file.
     5. Log the export path and total model parameter count.
 
@@ -132,7 +135,7 @@ def run(config: RewardModelConfig) -> None:
     logger.info("Exported frozen model to %s (params=%d)", export_path, param_count)
 
 
-def main() -> None:
+def main() -> int:
     """CLI entry point for ``export_model.py``."""
     parser = argparse.ArgumentParser(
         description="Export the frozen CDSS-ML reward model for RL agent consumption."
@@ -143,7 +146,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     config = load_and_validate_config(args.config)
     run(config)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

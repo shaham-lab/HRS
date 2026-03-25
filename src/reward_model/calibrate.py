@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Any, Dict, Tuple
 
 import numpy as np
 import torch
@@ -43,7 +43,7 @@ logger = logging.getLogger(__name__)
 def _load_model_from_checkpoint(
     checkpoint_path: Path,
     device: torch.device,
-) -> Tuple[RewardModel, Dict[str, Tuple[int, int]], Dict]:
+) -> Tuple[RewardModel, Dict[str, Tuple[int, int]], Dict[str, Any]]:
     """Load a frozen ``RewardModel`` from a checkpoint file.
 
     Instantiates ``RewardModel`` from the architecture config embedded in the
@@ -64,9 +64,9 @@ def _load_model_from_checkpoint(
           inside the checkpoint (maps feature column name to ``(start, end)``
           byte-range in the flat input tensor).
         - *config_snapshot* — Raw ``Dict`` from ``config.model_dump()`` as
-          saved by ``train.py``; authoritative for architecture keys
-          ``LAYER_WIDTHS``, ``DROPOUT_RATE``, ``ACTIVATION``, and
-           ``INPUT_DIM``.
+           saved by ``train.py``; authoritative for architecture keys
+           ``LAYER_WIDTHS``, ``DROPOUT_RATE``, ``ACTIVATION``, and
+            ``INPUT_DIM``.
     """
     ckpt = torch.load(checkpoint_path, map_location=device)
     config_snapshot: Dict = ckpt["config"]
@@ -100,9 +100,11 @@ def _run_forward_pass(
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run a full forward pass over *dataset* with ``torch.no_grad()``.
 
-    Iterates the dataset in a single-worker ``DataLoader`` and accumulates raw
-    (un-calibrated) logits for both heads together with ground-truth labels.
-    No masking is applied — the full feature vector is passed to the model.
+    Iterates the dataset in a ``DataLoader`` with ``num_workers=0`` (no worker
+    processes) — calibration is single-pass on a single GPU and spawning
+    workers adds overhead without benefit.  Accumulates raw (un-calibrated)
+    logits for both heads together with ground-truth labels.  No masking is
+    applied — the full feature vector is passed to the model.
 
     Args:
         model: Frozen ``RewardModel`` in eval mode on ``device``.
@@ -175,7 +177,9 @@ def _fit_temperature(
             is the survivor mask ``~np.isnan(y2)``.
 
     Returns:
-        Fitted scalar temperature ``T > 0``.
+        Fitted scalar temperature ``T``, clamped to a minimum of
+        ``1e-8`` before being returned to prevent downstream division
+        by zero in ``sigmoid(logit / T)``.
     """
     masked_logits = logits[mask]
     masked_labels = labels[mask]
@@ -211,8 +215,10 @@ def _compute_ece_from_logits(
     """Compute Expected Calibration Error (ECE) after applying temperature *T*.
 
     Uses equal-width probability binning (15 bins) on the masked subset of
-    samples.  Intended for logging pre- and post-calibration ECE for audit;
-    not used in the optimisation itself.
+    samples.  Probabilities are clipped to ``[0, 1]`` before binning and the
+    rightmost bin is closed on both sides so that samples with probability
+    exactly ``1.0`` are not silently excluded.  Intended for logging pre- and
+    post-calibration ECE for audit; not used in the optimisation itself.
 
     Args:
         logits: Raw model logits of shape ``(N,)``, float32.
@@ -306,7 +312,7 @@ def run(config: RewardModelConfig) -> None:
     )
 
 
-def main() -> None:
+def main() -> int:
     """CLI entry point for ``calibrate.py``."""
     parser = argparse.ArgumentParser(
         description="Temperature-scaling calibration for the CDSS-ML reward model."
@@ -317,7 +323,8 @@ def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     config = load_and_validate_config(args.config)
     run(config)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -25,7 +25,7 @@ from typing import Dict, Optional, Tuple
 import torch
 
 from src.reward_model.model import RewardModel
-from src.reward_model.reward_model_utils import get_device
+from src.reward_model.reward_model_utils import get_device, unwrap_ddp
 
 logger = logging.getLogger(__name__)
 
@@ -39,7 +39,9 @@ class RewardModelInference:
     The constructor loads the frozen model weights, feature index map
     snapshot, and calibration parameters ``T_y1`` and ``T_y2`` from disk.
     It moves the model to the target device, calls ``model.eval()``, and
-    freezes all parameters via ``torch.no_grad()`` at inference time.
+    calls ``requires_grad_(False)`` on all model parameters in
+    ``__init__``, and uses ``torch.no_grad()`` in ``predict()`` to
+    prevent gradient tracking during forward passes.
 
     Config keys used: None — all parameters come from the checkpoint and
     calibration files passed to the constructor.
@@ -120,6 +122,8 @@ class RewardModelInference:
 
         Runs a forward pass under ``torch.no_grad()``.  Temperature scaling
         is applied to both heads: ``p = sigmoid(logit / T)``.
+        ``T`` values are clamped to a minimum of ``1e-8`` before division
+        to prevent numerical overflow.
 
         Args:
             X: Input feature tensor of shape ``(N, input_dim)``, dtype
