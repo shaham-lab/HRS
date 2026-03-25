@@ -53,7 +53,7 @@ class MaskingSchedule:
         Args:
             feature_index_map: Mapping of feature column name to ``(start, end)``
                 byte-range within the flat input tensor, as derived by
-                ``load_dataset.run()`` from the canonical Parquet column order.
+                ``DataLoader.load()`` from the canonical Parquet column order.
                 Defines both the slot count and the index boundaries used for
                 zeroing.
             start_ratios: Dict with keys ``'random'``, ``'adversarial'``,

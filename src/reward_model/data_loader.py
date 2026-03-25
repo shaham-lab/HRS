@@ -1,0 +1,101 @@
+"""Dataset loader for the reward model."""
+
+import logging
+from typing import Dict, List
+
+import pyarrow as pa
+import pyarrow.parquet as pq
+
+from src.reward_model.dataset_bundle import DatasetBundle
+from src.reward_model.parquet_dataset import ParquetDataset
+from src.reward_model.reward_model_config import RewardModelConfig
+from src.reward_model.reward_model_utils import (
+    build_feature_index_map,
+    compute_pos_weights,
+    validate_schema,
+)
+from src.reward_model.schema_error import SchemaError
+
+logger = logging.getLogger(__name__)
+
+
+class DataLoader:
+    """Loads and validates the reward model dataset."""
+
+    def __init__(self, config: RewardModelConfig) -> None:
+        self._config = config
+
+    @staticmethod
+    def _validate_y2_alignment(y_table: pa.Table) -> None:
+        df = y_table.to_pandas()
+        mortality = df["y1_mortality"].astype(float)
+        readmit = df["y2_readmission"].astype(float)
+        deceased_mask = mortality == 1.0
+        survivor_mask = mortality == 0.0
+
+        if readmit[deceased_mask].notna().any():
+            raise SchemaError(
+                "y2_readmission must be NaN for deceased rows; produced by extract_y_data.py"
+            )
+        if survivor_mask.any() and readmit[survivor_mask].isna().any():
+            raise SchemaError(
+                "y2_readmission must be non-null for survivors; produced by extract_y_data.py"
+            )
+
+    @staticmethod
+    def _build_split_indices(split_table: pa.Table) -> Dict[str, List[int]]:
+        splits: Dict[str, List[int]] = {"train": [], "dev": [], "test": []}
+        split_values = split_table.column("split").to_pylist()
+        for idx, value in enumerate(split_values):
+            if value not in splits:
+                raise SchemaError(f"Unexpected split label '{value}' in split column")
+            splits[value].append(idx)
+        return splits
+
+    def load(self) -> DatasetBundle:
+        """Load dataset splits lazily, returning DatasetBundle with metadata."""
+        parquet_file = pq.ParquetFile(self._config.DATASET_PATH)
+
+        validate_schema(parquet_file)
+
+        y_table = parquet_file.read(columns=["y1_mortality", "y2_readmission"])
+        self._validate_y2_alignment(y_table)
+
+        feature_index_map = build_feature_index_map(parquet_file.schema_arrow.names)
+
+        split_table = parquet_file.read(columns=["split"])
+        split_indices = self._build_split_indices(split_table)
+
+        train_rows = split_indices["train"]
+        if self._config.POS_WEIGHT_Y1 is not None and self._config.POS_WEIGHT_Y2 is not None:
+            pos_weight_y1 = float(self._config.POS_WEIGHT_Y1)
+            pos_weight_y2 = float(self._config.POS_WEIGHT_Y2)
+        else:
+            labels_df = y_table.to_pandas()
+            train_y_df = labels_df.iloc[train_rows].reset_index(drop=True)
+            pos_weight_y1, pos_weight_y2 = compute_pos_weights(train_y_df)
+
+        derived_dim = max(end for _, end in feature_index_map.values())
+
+        cache_size = self._config.DATASET_ROW_GROUP_CACHE_SIZE
+        train_dataset = ParquetDataset(
+            parquet_file, self._config.DATASET_PATH, train_rows, feature_index_map, cache_size
+        )
+        dev_dataset = ParquetDataset(
+            parquet_file, self._config.DATASET_PATH, split_indices["dev"], feature_index_map, cache_size
+        )
+        test_dataset = ParquetDataset(
+            parquet_file, self._config.DATASET_PATH, split_indices["test"], feature_index_map, cache_size
+        )
+
+        return DatasetBundle(
+            train_dataset=train_dataset,
+            dev_dataset=dev_dataset,
+            test_dataset=test_dataset,
+            feature_index_map=feature_index_map,
+            pos_weight_y1=pos_weight_y1,
+            pos_weight_y2=pos_weight_y2,
+            input_dim=derived_dim,
+        )
+
+

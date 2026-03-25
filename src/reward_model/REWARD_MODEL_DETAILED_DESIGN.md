@@ -17,7 +17,7 @@
    - [3.4 Shared Utilities (`reward_model_utils.py`)](#34-shared-utilities-reward_model_utilspy)
 4. [Feature Index Map](#4-feature-index-map)
 5. [Module Implementation](#5-module-implementation)
-   - [load_dataset.py](#load_datasetpy)
+   - [data_loader.py](#data_loaderpy)
    - [model.py](#modelpy)
    - [masking.py](#maskingpy)
    - [loss.py](#losspy)
@@ -50,13 +50,13 @@ The reward model does not perform any identifier linkage. All identifier resolut
 
 ### Module boundaries
 
-Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `load_dataset.py`.
+Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `data_loader.py` (via `DataLoader`).
 
 ### Class vs plain script
 
 | Module | Pattern | Reason |
 |--------|---------|--------|
-| `load_dataset.py` | Plain script, `run(config)` | Single top-to-bottom load; no shared state needed after return |
+| `data_loader.py` | **Class** (`DataLoader`) | Validates schema and constructs `DatasetBundle`; single instantiation per run |
 | `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `loss.py` | Plain functions | Stateless transformations; `compute_loss(logits_y1, logits_y2, y1, y2, weights)` |
@@ -139,7 +139,7 @@ A helper function belongs in `reward_model_utils.py` if and only if it is used b
 
 ## 4. Feature Index Map
 
-The feature index map defines the start and end index within the flat 42,248-dim input tensor for each feature slot. It is derived at load time by `load_dataset.py` from the ordered list of feature columns in `final_cdss_dataset.parquet`, following the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12.
+The feature index map defines the start and end index within the flat 42,248-dim input tensor for each feature slot. It is derived at load time by `DataLoader` from the ordered list of feature columns in `final_cdss_dataset.parquet`, following the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12.
 
 The derivation algorithm iterates the ordered column list, skips the three metadata columns (`subject_id`, `hadm_id`, `split`) and the two label columns (`y1_mortality`, `y2_readmission`), and for each remaining column assigns a start index equal to the running offset and an end index equal to start plus the column's declared dimension — 8 for `demographic_vec` and 768 for all `*_embedding` columns. The result is a dict mapping column name to a `(start, end)` tuple.
 
@@ -152,7 +152,7 @@ The algorithm expects to find exactly **56 feature columns**: 1 structured vecto
 
 If the count of `*_embedding` columns in the dataset does not equal exactly 55, or if the count within any of the four groups above does not match (4 + 13 + 1 + 37), `build_feature_index_map()` raises a `SchemaError` referencing `PREPROCESSING_DATA_MODEL.md` Section 3.12. This guards against silent miscounting if the upstream dataset schema changes.
 
-The map is constructed once by `load_dataset.py`, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
+The map is constructed once by `DataLoader`, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
 
 The map is never written to a standalone config or YAML file — a separate file would duplicate `PREPROCESSING_DATA_MODEL.md` Section 3.12 and create a consistency risk.
 
@@ -162,9 +162,9 @@ The map is never written to a standalone config or YAML file — a separate file
 
 ---
 
-### `load_dataset.py`
+### `data_loader.py`
 
-Loads `final_cdss_dataset.parquet`, validates the upstream data contract, constructs the feature index map, and returns lazy `ParquetDataset` objects per split plus metadata. Plain script with `run(config)` entry point. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
+Loads `final_cdss_dataset.parquet`, validates the upstream data contract, constructs the feature index map, and returns lazy `ParquetDataset` objects per split plus metadata. `DataLoader` is a class with a single public method `load()`. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
 
 **Algorithm:**
 1. Read `final_cdss_dataset.parquet` from `DATASET_PATH` using `pyarrow`. Do not use `fastparquet` — the fastparquet/pyarrow serialisation incompatibility observed in the preprocessing pipeline applies here.
@@ -248,12 +248,12 @@ DDP entry point. Launched by `torchrun`. Plain script with `main()` entry point.
 1. Parse CLI arguments: `--config`, `--resume`.
 2. Load and validate config via `load_and_validate_config()`.
 3. Initialise the DDP process group with `nccl` backend using environment variables set by `torchrun`. If only one GPU is available, skip DDP initialisation and proceed in single-process mode (logged at `WARNING`).
-4. On rank 0 only: call `load_dataset.run(config)` to load data and compute `pos_weight` values. Broadcast `pos_weight_y1` and `pos_weight_y2` to all ranks via `broadcast_tensor()`. Non-rank-0 processes wait at the broadcast and receive the scalar values without loading the dataset.
+4. On rank 0 only: call `DataLoader(config).load()` to load data and compute `pos_weight` values. Broadcast `pos_weight_y1` and `pos_weight_y2` to all ranks via `broadcast_tensor()` and share the `DatasetBundle` via `broadcast_object_list()`. Non-rank-0 processes wait at the broadcast and receive the bundle and scalar values without touching disk.
 5. Instantiate `RewardModel` with `input_dim` from the feature index map. Move to `get_device(local_rank)`. Wrap in `DistributedDataParallel` if multi-GPU.
 6. Instantiate `MaskingSchedule` with config parameters.
 7. Instantiate `AdamW` with `LEARNING_RATE` and `WEIGHT_DECAY`. Instantiate cosine annealing scheduler with linear warmup over `LR_WARMUP_EPOCHS`.
 8. If `--resume`: load latest checkpoint via the mechanism in Section 8. Restore model weights, optimiser state, scheduler state, epoch, and masking schedule state. Broadcast model weights from rank 0 to all ranks. Barrier after broadcast.
-9. Construct `DistributedSampler` over the training dataset (rank 0 only holds data — see Section 6.2). Wrap in `DataLoader` with `batch_size = BATCH_SIZE_PER_GPU`.
+9. Construct `DistributedSampler` over the training dataset (bundle materialised on all ranks after broadcast — see Section 6.2). Wrap in `DataLoader` with `batch_size = BATCH_SIZE_PER_GPU`.
 10. For each epoch from the current epoch to `MAX_EPOCHS`:
     - Call `sampler.set_epoch(epoch)` to reshuffle per epoch.
     - For each mini-batch: sample masking mode from `MaskingSchedule`; apply the appropriate mask — adversarial mode requires two forward/backward passes using `model.no_sync()` for the first pass (see Section 6.3 and 7); compute loss via `loss.compute_loss()`; call `optimizer.step()`; `scheduler.step()`.
@@ -302,7 +302,7 @@ The constructor accepts `checkpoint_path` and `calibration_params_path` (or the 
 
 ### `validate_contract.py`
 
-Standalone CLI tool. Runs only the schema assertions from `load_dataset.py` steps 2–5 without constructing tensors or loading data into memory. Intended to be run before submitting a training job.
+Standalone CLI tool. Runs only the schema assertions from `DataLoader.load()` steps 2–5 without constructing tensors or loading data into memory. Intended to be run before submitting a training job.
 
 **Algorithm:**
 1. Load config from `--config` argument.
@@ -346,7 +346,7 @@ The `nccl` backend is used for all GPU-to-GPU communication. `nccl` is the only 
 
 ### 6.2 Data Sharding
 
-Only rank 0 loads the dataset from `final_cdss_dataset.parquet`. Rank 0 calls `load_dataset.run(config)`, which returns three `ParquetDataset` objects — one per split. These are lightweight wrappers holding a PyArrow file handle and row index lists; no feature data is materialised at load time. Non-rank-0 processes do not call `load_dataset` at all — they receive only the broadcast `pos_weight` scalars from rank 0 and wait at a barrier while rank 0 loads.
+Only rank 0 loads the dataset from `final_cdss_dataset.parquet`. Rank 0 calls `DataLoader(config).load()`, which returns three `ParquetDataset` objects — one per split. These are lightweight wrappers holding a PyArrow file handle and row index lists; no feature data is materialised at load time. Non-rank-0 processes do not touch disk — they receive the `DatasetBundle` object and broadcast `pos_weight` scalars from rank 0 and wait at a barrier while rank 0 loads.
 
 Training data is sharded across GPUs via `DistributedSampler`. The sampler operates on row indices from the `train_dataset` `ParquetDataset`. For each epoch it assigns a non-overlapping subset of indices to each rank. Each rank's `DataLoader` calls `ParquetDataset.__getitem__` for its assigned indices, which reads the corresponding row groups lazily from disk via the LRU cache and materialises individual batch tensors on demand. With 2 GPUs and `BATCH_SIZE_PER_GPU = 256`, each GPU materialises 256 samples per step and the effective batch size is 512.
 
@@ -431,7 +431,7 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `INPUT_DIM` | (derived) | `load_dataset.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup |
+| `INPUT_DIM` | (derived) | `data_loader.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup |
 | `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | `model.py` | Hidden layer output sizes; length determines depth |
 | `★ DROPOUT_RATE` | `0.3` | `model.py` | Dropout probability per hidden layer |
 | `ACTIVATION` | `relu` | `model.py` | Activation function; supports `relu`, `leaky_relu` |
@@ -475,14 +475,14 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `load_dataset.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
 | `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `parquet_dataset.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
 
 ### Paths
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `load_dataset.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
 | `CHECKPOINT_DIR` | `data/reward_model/checkpoints` | `train.py`, `calibrate.py`, `export_model.py` | Checkpoint directory |
 | `METRICS_PATH` | `data/reward_model/training_metrics.parquet` | `train.py` | Per-epoch metrics output |
 | `CALIBRATION_PARAMS_PATH` | `data/reward_model/calibration_params.json` | `calibrate.py`, `inference.py` | Temperature scaling output |
