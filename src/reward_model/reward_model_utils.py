@@ -5,6 +5,7 @@ from bisect import bisect_right
 from collections import OrderedDict
 from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
 
+import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
@@ -293,7 +294,7 @@ def build_feature_index_map(columns: Iterable[str]) -> Dict[str, Tuple[int, int]
     return index_map
 
 
-def compute_pos_weights(df_train) -> Tuple[float, float]:
+def compute_pos_weights(df_train: pd.DataFrame) -> Tuple[float, float]:
     """Compute positive class weights for Y1 (all) and Y2 (survivors)."""
     y1 = df_train["y1_mortality"].astype(float)
     pos_y1 = float((y1 == 1).sum())
@@ -355,12 +356,14 @@ class ParquetDataset(torch.utils.data.Dataset):
     def __init__(
         self,
         parquet_file: pq.ParquetFile,
+        dataset_path: str,
         row_indices: List[int],
         feature_index_map: Dict[str, Tuple[int, int]],
         cache_size: int,
     ) -> None:
         """Create a lazy Parquet-backed dataset with LRU row-group cache."""
         self._parquet_file = parquet_file
+        self._dataset_path = dataset_path
         self._row_indices = list(row_indices)
         self._feature_index_map = feature_index_map
         self._cache_size = max(1, cache_size)
@@ -376,6 +379,19 @@ class ParquetDataset(torch.utils.data.Dataset):
             self._row_group_boundaries.append((start, start + num_rows))
             self._rg_starts.append(start)
             start += num_rows
+
+    def __getstate__(self) -> dict:
+        """Return picklable state — exclude the non-picklable file handle."""
+        state = self.__dict__.copy()
+        state["_parquet_file"] = None
+        state["_cache"] = OrderedDict()
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state in worker process — reopen the Parquet file."""
+        self.__dict__.update(state)
+        self._parquet_file = pq.ParquetFile(self._dataset_path)
+        self._cache = OrderedDict()
 
     def __len__(self) -> int:
         return len(self._row_indices)
@@ -466,14 +482,26 @@ def _validate_embedding_columns(schema: pa.Schema) -> None:
             raise SchemaError(f"{name} length mismatch; expected fixed_size_list[768] produced by combine_dataset.py")
 
 
+def _validate_demographic_vec(schema: pa.Schema) -> None:
+    field = schema.field("demographic_vec")
+    if not (pa.types.is_fixed_size_list(field.type) and pa.types.is_float32(field.type.value_type)):
+        raise SchemaError("demographic_vec type mismatch; expected float32[8] produced by combine_dataset.py")
+    if field.type.list_size != 8:
+        raise SchemaError("demographic_vec length mismatch; expected fixed_size_list[8] produced by combine_dataset.py")
+
+
 def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> None:
     for col in columns:
         nulls = 0
         idx = parquet_file.schema_arrow.get_field_index(col)
         for rg in range(parquet_file.metadata.num_row_groups):
             stats = parquet_file.metadata.row_group(rg).column(idx).statistics
-            if stats is None:
-                raise SchemaError(f"Missing statistics for column {col}; cannot validate null counts")
+            if stats is None or not stats.has_null_count:
+                raise SchemaError(
+                    f"Missing null-count statistics for column {col}; "
+                    "cannot validate null counts — re-run preprocessing "
+                    "to regenerate statistics"
+                )
             nulls += stats.null_count
         if nulls != 0:
             producer = "combine_dataset.py" if col.endswith("_embedding") else "extract_y_data.py"
@@ -486,9 +514,11 @@ def validate_schema(parquet_file: pq.ParquetFile) -> None:
     expected_columns = get_expected_columns()
     _validate_column_order(schema, expected_columns)
     _validate_label_columns(schema)
+    _validate_demographic_vec(schema)
     _validate_embedding_columns(schema)
     _validate_null_counts(parquet_file, ["y1_mortality"])
 
 
 def get_expected_columns() -> List[str]:
+    """Return the ordered list of expected dataset columns per PREPROCESSING_DATA_MODEL.md Section 3.12."""
     return list(_EXPECTED_COLUMNS)

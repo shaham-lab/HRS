@@ -63,16 +63,16 @@ def run(config: RewardModelConfig) -> DatasetBundle:
         pos_weight_y1 = float(config.POS_WEIGHT_Y1)
         pos_weight_y2 = float(config.POS_WEIGHT_Y2)
     else:
-        labels_df = parquet_file.read(columns=["y1_mortality", "y2_readmission"]).to_pandas()
+        labels_df = y_table.to_pandas()
         train_y_df = labels_df.iloc[train_rows].reset_index(drop=True)
         pos_weight_y1, pos_weight_y2 = compute_pos_weights(train_y_df)
 
     derived_dim = max(end for _, end in feature_index_map.values())
 
     cache_size = config.DATASET_ROW_GROUP_CACHE_SIZE
-    train_dataset = ParquetDataset(parquet_file, train_rows, feature_index_map, cache_size)
-    dev_dataset = ParquetDataset(parquet_file, split_indices["dev"], feature_index_map, cache_size)
-    test_dataset = ParquetDataset(parquet_file, split_indices["test"], feature_index_map, cache_size)
+    train_dataset = ParquetDataset(parquet_file, config.DATASET_PATH, train_rows, feature_index_map, cache_size)
+    dev_dataset = ParquetDataset(parquet_file, config.DATASET_PATH, split_indices["dev"], feature_index_map, cache_size)
+    test_dataset = ParquetDataset(parquet_file, config.DATASET_PATH, split_indices["test"], feature_index_map, cache_size)
 
     return DatasetBundle(
         train_dataset=train_dataset,

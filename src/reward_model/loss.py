@@ -1,5 +1,5 @@
 import logging
-from typing import Dict
+from typing import Dict, Tuple
 
 import numpy as np
 import torch
@@ -10,7 +10,7 @@ logger = logging.getLogger(__name__)
 
 def _compute_ece(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> float:
     bins = np.linspace(0.0, 1.0, n_bins + 1)
-    inds = np.digitize(probs, bins) - 1
+    inds = np.clip(np.digitize(probs, bins) - 1, 0, n_bins - 1)
     ece = 0.0
     total = len(probs)
     for b in range(n_bins):
@@ -39,7 +39,7 @@ def compute_loss(
     pos_weight_y2: float,
     w1: float,
     w2: float,
-):
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Compute total loss and component losses for Y1 and Y2 with survivor masking."""
     pos_w1_tensor = torch.tensor(pos_weight_y1, device=logits_y1.device)
     loss_y1_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pos_w1_tensor)

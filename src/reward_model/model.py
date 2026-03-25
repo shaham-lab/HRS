@@ -1,5 +1,5 @@
 import logging
-from typing import Iterable
+from typing import Iterable, Tuple
 
 import torch
 from torch import nn
@@ -39,7 +39,7 @@ class RewardModel(nn.Module):
         self.head_y1 = nn.Linear(in_dim, 1)
         self.head_y2 = nn.Linear(in_dim, 1)
 
-    def forward(self, x: torch.Tensor):
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
         """Compute logits for Y1 and Y2 given input features."""
         features = self.backbone(x)
         return self.head_y1(features), self.head_y2(features)

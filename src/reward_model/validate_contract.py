@@ -43,7 +43,9 @@ def main() -> int:
     parser.add_argument("--config", required=True, help="Path to reward_model.yaml")
     args = parser.parse_args()
 
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     config = load_and_validate_config(args.config)
+    logger.info("Opening dataset: %s", config.DATASET_PATH)
     parquet_file = pq.ParquetFile(config.DATASET_PATH)
 
     results = _run_assertions(parquet_file)
