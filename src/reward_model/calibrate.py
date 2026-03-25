@@ -66,9 +66,26 @@ def _load_model_from_checkpoint(
         - *config_snapshot* — Raw ``Dict`` from ``config.model_dump()`` as
           saved by ``train.py``; authoritative for architecture keys
           ``LAYER_WIDTHS``, ``DROPOUT_RATE``, ``ACTIVATION``, and
-          ``INPUT_DIM``.
+           ``INPUT_DIM``.
     """
-    ...
+    ckpt = torch.load(checkpoint_path, map_location=device)
+    config_snapshot: Dict = ckpt["config"]
+    feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
+    input_dim = max(end for _, end in feature_index_map.values())
+
+    model = RewardModel(
+        input_dim=input_dim,
+        layer_widths=config_snapshot["LAYER_WIDTHS"],
+        dropout_rate=config_snapshot["DROPOUT_RATE"],
+        activation=config_snapshot["ACTIVATION"],
+    )
+    model.load_state_dict(ckpt["model_state_dict"])
+    model.to(device)
+    model.eval()
+    for param in model.parameters():
+        param.requires_grad_(False)
+
+    return model, feature_index_map, config_snapshot
 
 
 # ---------------------------------------------------------------------------
@@ -102,9 +119,34 @@ def _run_forward_pass(
         - *logits_y2* — Raw logits for the readmission head (Y2), float32.
         - *y1* — Ground-truth mortality labels (int8, values 0 or 1).
         - *y2* — Ground-truth readmission labels (float32, ``NaN`` for
-          deceased patients).
+           deceased patients).
     """
-    ...
+    dataloader = DataLoader(dataset, batch_size=256, num_workers=0, shuffle=False)
+
+    all_logits_y1 = []
+    all_logits_y2 = []
+    all_y1 = []
+    all_y2 = []
+
+    with torch.no_grad():
+        for X, y1, y2 in dataloader:
+            X = X.to(device)
+            y1_t = y1.to(device)
+            y2_t = y2.to(device)
+
+            logits_y1, logits_y2 = model(X)
+
+            all_logits_y1.append(logits_y1.detach().cpu().numpy().reshape(-1))
+            all_logits_y2.append(logits_y2.detach().cpu().numpy().reshape(-1))
+            all_y1.append(y1_t.detach().cpu().numpy().reshape(-1))
+            all_y2.append(y2_t.detach().cpu().numpy().reshape(-1))
+
+    logits_y1_np = np.concatenate(all_logits_y1, axis=0)
+    logits_y2_np = np.concatenate(all_logits_y2, axis=0)
+    y1_np = np.concatenate(all_y1, axis=0)
+    y2_np = np.concatenate(all_y2, axis=0)
+
+    return logits_y1_np, logits_y2_np, y1_np, y2_np
 
 
 # ---------------------------------------------------------------------------
@@ -135,7 +177,24 @@ def _fit_temperature(
     Returns:
         Fitted scalar temperature ``T > 0``.
     """
-    ...
+    masked_logits = logits[mask]
+    masked_labels = labels[mask]
+
+    logits_t = torch.tensor(masked_logits, dtype=torch.float32)
+    labels_t = torch.tensor(masked_labels, dtype=torch.float32)
+
+    T = torch.nn.Parameter(torch.ones(1))
+    optimizer = torch.optim.LBFGS([T], lr=0.01, max_iter=50)
+
+    def closure() -> torch.Tensor:
+        optimizer.zero_grad()
+        scaled_logits = logits_t / T.clamp(min=1e-6)
+        loss = torch.nn.functional.binary_cross_entropy_with_logits(scaled_logits, labels_t)
+        loss.backward()
+        return loss
+
+    optimizer.step(closure)
+    return float(T.item())
 
 
 # ---------------------------------------------------------------------------
@@ -167,7 +226,22 @@ def _compute_ece_from_logits(
     Returns:
         ECE as a float in ``[0, 1]``.
     """
-    ...
+    masked_logits = logits[mask]
+    masked_labels = labels[mask]
+
+    probs = 1.0 / (1.0 + np.exp(-masked_logits / T))
+
+    bin_edges = np.linspace(0.0, 1.0, num=16)
+    ece = 0.0
+    for i in range(len(bin_edges) - 1):
+        lower, upper = bin_edges[i], bin_edges[i + 1]
+        in_bin = (probs >= lower) & (probs < upper) if i < len(bin_edges) - 2 else (probs >= lower) & (probs <= upper)
+        if not np.any(in_bin):
+            continue
+        conf = probs[in_bin].mean()
+        acc = masked_labels[in_bin].mean()
+        ece += np.abs(conf - acc) * (np.sum(in_bin) / len(probs))
+    return float(ece)
 
 
 # ---------------------------------------------------------------------------
@@ -199,7 +273,37 @@ def run(config: RewardModelConfig) -> None:
     Args:
         config: Validated ``RewardModelConfig`` instance.
     """
-    ...
+    device = get_device(local_rank=0)
+    checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
+    model, feature_index_map, config_snapshot = _load_model_from_checkpoint(checkpoint_path, device)
+
+    bundle = load_dataset.run(config)
+    logits_y1, logits_y2, y1, y2 = _run_forward_pass(model, bundle.dev_dataset, device)
+
+    survivor_mask = ~np.isnan(y2)
+    full_mask = np.ones(len(y1), dtype=bool)
+
+    pre_ece_y1 = _compute_ece_from_logits(logits_y1, y1, 1.0, full_mask)
+    pre_ece_y2 = _compute_ece_from_logits(logits_y2, y2, 1.0, survivor_mask)
+    logger.info("Pre-calibration ECE — Y1: %.6f, Y2: %.6f", pre_ece_y1, pre_ece_y2)
+
+    T_y1 = _fit_temperature(logits_y1, y1, full_mask)
+    T_y2 = _fit_temperature(logits_y2, y2, survivor_mask)
+
+    post_ece_y1 = _compute_ece_from_logits(logits_y1, y1, T_y1, full_mask)
+    post_ece_y2 = _compute_ece_from_logits(logits_y2, y2, T_y2, survivor_mask)
+    logger.info("Post-calibration ECE — Y1: %.6f, Y2: %.6f", post_ece_y1, post_ece_y2)
+
+    params = {"T_y1": T_y1, "T_y2": T_y2}
+    calibration_path = Path(config.CALIBRATION_PARAMS_PATH)
+    calibration_path.parent.mkdir(parents=True, exist_ok=True)
+    calibration_path.write_text(json.dumps(params))
+    logger.info(
+        "Wrote calibration parameters to %s (T_y1=%.6f, T_y2=%.6f)",
+        calibration_path,
+        T_y1,
+        T_y2,
+    )
 
 
 def main() -> None:

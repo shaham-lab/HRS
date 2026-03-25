@@ -25,6 +25,7 @@ from typing import Dict, Optional, Tuple
 import torch
 
 from src.reward_model.model import RewardModel
+from src.reward_model.reward_model_utils import get_device
 
 logger = logging.getLogger(__name__)
 
@@ -70,9 +71,42 @@ class RewardModelInference:
                 when ``checkpoint_path`` does not embed calibration
                 parameters.
             device: Target device for the loaded model.  Defaults to
-                ``cuda:0`` if a GPU is available, otherwise ``cpu``.
+            ``cuda:0`` if a GPU is available, otherwise ``cpu``.
         """
-        ...
+        if device is None:
+            device = get_device(local_rank=0)
+
+        ckpt = torch.load(checkpoint_path, map_location=device)
+        self._feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
+        input_dim = ckpt.get("input_dim") or max(end for _, end in self._feature_index_map.values())
+
+        if "T_y1" in ckpt and "T_y2" in ckpt:
+            self._T_y1 = float(ckpt["T_y1"])
+            self._T_y2 = float(ckpt["T_y2"])
+            config_snapshot = ckpt["config_snapshot"]
+        else:
+            with open(calibration_params_path, "r") as f:
+                calib = json.load(f)
+            self._T_y1 = float(calib["T_y1"])
+            self._T_y2 = float(calib["T_y2"])
+            config_snapshot = ckpt["config"]
+
+        model = RewardModel(
+            input_dim=input_dim,
+            layer_widths=config_snapshot["LAYER_WIDTHS"],
+            dropout_rate=config_snapshot["DROPOUT_RATE"],
+            activation=config_snapshot["ACTIVATION"],
+        )
+        model.load_state_dict(ckpt["model_state_dict"])
+        model.to(device)
+        model.eval()
+        for param in model.parameters():
+            param.requires_grad_(False)
+
+        self._model = model
+        self._device = device
+
+        logger.info("Loaded calibration temperatures: T_y1=%.6f, T_y2=%.6f", self._T_y1, self._T_y2)
 
     # ------------------------------------------------------------------
     # Public API
@@ -101,7 +135,11 @@ class RewardModelInference:
               ``P(30-day readmission | survived)`` from
               ``sigmoid(logit_y2 / T_y2)``.
         """
-        ...
+        with torch.no_grad():
+            logits_y1, logits_y2 = self._model(X)
+            p_mortality = torch.sigmoid(logits_y1 / self._T_y1)
+            p_readmission = torch.sigmoid(logits_y2 / self._T_y2)
+        return p_mortality, p_readmission
 
     def get_feature_index_map(self) -> Dict[str, Tuple[int, int]]:
         """Return the feature index map snapshot loaded from the checkpoint.
@@ -116,4 +154,4 @@ class RewardModelInference:
             Matches the canonical column order defined in
             ``PREPROCESSING_DATA_MODEL.md`` Section 3.12.
         """
-        ...
+        return self._feature_index_map

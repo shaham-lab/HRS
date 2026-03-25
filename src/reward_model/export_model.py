@@ -68,7 +68,34 @@ def _build_export_dict(
     Returns:
         Dict ready to be written with ``torch.save``.
     """
-    ...
+    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    with open(calibration_params_path, "r") as f:
+        calib = json.load(f)
+
+    feature_index_map = ckpt["feature_index_map"]
+    input_dim = max(end for _, end in feature_index_map.values())
+
+    raw_state_dict = ckpt["model_state_dict"]
+    if any(key.startswith("module.") for key in raw_state_dict.keys()):
+        model_state_dict = {k[len("module.") :]: v for k, v in raw_state_dict.items()}
+    else:
+        model_state_dict = raw_state_dict
+
+    config_snapshot = ckpt["config"]
+    config_snapshot = {
+        "LAYER_WIDTHS": config_snapshot["LAYER_WIDTHS"],
+        "DROPOUT_RATE": config_snapshot["DROPOUT_RATE"],
+        "ACTIVATION": config_snapshot["ACTIVATION"],
+    }
+
+    return {
+        "model_state_dict": model_state_dict,
+        "feature_index_map": feature_index_map,
+        "T_y1": float(calib["T_y1"]),
+        "T_y2": float(calib["T_y2"]),
+        "config_snapshot": config_snapshot,
+        "input_dim": input_dim,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -93,7 +120,16 @@ def run(config: RewardModelConfig) -> None:
     Args:
         config: Validated ``RewardModelConfig`` instance.
     """
-    ...
+    checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
+    calibration_params_path = Path(config.CALIBRATION_PARAMS_PATH)
+    export_path = Path(config.EXPORT_PATH)
+    export_path.parent.mkdir(parents=True, exist_ok=True)
+
+    export_dict = _build_export_dict(checkpoint_path, calibration_params_path)
+    torch.save(export_dict, export_path)
+
+    param_count = sum(v.numel() for v in export_dict["model_state_dict"].values())
+    logger.info("Exported frozen model to %s (params=%d)", export_path, param_count)
 
 
 def main() -> None:
