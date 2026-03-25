@@ -25,7 +25,7 @@ from typing import Dict, Optional, Tuple
 import torch
 
 from src.reward_model.model import RewardModel
-from src.reward_model.reward_model_utils import get_device, unwrap_ddp
+from src.reward_model.reward_model_utils import get_device
 
 logger = logging.getLogger(__name__)
 
@@ -99,7 +99,12 @@ class RewardModelInference:
             dropout_rate=config_snapshot["DROPOUT_RATE"],
             activation=config_snapshot["ACTIVATION"],
         )
-        model.load_state_dict(ckpt["model_state_dict"])
+        raw_state_dict = ckpt["model_state_dict"]
+        if any(k.startswith("module.") for k in raw_state_dict.keys()):
+            raw_state_dict = {
+                k[len("module."):]: v for k, v in raw_state_dict.items()
+            }
+        model.load_state_dict(raw_state_dict)
         model.to(device)
         model.eval()
         for param in model.parameters():
