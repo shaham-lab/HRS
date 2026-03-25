@@ -69,7 +69,14 @@ class MaskingSchedule:
             k: Number of feature slots zeroed per sample in random mode.
                 Default 1 (``MASKING_K`` in config).
         """
-        ...
+        self._feature_index_map = feature_index_map
+        self._start_ratios = start_ratios
+        self._end_ratios = end_ratios
+        self._transition_shape = transition_shape
+        self._transition_midpoint_epoch = transition_midpoint_epoch
+        self._total_epochs = total_epochs
+        self._k = k
+        self._slot_names = list(feature_index_map.keys())
 
     # ------------------------------------------------------------------
     # Curriculum schedule
@@ -86,7 +93,13 @@ class MaskingSchedule:
         Returns:
             Three-tuple of floats summing to 1.0.
         """
-        ...
+        return sigmoid_crossover(
+            epoch=epoch,
+            total_epochs=self._total_epochs,
+            start_ratios=self._start_ratios,
+            end_ratios=self._end_ratios,
+            midpoint=self._transition_midpoint_epoch,
+        )
 
     def sample_mode(self, epoch: int) -> str:
         """Draw a masking mode string for this mini-batch.
@@ -100,7 +113,8 @@ class MaskingSchedule:
         Returns:
             One of ``'random'``, ``'adversarial'``, or ``'none'``.
         """
-        ...
+        probs = self.get_mode_probabilities(epoch)
+        return np.random.choice(["random", "adversarial", "none"], p=probs)
 
     # ------------------------------------------------------------------
     # Masking operators
@@ -120,7 +134,13 @@ class MaskingSchedule:
         Returns:
             Cloned tensor of same shape with *k* slots zeroed per sample.
         """
-        ...
+        masked = X.clone()
+        for i in range(X.shape[0]):
+            chosen = np.random.choice(self._slot_names, size=self._k, replace=False)
+            for slot in chosen:
+                start, end = self._feature_index_map[slot]
+                masked[i, start:end] = 0.0
+        return masked
 
     def apply_adversarial_mask(
         self, X: torch.Tensor, grad_X: torch.Tensor
@@ -148,7 +168,19 @@ class MaskingSchedule:
             Cloned tensor of same shape with the highest-norm slot zeroed per
             sample.
         """
-        ...
+        masked = X.clone()
+        for i in range(X.shape[0]):
+            max_norm = None
+            max_slot = None
+            for slot, (start, end) in self._feature_index_map.items():
+                norm = torch.linalg.norm(grad_X[i, start:end])
+                if max_norm is None or norm > max_norm:
+                    max_norm = norm
+                    max_slot = slot
+            if max_slot is not None:
+                start, end = self._feature_index_map[max_slot]
+                masked[i, start:end] = 0.0
+        return masked
 
     def apply_no_mask(self, X: torch.Tensor) -> torch.Tensor:
         """Return *X* unchanged (no masking applied).
@@ -160,4 +192,4 @@ class MaskingSchedule:
         Returns:
             *X* unchanged (not cloned).
         """
-        ...
+        return X

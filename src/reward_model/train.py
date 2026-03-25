@@ -21,6 +21,8 @@ gradient computation), §8 (checkpoint and resume).
 import argparse
 import logging
 import os
+import sys
+import time
 from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, Tuple
@@ -68,7 +70,23 @@ def _init_ddp() -> Tuple[int, int, int, bool]:
         mode all three integers are 0 / 1 / 1 respectively and ``is_ddp`` is
         ``False``.
     """
-    ...
+    configured_gpus = int(os.environ.get("NUM_GPUS", "0"))
+    available_gpus = torch.cuda.device_count()
+    if configured_gpus == 1 or available_gpus < 2:
+        logger.warning("Insufficient CUDA devices for DDP — running in single-process mode")
+        return 0, 0, 1, False
+
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+
+    if world_size <= 1:
+        logger.warning("WORLD_SIZE <= 1 — running in single-process mode")
+        return 0, 0, 1, False
+
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return rank, local_rank, world_size, True
 
 
 # ---------------------------------------------------------------------------
@@ -104,7 +122,26 @@ def _load_and_broadcast_dataset(
         Tuple of ``(bundle, pos_weight_y1, pos_weight_y2)``.  ``bundle`` is
         ``None`` on non-rank-0 processes.
     """
-    ...
+    bundle: Optional[DatasetBundle] = None
+    if rank == 0:
+        bundle = load_dataset.run(config)
+        pos_weight_y1 = bundle.pos_weight_y1
+        pos_weight_y2 = bundle.pos_weight_y2
+    else:
+        pos_weight_y1 = 0.0
+        pos_weight_y2 = 0.0
+
+    tensor_y1 = torch.tensor(pos_weight_y1, device=device)
+    tensor_y2 = torch.tensor(pos_weight_y2, device=device)
+    if is_ddp:
+        broadcast_tensor(tensor_y1, src_rank=0)
+        broadcast_tensor(tensor_y2, src_rank=0)
+        obj_list = [bundle]
+        dist.broadcast_object_list(obj_list, src=0)
+        bundle = obj_list[0]
+        dist.barrier()
+
+    return bundle, float(tensor_y1.item()), float(tensor_y2.item())
 
 
 # ---------------------------------------------------------------------------
@@ -115,7 +152,8 @@ def _load_and_broadcast_dataset(
 def _build_lr_scheduler(
     optimizer: torch.optim.Optimizer,
     config: RewardModelConfig,
-    start_epoch: int,
+    steps_per_epoch: int,
+    start_step: int,
 ) -> torch.optim.lr_scheduler.LRScheduler:
     """Build the cosine annealing scheduler with linear warmup.
 
@@ -134,7 +172,30 @@ def _build_lr_scheduler(
         A ``torch.optim.lr_scheduler`` instance ready to call
         ``scheduler.step()`` once per epoch.
     """
-    ...
+    warmup_steps = max(config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
+    total_steps = max(config.MAX_EPOCHS * max(steps_per_epoch, 1), 1)
+
+    if warmup_steps > 0:
+        warmup = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=0.0,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
+        cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=config.LR_MIN
+        )
+        scheduler: torch.optim.lr_scheduler.LRScheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
+        )
+    else:
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=total_steps, eta_min=config.LR_MIN
+        )
+
+    for _ in range(start_step):
+        scheduler.step()
+    return scheduler
 
 
 # ---------------------------------------------------------------------------
@@ -156,7 +217,18 @@ def _find_latest_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
         Path to the latest ``epoch_<N>.pt`` file, or ``None`` if no checkpoint
         exists.
     """
-    ...
+    checkpoints = []
+    for path in checkpoint_dir.glob("epoch_*.pt"):
+        try:
+            epoch_str = path.stem.split("_", maxsplit=1)[1]
+            epoch_num = int(epoch_str)
+            checkpoints.append((epoch_num, path))
+        except (IndexError, ValueError):
+            continue
+    if not checkpoints:
+        return None
+    checkpoints.sort(key=lambda pair: pair[0], reverse=True)
+    return checkpoints[0][1]
 
 
 def _save_checkpoint(
@@ -196,7 +268,29 @@ def _save_checkpoint(
     Returns:
         Path of the written checkpoint file.
     """
-    ...
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "model_state_dict": unwrap_ddp(model).state_dict(),
+        "optimizer_state_dict": optimizer.state_dict(),
+        "scheduler_state_dict": scheduler.state_dict(),
+        "epoch": epoch,
+        "masking_schedule_state": {
+            "start_ratios": config.MASKING_START_RATIOS,
+            "end_ratios": config.MASKING_END_RATIOS,
+            "transition_midpoint_epoch": config.MASKING_TRANSITION_MIDPOINT_EPOCH,
+            "total_epochs": config.MAX_EPOCHS,
+            "k": config.MASKING_K,
+        },
+        "best_dev_loss": best_dev_loss,
+        "feature_index_map": feature_index_map,
+        "config": config.model_dump(),
+    }
+
+    target_path = checkpoint_dir / f"epoch_{epoch}.pt"
+    tmp_path = target_path.with_suffix(".pt.tmp")
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, target_path)
+    return target_path
 
 
 def _save_best_model(
@@ -221,7 +315,18 @@ def _save_best_model(
         feature_index_map: Feature index map snapshot.
         config: Validated ``RewardModelConfig``.
     """
-    ...
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        "model_state_dict": unwrap_ddp(model).state_dict(),
+        "epoch": epoch,
+        "best_dev_loss": best_dev_loss,
+        "feature_index_map": feature_index_map,
+        "config": config.model_dump(),
+    }
+    target_path = checkpoint_dir / "best_model.pt"
+    tmp_path = target_path.with_suffix(".pt.tmp")
+    torch.save(state, tmp_path)
+    os.replace(tmp_path, target_path)
 
 
 def _prune_old_checkpoints(checkpoint_dir: Path, keep_n: int) -> None:
@@ -236,7 +341,20 @@ def _prune_old_checkpoints(checkpoint_dir: Path, keep_n: int) -> None:
         keep_n: Number of most-recent epoch checkpoints to retain
             (``CHECKPOINT_KEEP_N`` in config).
     """
-    ...
+    checkpoints = []
+    for path in checkpoint_dir.glob("epoch_*.pt"):
+        try:
+            epoch_num = int(path.stem.split("_", maxsplit=1)[1])
+            checkpoints.append((epoch_num, path))
+        except (IndexError, ValueError):
+            continue
+
+    checkpoints.sort(key=lambda pair: pair[0], reverse=True)
+    for _, path in checkpoints[keep_n:]:
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            continue
 
 
 # ---------------------------------------------------------------------------
@@ -260,7 +378,57 @@ def _append_metrics_row(metrics_path: Path, row: Dict[str, float]) -> None:
         metrics_path: Path to ``training_metrics.parquet``.
         row: Dict mapping column name to scalar value for this epoch.
     """
-    ...
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "epoch",
+        "wall_time_s",
+        "masking_random_pct",
+        "masking_adversarial_pct",
+        "masking_none_pct",
+        "loss_total",
+        "loss_y1",
+        "loss_y2",
+        "auroc_y1",
+        "auprc_y1",
+        "ece_y1",
+        "auroc_y2",
+        "auprc_y2",
+        "ece_y2",
+    ]
+    schema = pa.schema(
+        [
+            ("epoch", pa.int64()),
+            ("wall_time_s", pa.float64()),
+            ("masking_random_pct", pa.float64()),
+            ("masking_adversarial_pct", pa.float64()),
+            ("masking_none_pct", pa.float64()),
+            ("loss_total", pa.float64()),
+            ("loss_y1", pa.float64()),
+            ("loss_y2", pa.float64()),
+            ("auroc_y1", pa.float64()),
+            ("auprc_y1", pa.float64()),
+            ("ece_y1", pa.float64()),
+            ("auroc_y2", pa.float64()),
+            ("auprc_y2", pa.float64()),
+            ("ece_y2", pa.float64()),
+        ]
+    )
+
+    new_row = {name: [row[name]] for name in columns}
+    new_table = pa.table(new_row, schema=schema)
+
+    if metrics_path.exists():
+        existing = pq.read_table(metrics_path)
+        table = pa.concat_tables([existing, new_table])
+    else:
+        table = new_table
+
+    tmp_path = metrics_path.with_suffix(".parquet.tmp")
+    pq.write_table(table, tmp_path)
+    os.replace(tmp_path, metrics_path)
 
 
 # ---------------------------------------------------------------------------
@@ -317,7 +485,66 @@ def _run_train_batch(
         Tuple of ``(total_loss, loss_y1, loss_y2)`` as Python floats for
         epoch-level accumulation before logging.
     """
-    ...
+    mode = masking_schedule.sample_mode(epoch)
+
+    optimizer.zero_grad()
+
+    if mode == "adversarial":
+        context = model.no_sync() if is_ddp and hasattr(model, "no_sync") else nullcontext()
+        X_grad = X.clone().requires_grad_(True)
+        with context:
+            logits_y1, logits_y2 = model(X_grad)
+            loss_total, loss_y1_t, loss_y2_t = compute_loss(
+                logits_y1,
+                logits_y2,
+                y1,
+                y2,
+                pos_weight_y1,
+                pos_weight_y2,
+                config.LOSS_WEIGHT_Y1,
+                config.LOSS_WEIGHT_Y2,
+            )
+            loss_total.backward()
+        grad_X = X_grad.grad.detach()
+        optimizer.zero_grad()
+        X_masked = masking_schedule.apply_adversarial_mask(X, grad_X)
+        logits_y1, logits_y2 = model(X_masked)
+        loss_total, loss_y1_t, loss_y2_t = compute_loss(
+            logits_y1,
+            logits_y2,
+            y1,
+            y2,
+            pos_weight_y1,
+            pos_weight_y2,
+            config.LOSS_WEIGHT_Y1,
+            config.LOSS_WEIGHT_Y2,
+        )
+        loss_total.backward()
+    else:
+        if mode == "random":
+            X = masking_schedule.apply_random_mask(X)
+        else:
+            X = masking_schedule.apply_no_mask(X)
+        logits_y1, logits_y2 = model(X)
+        loss_total, loss_y1_t, loss_y2_t = compute_loss(
+            logits_y1,
+            logits_y2,
+            y1,
+            y2,
+            pos_weight_y1,
+            pos_weight_y2,
+            config.LOSS_WEIGHT_Y1,
+            config.LOSS_WEIGHT_Y2,
+        )
+        loss_total.backward()
+
+    optimizer.step()
+
+    return (
+        float(loss_total.detach().item()),
+        float(loss_y1_t.detach().item()),
+        float(loss_y2_t.detach().item()),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -357,7 +584,82 @@ def _eval_dev(
         ``auroc_y1``, ``auprc_y1``, ``ece_y1``,
         ``auroc_y2``, ``auprc_y2``, ``ece_y2``.
     """
-    ...
+    eval_model = unwrap_ddp(model)
+    eval_model.eval()
+
+    dataloader = DataLoader(
+        dev_dataset,
+        batch_size=config.BATCH_SIZE_PER_GPU,
+        shuffle=False,
+        num_workers=4,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+    total_loss = 0.0
+    total_loss_y1 = 0.0
+    total_loss_y2 = 0.0
+    n_batches = 0
+
+    logits_y1_all = []
+    logits_y2_all = []
+    y1_all = []
+    y2_all = []
+
+    with torch.no_grad():
+        for X, y1, y2 in dataloader:
+            X = X.to(device)
+            y1 = y1.to(device)
+            y2 = y2.to(device)
+
+            logits_y1, logits_y2 = eval_model(X)
+            loss_total, loss_y1_t, loss_y2_t = compute_loss(
+                logits_y1,
+                logits_y2,
+                y1,
+                y2,
+                pos_weight_y1,
+                pos_weight_y2,
+                config.LOSS_WEIGHT_Y1,
+                config.LOSS_WEIGHT_Y2,
+            )
+
+            total_loss += float(loss_total.detach().item())
+            total_loss_y1 += float(loss_y1_t.detach().item())
+            total_loss_y2 += float(loss_y2_t.detach().item())
+            n_batches += 1
+
+            logits_y1_all.append(logits_y1.detach())
+            logits_y2_all.append(logits_y2.detach())
+            y1_all.append(y1.detach())
+            y2_all.append(y2.detach())
+
+    if n_batches == 0:
+        return {
+            "loss_total": float("nan"),
+            "loss_y1": float("nan"),
+            "loss_y2": float("nan"),
+            "auroc_y1": float("nan"),
+            "auprc_y1": float("nan"),
+            "ece_y1": float("nan"),
+            "auroc_y2": float("nan"),
+            "auprc_y2": float("nan"),
+            "ece_y2": float("nan"),
+        }
+
+    logits_y1_cat = torch.cat(logits_y1_all, dim=0)
+    logits_y2_cat = torch.cat(logits_y2_all, dim=0)
+    y1_cat = torch.cat(y1_all, dim=0)
+    y2_cat = torch.cat(y2_all, dim=0)
+
+    metrics = compute_metrics(logits_y1_cat, logits_y2_cat, y1_cat, y2_cat)
+    metrics.update(
+        {
+            "loss_total": total_loss / n_batches,
+            "loss_y1": total_loss_y1 / n_batches,
+            "loss_y2": total_loss_y2 / n_batches,
+        }
+    )
+    return metrics
 
 
 # ---------------------------------------------------------------------------
@@ -409,7 +711,244 @@ def main() -> None:
             g. ``dist.barrier()`` (all ranks resume next epoch together).
       11. Rank 0: write final checkpoint.  ``dist.destroy_process_group()``.
     """
-    ...
+    parser = argparse.ArgumentParser(description="Train the CDSS-ML reward model")
+    parser.add_argument("--config", required=True, help="Path to reward_model.yaml")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    args = parser.parse_args()
+
+    config = load_and_validate_config(args.config)
+    os.environ.setdefault("NUM_GPUS", str(config.NUM_GPUS))
+
+    rank, local_rank, world_size, is_ddp = _init_ddp()
+    device = get_device(local_rank)
+
+    bundle, pos_weight_y1, pos_weight_y2 = _load_and_broadcast_dataset(config, rank, device, is_ddp)
+
+    feature_index_map: Optional[Dict[str, Tuple[int, int]]] = bundle.feature_index_map if bundle else None
+    input_dim: Optional[int] = bundle.input_dim if bundle else None
+    train_dataset = bundle.train_dataset if bundle else None
+    dev_dataset = bundle.dev_dataset if bundle else None
+
+    checkpoint_dir = Path(config.CHECKPOINT_DIR)
+    metrics_path = Path(config.METRICS_PATH)
+
+    if feature_index_map is None or input_dim is None or train_dataset is None or dev_dataset is None:
+        raise RuntimeError("Dataset must be available on all ranks after broadcast")
+
+    start_epoch = 0
+    best_dev_loss = float("inf")
+    ckpt_state: Optional[dict] = None
+
+    if args.resume:
+        latest = _find_latest_checkpoint(checkpoint_dir)
+        if latest is None:
+            raise RuntimeError("Resume requested but no checkpoint found")
+        if rank == 0:
+            ckpt_state = torch.load(latest, map_location="cpu")
+            ckpt_feature_map = ckpt_state["feature_index_map"]
+            if feature_index_map != ckpt_feature_map:
+                raise RuntimeError("Feature index map mismatch between checkpoint and current dataset")
+        if is_ddp:
+            obj_state: list = [ckpt_state]
+            dist.broadcast_object_list(obj_state, src=0)
+            ckpt_state = obj_state[0]
+            dist.barrier()
+        if ckpt_state is None:
+            raise RuntimeError("Checkpoint state could not be loaded")
+        start_epoch = ckpt_state["epoch"] + 1
+        best_dev_loss = ckpt_state.get("best_dev_loss", best_dev_loss)
+
+    model = RewardModel(
+        input_dim=input_dim,
+        layer_widths=config.LAYER_WIDTHS,
+        dropout_rate=config.DROPOUT_RATE,
+        activation=config.ACTIVATION,
+    ).to(device)
+    if is_ddp:
+        model = DistributedDataParallel(model, device_ids=[local_rank])
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=config.LEARNING_RATE,
+        weight_decay=config.WEIGHT_DECAY,
+        betas=(config.ADAM_BETA1, config.ADAM_BETA2),
+    )
+
+    masking_schedule = MaskingSchedule(
+        feature_index_map=feature_index_map if feature_index_map is not None else {},
+        start_ratios=config.MASKING_START_RATIOS,
+        end_ratios=config.MASKING_END_RATIOS,
+        transition_shape=config.MASKING_TRANSITION_SHAPE,
+        transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
+        total_epochs=config.MAX_EPOCHS,
+        k=config.MASKING_K,
+    )
+
+    if is_ddp and train_dataset is None:
+        raise RuntimeError("Train dataset unavailable for DDP training")
+
+    if train_dataset is not None:
+        if is_ddp:
+            sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
+        else:
+            sampler = RandomSampler(train_dataset)
+        train_loader = DataLoader(
+            train_dataset,
+            batch_size=config.BATCH_SIZE_PER_GPU,
+            sampler=sampler,
+            num_workers=4,
+            pin_memory=torch.cuda.is_available(),
+        )
+    else:
+        train_loader = None
+
+    steps_per_epoch = len(train_loader) if train_loader is not None else 1
+    start_step = 0 if args.resume else start_epoch * steps_per_epoch
+    scheduler = _build_lr_scheduler(optimizer, config, steps_per_epoch, start_step)
+
+    if ckpt_state is not None:
+        unwrap_ddp(model).load_state_dict(ckpt_state["model_state_dict"])
+        optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+        scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+
+    epochs_without_improve = 0
+
+    last_epoch_completed = start_epoch - 1
+
+    for epoch in range(start_epoch, config.MAX_EPOCHS):
+        if train_loader is None:
+            break
+
+        if is_ddp and isinstance(train_loader.sampler, DistributedSampler):
+            train_loader.sampler.set_epoch(epoch)
+
+        epoch_loss_total = 0.0
+        epoch_loss_y1 = 0.0
+        epoch_loss_y2 = 0.0
+        batches = 0
+
+        epoch_start = time.time()
+
+        for X, y1, y2 in train_loader:
+            X = X.to(device, non_blocking=True)
+            y1 = y1.to(device, non_blocking=True)
+            y2 = y2.to(device, non_blocking=True)
+
+            total, l1, l2 = _run_train_batch(
+                model,
+                X,
+                y1,
+                y2,
+                masking_schedule,
+                optimizer,
+                pos_weight_y1,
+                pos_weight_y2,
+                config,
+                epoch,
+                is_ddp,
+            )
+            scheduler.step()
+
+            epoch_loss_total += total
+            epoch_loss_y1 += l1
+            epoch_loss_y2 += l2
+            batches += 1
+
+        if is_ddp:
+            dist.barrier()
+
+        if rank == 0:
+            probs = masking_schedule.get_mode_probabilities(epoch)
+            dev_metrics = _eval_dev(model, dev_dataset, pos_weight_y1, pos_weight_y2, config, device)
+            model.train()
+
+            row = {
+                "epoch": epoch,
+                "wall_time_s": float(time.time() - epoch_start),
+                "masking_random_pct": probs[0] * 100.0,
+                "masking_adversarial_pct": probs[1] * 100.0,
+                "masking_none_pct": probs[2] * 100.0,
+                "loss_total": dev_metrics["loss_total"],
+                "loss_y1": dev_metrics["loss_y1"],
+                "loss_y2": dev_metrics["loss_y2"],
+                "auroc_y1": dev_metrics["auroc_y1"],
+                "auprc_y1": dev_metrics["auprc_y1"],
+                "ece_y1": dev_metrics["ece_y1"],
+                "auroc_y2": dev_metrics["auroc_y2"],
+                "auprc_y2": dev_metrics["auprc_y2"],
+                "ece_y2": dev_metrics["ece_y2"],
+            }
+            _append_metrics_row(metrics_path, row)
+
+            current_dev_loss = dev_metrics["loss_total"]
+            improved = current_dev_loss < best_dev_loss
+            if improved:
+                best_dev_loss = current_dev_loss
+                epochs_without_improve = 0
+                if is_ddp:
+                    dist.barrier()
+                _save_checkpoint(
+                    checkpoint_dir,
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    best_dev_loss,
+                    feature_index_map if feature_index_map is not None else {},
+                    config,
+                )
+                _save_best_model(
+                    checkpoint_dir,
+                    model,
+                    epoch,
+                    best_dev_loss,
+                    feature_index_map if feature_index_map is not None else {},
+                    config,
+                )
+                _prune_old_checkpoints(checkpoint_dir, config.CHECKPOINT_KEEP_N)
+                if is_ddp:
+                    dist.barrier()
+            else:
+                epochs_without_improve += 1
+
+            should_stop = epochs_without_improve >= config.EARLY_STOPPING_PATIENCE
+        else:
+            should_stop = False
+
+        if is_ddp:
+            stop_tensor = torch.tensor(1 if should_stop else 0, device=device)
+            broadcast_tensor(stop_tensor, src_rank=0)
+            should_stop = bool(stop_tensor.item())
+
+        if should_stop:
+            break
+
+        if is_ddp:
+            dist.barrier()
+
+        last_epoch_completed = epoch
+
+    if rank == 0:
+        if is_ddp:
+            dist.barrier()
+        _save_checkpoint(
+            checkpoint_dir,
+            model,
+            optimizer,
+            scheduler,
+            last_epoch_completed if last_epoch_completed >= 0 else 0,
+            best_dev_loss,
+            feature_index_map if feature_index_map is not None else {},
+            config,
+        )
+        if is_ddp:
+            dist.barrier()
+
+    if is_ddp:
+        dist.destroy_process_group()
+
+    sys_exit = getattr(__import__("sys"), "exit")
+    sys_exit(0)
 
 
 if __name__ == "__main__":
