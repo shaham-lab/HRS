@@ -2,7 +2,7 @@
 #SBATCH --job-name=hrs_preprocessing
 #SBATCH --output=logs/hrs_preprocessing_%j.out
 #SBATCH --error=logs/hrs_preprocessing_%j.err
-#SBATCH --partition=L4-12h
+#SBATCH --partition=A100-4h
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=64G
 #SBATCH --mail-user=eli.kazum@biu.ac.il

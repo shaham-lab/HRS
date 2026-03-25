@@ -2,7 +2,7 @@
 #SBATCH --job-name=hrs_embed
 #SBATCH --output=logs/hrs_embed_%j.out
 #SBATCH --error=logs/hrs_embed_%j.err
-#SBATCH --partition=L4-12h
+#SBATCH --partition=A100-4h
 #SBATCH --gres=gpu:2
 #SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
