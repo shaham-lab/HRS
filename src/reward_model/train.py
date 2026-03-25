@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _init_ddp() -> Tuple[int, int, int, bool]:
+def _init_ddp(num_gpus: int) -> Tuple[int, int, int, bool]:
     """Initialise the DDP process group from torchrun environment variables.
 
     Reads ``RANK``, ``LOCAL_RANK``, ``WORLD_SIZE``, ``MASTER_ADDR``, and
@@ -65,12 +65,15 @@ def _init_ddp() -> Tuple[int, int, int, bool]:
     is skipped.  Single-process mode is logged at WARNING and the returned
     ``is_ddp`` flag is ``False``.
 
+    Args:
+        num_gpus: Number of GPUs requested via config.
+
     Returns:
         Tuple of ``(rank, local_rank, world_size, is_ddp)``.  In single-process
         mode all three integers are 0 / 1 / 1 respectively and ``is_ddp`` is
         ``False``.
     """
-    configured_gpus = int(os.environ.get("NUM_GPUS", "0"))
+    configured_gpus = int(num_gpus)
     available_gpus = torch.cuda.device_count()
     if configured_gpus == 1 or available_gpus < 2:
         logger.warning("Insufficient CUDA devices for DDP — running in single-process mode")
@@ -158,19 +161,20 @@ def _build_lr_scheduler(
     """Build the cosine annealing scheduler with linear warmup.
 
     Warmup phase: linearly ramps the LR from 0 to ``LEARNING_RATE`` over
-    ``LR_WARMUP_EPOCHS`` epochs.  After warmup: cosine decay from
-    ``LEARNING_RATE`` down to ``LR_MIN`` over the remaining epochs.
+    ``LR_WARMUP_EPOCHS`` epochs (converted to steps).  After warmup: cosine
+    decay from ``LEARNING_RATE`` down to ``LR_MIN`` over the remaining *steps*.
+    ``scheduler.step()`` is invoked once per **batch** (step-based scheduling).
 
     Args:
         optimizer: The AdamW optimiser instance.
         config: Validated ``RewardModelConfig``.
-        start_epoch: The epoch at which training resumes (0 for fresh runs;
-            restored from checkpoint on ``--resume``).  Used to fast-forward
-            the scheduler to the correct state.
+        steps_per_epoch: Number of batches per epoch (used to convert warmup
+            epochs to steps).
+        start_step: Step offset when resuming to fast-forward the scheduler.
 
     Returns:
-        A ``torch.optim.lr_scheduler`` instance ready to call
-        ``scheduler.step()`` once per epoch.
+         A ``torch.optim.lr_scheduler`` instance ready to call
+         ``scheduler.step()`` once per batch.
     """
     warmup_steps = max(config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
     total_steps = max(config.MAX_EPOCHS * max(steps_per_epoch, 1), 1)
@@ -193,6 +197,8 @@ def _build_lr_scheduler(
             optimizer, T_max=total_steps, eta_min=config.LR_MIN
         )
 
+    # The fast-forward path is kept for correctness even though start_step is
+    # typically 0 in current usage.
     for _ in range(start_step):
         scheduler.step()
     return scheduler
@@ -277,6 +283,7 @@ def _save_checkpoint(
         "masking_schedule_state": {
             "start_ratios": config.MASKING_START_RATIOS,
             "end_ratios": config.MASKING_END_RATIOS,
+            "transition_shape": config.MASKING_TRANSITION_SHAPE,
             "transition_midpoint_epoch": config.MASKING_TRANSITION_MIDPOINT_EPOCH,
             "total_epochs": config.MAX_EPOCHS,
             "k": config.MASKING_K,
@@ -591,7 +598,7 @@ def _eval_dev(
         dev_dataset,
         batch_size=config.BATCH_SIZE_PER_GPU,
         shuffle=False,
-        num_workers=4,
+        num_workers=config.DATALOADER_NUM_WORKERS,
         pin_memory=torch.cuda.is_available(),
     )
 
@@ -717,9 +724,18 @@ def main() -> None:
     args = parser.parse_args()
 
     config = load_and_validate_config(args.config)
-    os.environ.setdefault("NUM_GPUS", str(config.NUM_GPUS))
 
-    rank, local_rank, world_size, is_ddp = _init_ddp()
+    initial_rank = int(os.environ.get("RANK", "0"))
+    if initial_rank == 0:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+            stream=sys.stdout,
+        )
+    else:
+        logging.basicConfig(level=logging.ERROR)
+
+    rank, local_rank, world_size, is_ddp = _init_ddp(config.NUM_GPUS)
     device = get_device(local_rank)
 
     bundle, pos_weight_y1, pos_weight_y2 = _load_and_broadcast_dataset(config, rank, device, is_ddp)
@@ -774,15 +790,27 @@ def main() -> None:
         betas=(config.ADAM_BETA1, config.ADAM_BETA2),
     )
 
-    masking_schedule = MaskingSchedule(
-        feature_index_map=feature_index_map if feature_index_map is not None else {},
-        start_ratios=config.MASKING_START_RATIOS,
-        end_ratios=config.MASKING_END_RATIOS,
-        transition_shape=config.MASKING_TRANSITION_SHAPE,
-        transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
-        total_epochs=config.MAX_EPOCHS,
-        k=config.MASKING_K,
-    )
+    if ckpt_state is not None:
+        ms = ckpt_state["masking_schedule_state"]
+        masking_schedule = MaskingSchedule(
+            feature_index_map=feature_index_map if feature_index_map is not None else {},
+            start_ratios=ms["start_ratios"],
+            end_ratios=ms["end_ratios"],
+            transition_shape=ms["transition_shape"],
+            transition_midpoint_epoch=ms["transition_midpoint_epoch"],
+            total_epochs=ms["total_epochs"],
+            k=ms["k"],
+        )
+    else:
+        masking_schedule = MaskingSchedule(
+            feature_index_map=feature_index_map if feature_index_map is not None else {},
+            start_ratios=config.MASKING_START_RATIOS,
+            end_ratios=config.MASKING_END_RATIOS,
+            transition_shape=config.MASKING_TRANSITION_SHAPE,
+            transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
+            total_epochs=config.MAX_EPOCHS,
+            k=config.MASKING_K,
+        )
 
     if is_ddp and train_dataset is None:
         raise RuntimeError("Train dataset unavailable for DDP training")
@@ -796,7 +824,7 @@ def main() -> None:
             train_dataset,
             batch_size=config.BATCH_SIZE_PER_GPU,
             sampler=sampler,
-            num_workers=4,
+            num_workers=config.DATALOADER_NUM_WORKERS,
             pin_memory=torch.cuda.is_available(),
         )
     else:
@@ -885,8 +913,6 @@ def main() -> None:
             if improved:
                 best_dev_loss = current_dev_loss
                 epochs_without_improve = 0
-                if is_ddp:
-                    dist.barrier()
                 _save_checkpoint(
                     checkpoint_dir,
                     model,
@@ -906,8 +932,6 @@ def main() -> None:
                     config,
                 )
                 _prune_old_checkpoints(checkpoint_dir, config.CHECKPOINT_KEEP_N)
-                if is_ddp:
-                    dist.barrier()
             else:
                 epochs_without_improve += 1
 
@@ -928,9 +952,9 @@ def main() -> None:
 
         last_epoch_completed = epoch
 
+    if is_ddp:
+        dist.barrier()
     if rank == 0:
-        if is_ddp:
-            dist.barrier()
         _save_checkpoint(
             checkpoint_dir,
             model,
@@ -941,14 +965,9 @@ def main() -> None:
             feature_index_map if feature_index_map is not None else {},
             config,
         )
-        if is_ddp:
-            dist.barrier()
-
     if is_ddp:
+        dist.barrier()
         dist.destroy_process_group()
-
-    sys_exit = getattr(__import__("sys"), "exit")
-    sys_exit(0)
 
 
 if __name__ == "__main__":

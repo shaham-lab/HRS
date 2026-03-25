@@ -180,6 +180,7 @@ class RewardModelConfig(BaseModel):
 
     DATASET_PATH: str
     DATASET_ROW_GROUP_CACHE_SIZE: int = 2
+    DATALOADER_NUM_WORKERS: int = 4
 
     CHECKPOINT_DIR: str
     METRICS_PATH: str

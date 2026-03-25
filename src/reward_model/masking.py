@@ -15,7 +15,7 @@ See Detailed Design §5 (masking.py) and §6.3 (adversarial masking under DDP).
 """
 
 import logging
-from typing import Dict, List, Tuple
+from typing import Dict, Tuple
 
 import numpy as np
 import torch
@@ -113,8 +113,9 @@ class MaskingSchedule:
         Returns:
             One of ``'random'``, ``'adversarial'``, or ``'none'``.
         """
-        probs = self.get_mode_probabilities(epoch)
-        return np.random.choice(["random", "adversarial", "none"], p=probs)
+        probs = np.array(self.get_mode_probabilities(epoch), dtype=np.float64)
+        probs /= probs.sum()
+        return str(np.random.choice(["random", "adversarial", "none"], p=probs))
 
     # ------------------------------------------------------------------
     # Masking operators

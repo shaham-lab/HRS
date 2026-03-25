@@ -33,6 +33,7 @@ MASKING_K: 1
 
 DATASET_PATH: data/preprocessing/classifications/final_cdss_dataset.parquet
 DATASET_ROW_GROUP_CACHE_SIZE: 2
+DATALOADER_NUM_WORKERS: 4
 
 CHECKPOINT_DIR: data/reward_model/checkpoints
 METRICS_PATH: data/reward_model/training_metrics.parquet
