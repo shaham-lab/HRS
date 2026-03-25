@@ -15,7 +15,7 @@ See Detailed Design §5 (masking.py) and §6.3 (adversarial masking under DDP).
 """
 
 import logging
-from typing import Dict, Tuple
+from typing import Dict, Set, Tuple
 
 import numpy as np
 import torch
@@ -46,6 +46,7 @@ class MaskingSchedule:
         transition_midpoint_epoch: int,
         total_epochs: int,
         k: int = 1,
+        always_visible_slots: Set[str] = frozenset(),
     ) -> None:
         """Initialise the masking schedule.
 
@@ -68,6 +69,11 @@ class MaskingSchedule:
             total_epochs: Total training epochs (``MAX_EPOCHS`` in config).
             k: Number of feature slots zeroed per sample in random mode.
                 Default 1 (``MASKING_K`` in config).
+            always_visible_slots: Set of feature column names that are never
+                candidates for masking.  Corresponds to F1–F5 in the
+                architecture document: demographic_vec, diag_history_embedding,
+                discharge_history_embedding, triage_embedding,
+                chief_complaint_embedding.
         """
         self._feature_index_map = feature_index_map
         self._start_ratios = start_ratios
@@ -76,7 +82,9 @@ class MaskingSchedule:
         self._transition_midpoint_epoch = transition_midpoint_epoch
         self._total_epochs = total_epochs
         self._k = k
-        self._slot_names = list(feature_index_map.keys())
+        self._always_visible_slots = set(always_visible_slots)
+        self._maskable_slots = [name for name in feature_index_map.keys() if name not in self._always_visible_slots]
+        self._slot_names = self._maskable_slots
 
     # ------------------------------------------------------------------
     # Curriculum schedule
@@ -124,9 +132,9 @@ class MaskingSchedule:
     def apply_random_mask(self, X: torch.Tensor) -> torch.Tensor:
         """Zero *k* randomly-selected feature slots per sample without replacement.
 
-        Slot indices are drawn uniformly at random from all entries in
-        ``feature_index_map``.  The original tensor is not modified in place —
-        a clone is returned.
+        Slot indices are drawn uniformly at random from the maskable entries in
+        ``feature_index_map`` (excluding always-visible slots).  The original
+        tensor is not modified in place — a clone is returned.
 
         Args:
             X: Input batch tensor of shape ``(batch_size, input_dim)``,
@@ -148,10 +156,10 @@ class MaskingSchedule:
     ) -> torch.Tensor:
         """Zero the highest-L2-norm gradient slot per sample.
 
-        Importance score per slot: L2 norm of ``grad_X`` over the slot's index
-        range.  Using the norm (rather than the raw per-dimension maximum) makes
-        slots of different sizes comparable — ``demographic_vec`` spans 8
-        dimensions while all embedding slots span 768.
+        Importance score per slot: RMS (root mean square) gradient magnitude,
+        computed as L2 norm divided by sqrt(slot_dim). This normalises for slot
+        size so demographic_vec (8 dims) and embedding slots (768 dims) are
+        compared on equal footing.
 
         The gradient ``∂L/∂X`` is computed by ``train.py`` via a first
         forward/backward pass inside ``model.no_sync()`` before this method is
@@ -173,8 +181,10 @@ class MaskingSchedule:
         for i in range(X.shape[0]):
             max_norm = None
             max_slot = None
-            for slot, (start, end) in self._feature_index_map.items():
-                norm = torch.linalg.norm(grad_X[i, start:end])
+            for slot in self._maskable_slots:
+                start, end = self._feature_index_map[slot]
+                slot_dim = end - start
+                norm = torch.linalg.norm(grad_X[i, start:end]) / (slot_dim ** 0.5)
                 if max_norm is None or norm > max_norm:
                     max_norm = norm
                     max_slot = slot

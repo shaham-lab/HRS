@@ -69,7 +69,7 @@ def _build_export_dict(
     Returns:
         Dict ready to be written with ``torch.save``.
     """
-    ckpt = torch.load(checkpoint_path, map_location="cpu")
+    ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
     with open(calibration_params_path, "r") as f:
         calib = json.load(f)
 

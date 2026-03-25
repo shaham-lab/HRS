@@ -67,7 +67,7 @@ def _load_model_from_checkpoint(
            saved by ``train.py``; authoritative for architecture keys
            ``LAYER_WIDTHS``, ``DROPOUT_RATE``, and ``ACTIVATION``.
     """
-    ckpt = torch.load(checkpoint_path, map_location=device)
+    ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     config_snapshot: Dict = ckpt["config"]
     feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
     input_dim = max(end for _, end in feature_index_map.values())
@@ -167,8 +167,10 @@ def _fit_temperature(
 
     Temperature scaling: the calibrated probability is
     ``sigmoid(logit / T)``, equivalent to ``sigmoid(logit * (1/T))``.
-    Optimisation is performed only on the subset of samples selected by
-    *mask*.
+    Optimisation is performed in log-space (optimising log_T, recovering
+    ``T = exp(log_T)``) to guarantee ``T > 0`` throughout, avoiding erratic
+    gradients at the clamp boundary that occur with direct optimisation.  Only
+    the subset of samples selected by *mask* is used.
 
     Args:
         logits: Raw model logits of shape ``(N,)``, float32.
@@ -183,24 +185,22 @@ def _fit_temperature(
         ``1e-8`` before being returned to prevent downstream division
         by zero in ``sigmoid(logit / T)``.
     """
-    masked_logits = logits[mask]
-    masked_labels = labels[mask]
+    logits_t = torch.tensor(logits[mask], dtype=torch.float32)
+    labels_t = torch.tensor(labels[mask], dtype=torch.float32)
 
-    logits_t = torch.tensor(masked_logits, dtype=torch.float32)
-    labels_t = torch.tensor(masked_labels, dtype=torch.float32)
-
-    T = torch.nn.Parameter(torch.ones(1))
-    optimizer = torch.optim.LBFGS([T], lr=0.01, max_iter=50)
+    log_T = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.LBFGS([log_T], lr=0.01, max_iter=50)
 
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
-        scaled_logits = logits_t / T.clamp(min=1e-8)
+        T_pos = torch.exp(log_T)
+        scaled_logits = logits_t / T_pos
         loss = torch.nn.functional.binary_cross_entropy_with_logits(scaled_logits, labels_t)
         loss.backward()
         return loss
 
     optimizer.step(closure)
-    return float(max(T.item(), 1e-8))
+    return float(max(torch.exp(log_T).item(), 1e-8))
 
 
 # ---------------------------------------------------------------------------

@@ -1,14 +1,16 @@
 import logging
 import math
 import os
+import random
 from bisect import bisect_right
 from collections import OrderedDict
-from typing import Dict, Iterable, List, NamedTuple, Optional, Tuple
+from typing import Dict, Iterable, List, NamedTuple, Optional, Set, Tuple
 
 import pandas as pd
 import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
+from torch.utils.data import Sampler
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
@@ -148,6 +150,16 @@ _MICRO_EMBEDDINGS = {
     "micro_vaginal_genital_flora_embedding",
     "micro_throat_strep_embedding",
 }
+
+ALWAYS_VISIBLE_SLOTS: frozenset = frozenset(
+    {
+        "demographic_vec",
+        "diag_history_embedding",
+        "discharge_history_embedding",
+        "triage_embedding",
+        "chief_complaint_embedding",
+    }
+)
 
 
 class RewardModelConfig(BaseModel):
@@ -440,6 +452,66 @@ class ParquetDataset(torch.utils.data.Dataset):
         if len(self._cache) > self._cache_size:
             self._cache.popitem(last=False)
         return table
+
+
+class RowGroupBlockSampler(Sampler[int]):
+    """Row-group-aware sampler that shuffles at the row group level to prevent I/O thrashing on the ParquetDataset LRU cache.
+
+    Consecutive indices yielded by this sampler come from the same or adjacent
+    row groups, maximising cache hit rate.  Partitions row groups across DDP
+    ranks in round-robin order.
+    """
+
+    def __init__(
+        self,
+        dataset: ParquetDataset,
+        rank: int,
+        world_size: int,
+        shuffle: bool = True,
+        seed: int = 0,
+    ) -> None:
+        self._dataset = dataset
+        self._rank = rank
+        self._world_size = world_size
+        self._shuffle = shuffle
+        self._seed = seed
+        self._epoch = 0
+
+        # Build mapping from row group index to local dataset indices belonging to it.
+        self._rg_to_local_indices: Dict[int, List[int]] = {}
+        for local_idx, global_row_idx in enumerate(self._dataset._row_indices):
+            rg_index, _ = self._dataset._locate_row_group(global_row_idx)
+            self._rg_to_local_indices.setdefault(rg_index, []).append(local_idx)
+
+        self._num_samples = sum(len(indices) for indices in self._rg_to_local_indices.values())
+
+    def __iter__(self):
+        rng = random.Random(self._seed + self._epoch)
+
+        row_groups = [rg for rg, indices in self._rg_to_local_indices.items() if indices]
+        if self._shuffle:
+            rng.shuffle(row_groups)
+
+        # Partition row groups round-robin across ranks.
+        row_groups_for_rank = [rg for idx, rg in enumerate(row_groups) if idx % self._world_size == self._rank]
+
+        for rg in row_groups_for_rank:
+            local_indices = list(self._rg_to_local_indices[rg])
+            if self._shuffle:
+                rng.shuffle(local_indices)
+            for idx in local_indices:
+                yield idx
+
+    def __len__(self) -> int:
+        rng = random.Random(self._seed + self._epoch)
+        row_groups = [rg for rg, indices in self._rg_to_local_indices.items() if indices]
+        if self._shuffle:
+            rng.shuffle(row_groups)
+        row_groups_for_rank = [rg for idx, rg in enumerate(row_groups) if idx % self._world_size == self._rank]
+        return sum(len(self._rg_to_local_indices[rg]) for rg in row_groups_for_rank)
+
+    def set_epoch(self, epoch: int) -> None:
+        self._epoch = epoch
 
 
 class DatasetBundle(NamedTuple):

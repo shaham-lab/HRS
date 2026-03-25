@@ -30,15 +30,17 @@ from typing import Dict, Optional, Tuple
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
-from torch.utils.data import DataLoader, DistributedSampler, RandomSampler
+from torch.utils.data import DataLoader
 
 from src.reward_model import load_dataset
 from src.reward_model.loss import compute_loss, compute_metrics
 from src.reward_model.masking import MaskingSchedule
 from src.reward_model.model import RewardModel
 from src.reward_model.reward_model_utils import (
+    ALWAYS_VISIBLE_SLOTS,
     DatasetBundle,
     RewardModelConfig,
+    RowGroupBlockSampler,
     broadcast_tensor,
     get_device,
     load_and_validate_config,
@@ -287,6 +289,7 @@ def _save_checkpoint(
             "transition_midpoint_epoch": config.MASKING_TRANSITION_MIDPOINT_EPOCH,
             "total_epochs": config.MAX_EPOCHS,
             "k": config.MASKING_K,
+            "always_visible_slots": list(ALWAYS_VISIBLE_SLOTS),
         },
         "best_dev_loss": best_dev_loss,
         "feature_index_map": feature_index_map,
@@ -702,8 +705,8 @@ def main() -> None:
           epoch, best_dev_loss; validates feature index map snapshot against
           current dataset (raises on mismatch); broadcasts model state dict
           via ``dist.broadcast_object_list()``; ``dist.barrier()``.
-      9.  Construct ``DistributedSampler`` (multi-GPU) or ``RandomSampler``
-          (single-GPU) over ``train_dataset``; wrap in ``DataLoader`` with
+      9.  Construct ``RowGroupBlockSampler`` over ``train_dataset`` (round-robin
+          row group partitioning across ranks); wrap in ``DataLoader`` with
           ``batch_size = BATCH_SIZE_PER_GPU``.
       10. Epoch loop from ``start_epoch`` to ``MAX_EPOCHS``:
             a. ``sampler.set_epoch(epoch)`` for per-epoch reshuffling.
@@ -800,6 +803,7 @@ def main() -> None:
             transition_midpoint_epoch=ms["transition_midpoint_epoch"],
             total_epochs=ms["total_epochs"],
             k=ms["k"],
+            always_visible_slots=ms.get("always_visible_slots", ALWAYS_VISIBLE_SLOTS),
         )
     else:
         masking_schedule = MaskingSchedule(
@@ -810,16 +814,20 @@ def main() -> None:
             transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
             total_epochs=config.MAX_EPOCHS,
             k=config.MASKING_K,
+            always_visible_slots=ALWAYS_VISIBLE_SLOTS,
         )
 
     if is_ddp and train_dataset is None:
         raise RuntimeError("Train dataset unavailable for DDP training")
 
     if train_dataset is not None:
-        if is_ddp:
-            sampler = DistributedSampler(train_dataset, num_replicas=world_size, rank=rank, shuffle=True)
-        else:
-            sampler = RandomSampler(train_dataset)
+        sampler = RowGroupBlockSampler(
+            dataset=train_dataset,
+            rank=rank,
+            world_size=world_size if is_ddp else 1,
+            shuffle=True,
+            seed=0,
+        )
         train_loader = DataLoader(
             train_dataset,
             batch_size=config.BATCH_SIZE_PER_GPU,
@@ -847,7 +855,7 @@ def main() -> None:
         if train_loader is None:
             break
 
-        if is_ddp and isinstance(train_loader.sampler, DistributedSampler):
+        if is_ddp and hasattr(train_loader.sampler, "set_epoch"):
             train_loader.sampler.set_epoch(epoch)
 
         epoch_loss_total = 0.0

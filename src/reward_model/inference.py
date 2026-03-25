@@ -78,7 +78,7 @@ class RewardModelInference:
         if device is None:
             device = get_device(local_rank=0)
 
-        ckpt = torch.load(checkpoint_path, map_location=device)
+        ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
         self._feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
         input_dim = ckpt.get("input_dim") or sum(end - start for start, end in self._feature_index_map.values())
 
