@@ -24,7 +24,6 @@ import torch
 from src.reward_model.reward_model_utils import (
     RewardModelConfig,
     load_and_validate_config,
-    unwrap_ddp,
 )
 
 logger = logging.getLogger(__name__)
@@ -48,8 +47,9 @@ def _build_export_dict(
 
     Contents of the returned dict:
 
-    - *model_state_dict* — Model weights, unwrapped from DDP via
-      ``unwrap_ddp()`` if the checkpoint was saved under DDP.
+    - *model_state_dict* — Model weights, unwrapped from DDP by stripping
+      the ``module.`` key prefix if present (applied directly to the state
+      dict keys, since no live model object is available at export time).
     - *feature_index_map* — ``Dict[str, Tuple[int, int]]`` snapshot from the
       checkpoint; maps feature column name to ``(start, end)`` index range.
     - *T_y1* — Scalar calibration temperature for the mortality head (Y1).
@@ -74,7 +74,7 @@ def _build_export_dict(
         calib = json.load(f)
 
     feature_index_map = ckpt["feature_index_map"]
-    input_dim = max(end for _, end in feature_index_map.values())
+    input_dim = sum(end - start for start, end in feature_index_map.values())
 
     raw_state_dict = ckpt["model_state_dict"]
     if any(key.startswith("module.") for key in raw_state_dict.keys()):

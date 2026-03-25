@@ -80,17 +80,17 @@ class RewardModelInference:
 
         ckpt = torch.load(checkpoint_path, map_location=device)
         self._feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
-        input_dim = ckpt.get("input_dim") or max(end for _, end in self._feature_index_map.values())
+        input_dim = ckpt.get("input_dim") or sum(end - start for start, end in self._feature_index_map.values())
 
         if "T_y1" in ckpt and "T_y2" in ckpt:
-            self._T_y1 = float(ckpt["T_y1"])
-            self._T_y2 = float(ckpt["T_y2"])
+            self._T_y1 = max(float(ckpt["T_y1"]), 1e-8)
+            self._T_y2 = max(float(ckpt["T_y2"]), 1e-8)
             config_snapshot = ckpt["config_snapshot"]
         else:
             with open(calibration_params_path, "r") as f:
                 calib = json.load(f)
-            self._T_y1 = float(calib["T_y1"])
-            self._T_y2 = float(calib["T_y2"])
+            self._T_y1 = max(float(calib["T_y1"]), 1e-8)
+            self._T_y2 = max(float(calib["T_y2"]), 1e-8)
             config_snapshot = ckpt["config"]
 
         model = RewardModel(

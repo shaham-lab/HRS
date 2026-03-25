@@ -65,8 +65,7 @@ def _load_model_from_checkpoint(
           byte-range in the flat input tensor).
         - *config_snapshot* — Raw ``Dict`` from ``config.model_dump()`` as
            saved by ``train.py``; authoritative for architecture keys
-           ``LAYER_WIDTHS``, ``DROPOUT_RATE``, ``ACTIVATION``, and
-            ``INPUT_DIM``.
+           ``LAYER_WIDTHS``, ``DROPOUT_RATE``, and ``ACTIVATION``.
     """
     ckpt = torch.load(checkpoint_path, map_location=device)
     config_snapshot: Dict = ckpt["config"]
@@ -97,6 +96,7 @@ def _run_forward_pass(
     model: RewardModel,
     dataset: ParquetDataset,
     device: torch.device,
+    batch_size: int,
 ) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run a full forward pass over *dataset* with ``torch.no_grad()``.
 
@@ -112,6 +112,8 @@ def _run_forward_pass(
             the dev split).
         device: Device on which batch tensors are placed before the forward
             pass.
+        batch_size: Number of samples per DataLoader batch.  Pass
+            ``config.BATCH_SIZE_PER_GPU`` from ``run()``.
 
     Returns:
         Four-tuple of flat NumPy arrays, each of shape ``(N,)`` where *N* is
@@ -123,7 +125,7 @@ def _run_forward_pass(
         - *y2* — Ground-truth readmission labels (float32, ``NaN`` for
            deceased patients).
     """
-    dataloader = DataLoader(dataset, batch_size=256, num_workers=0, shuffle=False)
+    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=False)
 
     all_logits_y1 = []
     all_logits_y2 = []
@@ -192,13 +194,13 @@ def _fit_temperature(
 
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
-        scaled_logits = logits_t / T.clamp(min=1e-6)
+        scaled_logits = logits_t / T.clamp(min=1e-8)
         loss = torch.nn.functional.binary_cross_entropy_with_logits(scaled_logits, labels_t)
         loss.backward()
         return loss
 
     optimizer.step(closure)
-    return float(T.item())
+    return float(max(T.item(), 1e-8))
 
 
 # ---------------------------------------------------------------------------
@@ -284,7 +286,12 @@ def run(config: RewardModelConfig) -> None:
     model, feature_index_map, config_snapshot = _load_model_from_checkpoint(checkpoint_path, device)
 
     bundle = load_dataset.run(config)
-    logits_y1, logits_y2, y1, y2 = _run_forward_pass(model, bundle.dev_dataset, device)
+    logits_y1, logits_y2, y1, y2 = _run_forward_pass(
+        model,
+        bundle.dev_dataset,
+        device,
+        config.BATCH_SIZE_PER_GPU,
+    )
 
     survivor_mask = ~np.isnan(y2)
     full_mask = np.ones(len(y1), dtype=bool)
