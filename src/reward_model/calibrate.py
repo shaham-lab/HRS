@@ -69,15 +69,15 @@ def _load_model_from_checkpoint(
            ``NUM_TARGETS``.
     """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    config_snapshot: Dict = ckpt["config"]
+    config_snapshot: Dict[str, Any] = ckpt["config"]
     feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
-    input_dim = max(end for _, end in feature_index_map.values())
+    input_dim = sum(end - start for start, end in feature_index_map.values())
 
     model = RewardModel(
         input_dim=input_dim,
         layer_widths=config_snapshot["LAYER_WIDTHS"],
         dropout_rates=config_snapshot["DROPOUT_RATES"],
-        activation=config_snapshot["ACTIVATION"],
+        activation=config_snapshot.get("ACTIVATION", "relu"),
         num_targets=config_snapshot.get("NUM_TARGETS", 2),
     )
     model.load_state_dict(ckpt["model_state_dict"])
@@ -138,7 +138,7 @@ def _run_forward_pass(
             model_outputs = model(X)
             for i in range(num_targets):
                 all_logits[i].append(model_outputs[i].detach().cpu().numpy().reshape(-1))
-                all_labels[i].append(batch[i + 1].numpy().reshape(-1))
+                all_labels[i].append(batch[i + 1].cpu().numpy().reshape(-1))
 
     logits_list = [np.concatenate(all_logits[i], axis=0) for i in range(num_targets)]
     labels_list = [np.concatenate(all_labels[i], axis=0) for i in range(num_targets)]
