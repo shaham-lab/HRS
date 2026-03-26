@@ -38,7 +38,7 @@ See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING
 | Y1 — In-hospital mortality | `y1_mortality` | `admissions.hospital_expire_flag = 1` | All admissions | ~8–10% |
 | Y2 — 30-day readmission | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors only (`y1_mortality = 0`) | ~20% |
 
-**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `DataLoader` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement.
+**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `Mimic4DataLoader` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement.
 
 ---
 
@@ -67,7 +67,7 @@ See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING
 
 ## 4. Feature Set
 
-The input vector X is constructed by concatenating all feature columns from `final_cdss_dataset.parquet` in the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions (8 for `demographic_vec`, 768 for all `*_embedding` columns). The derived index map is held in memory by the `DataLoader` and passed to `masking.py` and `train.py`.
+The input vector X is constructed by concatenating all feature columns from `final_cdss_dataset.parquet` in the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions (8 for `demographic_vec`, 768 for all `*_embedding` columns). The derived index map is held in memory by the `Mimic4DataLoader` (a dataset-specific subclass of the generic `DataLoader` base) and passed to `masking.py` and `train.py`.
 
 **Total input dimensionality:** 8 + (55 × 768) = **42,248 dimensions**
 
@@ -173,7 +173,7 @@ HRS/src/preprocessing
 
 **Dependency rules:**
 - `HRS/src/preprocessing` must have produced `final_cdss_dataset.parquet` before any reward model job runs.
-- `DataLoader` must pass all schema assertions before `train.py` starts.
+- `Mimic4DataLoader` must pass all schema assertions before `train.py` starts.
 - `calibrate.py` requires `best_model.pt` from a completed training run.
 - The reward model never writes to `HRS/data/preprocessing/` — that directory is read-only from this module's perspective.
 
@@ -191,7 +191,7 @@ HRS/src/preprocessing
 
 | # | Module | Output | Notes |
 |---|--------|--------|-------|
-| 1 | `data_loader.py` | `DatasetBundle` + feature index map | `DataLoader` class enforces upstream data contract; raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
+| 1 | `data_loader.py` | `DatasetBundle` + feature index map | Generic `DataLoader` base with `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
 | 2 | `model.py` | `RewardModel` class | MLP definition only — no training logic; wrapped in `DistributedDataParallel` by `train.py` |
 | 3 | `masking.py` | Masked input tensors | Reads feature index map from `data_loader.py`; implements random, adversarial, and no-mask modes |
 | 4 | `loss.py` | Scalar loss tensor | Dynamic NaN masking for `y2_readmission`; weighted BCE per head |
@@ -246,7 +246,7 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### 8.1 Upstream Data Contract
 
-`DataLoader` enforces the following assertions at startup. All failures raise with a descriptive error message referencing `PREPROCESSING_DATA_MODEL.md` and the producing module.
+`Mimic4DataLoader` enforces the following assertions at startup. All failures raise with a descriptive error message referencing `PREPROCESSING_DATA_MODEL.md` and the producing module.
 
 **`y2_readmission` must be float32 with mathematical NaN for all deceased patients (`y1_mortality = 1`).** If a deceased patient carries `0.0` instead of NaN, the survivor mask `~torch.isnan(y2)` silently includes that patient in the readmission loss, corrupting `P(readmitted | survived)` without any visible error.
 
@@ -256,7 +256,7 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### 8.2 Feature Index Map Derivation
 
-At load time, `DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `train.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
+At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `train.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
 
 ### 8.3 Multi-GPU Distributed Training
 
@@ -348,7 +348,7 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **No leakage across splits.** All statistics derived from data — `pos_weight_y1`, `pos_weight_y2`, temperature scaling parameters — are computed from `split = 'train'` rows only, computed on rank 0, broadcast to all ranks, and frozen for the training run. The split assignment is read from the upstream dataset; this module never re-splits data.
 
-**Hard contracts, hard failures.** Upstream schema violations raise immediately in `DataLoader` with descriptive error messages referencing `PREPROCESSING_DATA_MODEL.md` by section and the producing module by name.
+**Hard contracts, hard failures.** Upstream schema violations raise immediately in `Mimic4DataLoader` with descriptive error messages referencing `PREPROCESSING_DATA_MODEL.md` by section and the producing module by name.
 
 **No hardcoded values.** Every hyperparameter, architectural dimension, schedule parameter, file path, and GPU count is defined in `config/reward_model.yaml` and validated by Pydantic on startup. Input dimensionality is derived at runtime from the dataset column schema.
 
@@ -476,7 +476,7 @@ torchrun --nproc_per_node=2 src/reward_model/train.py \
 
 ### Resume Guarantee
 
-Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each worker loads the latest checkpoint from `data/reward_model/checkpoints/`, restores optimizer state and curriculum schedule, and continues from the saved epoch. Schema validation via `DataLoader` runs on every start regardless of resume status. Only rank 0 reads and writes the checkpoint — rank 1 receives the loaded state via DDP process group initialisation.
+Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each worker loads the latest checkpoint from `data/reward_model/checkpoints/`, restores optimizer state and curriculum schedule, and continues from the saved epoch. Schema validation via `Mimic4DataLoader` runs on every start regardless of resume status. Only rank 0 reads and writes the checkpoint — rank 1 receives the loaded state via DDP process group initialisation.
 
 ---
 

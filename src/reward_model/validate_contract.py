@@ -18,7 +18,7 @@ def _run_assertions(parquet_file: pq.ParquetFile) -> List[Tuple[str, str, str]]:
 
     def _skip_y2_alignment() -> None:
         raise NotImplementedError(
-            "SKIPPED — full Y2 alignment requires row-level read; run DataLoader.load() for complete validation"
+            "SKIPPED — full Y2 alignment requires row-level read; run Mimic4DataLoader.load() for complete validation"
         )
 
     checks = [

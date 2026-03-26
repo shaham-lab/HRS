@@ -30,7 +30,7 @@ from src.reward_model.reward_model_utils import (
     get_device,
     load_and_validate_config,
 )
-from src.reward_model.data_loader import DataLoader
+from src.reward_model.data_loader import Mimic4DataLoader
 
 logger = logging.getLogger(__name__)
 
@@ -265,7 +265,7 @@ def run(config: RewardModelConfig) -> None:
     1. Load ``best_model.pt`` from ``CHECKPOINT_DIR``.  Extract model state
        dict and config snapshot; instantiate ``RewardModel`` from the
        checkpoint config snapshot (not the current YAML).
-    2. Load the dev split from ``DATASET_PATH`` via ``DataLoader(config).load()``.
+    2. Load the dev split from ``DATASET_PATH`` via ``Mimic4DataLoader(config).load()``.
     3. Run a full forward pass with ``torch.no_grad()`` to collect raw logits
        for Y1 and Y2.
     4. Fit ``T_y1`` on the full dev split via L-BFGS on NLL.
@@ -285,7 +285,7 @@ def run(config: RewardModelConfig) -> None:
     checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
     model, feature_index_map, config_snapshot = _load_model_from_checkpoint(checkpoint_path, device)
 
-    bundle = DataLoader(config).load()
+    bundle = Mimic4DataLoader(config).load()
     logits_y1, logits_y2, y1, y2 = _run_forward_pass(
         model,
         bundle.dev_dataset,

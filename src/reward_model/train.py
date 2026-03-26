@@ -33,7 +33,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from src.reward_model.loss import compute_loss, compute_metrics
-from src.reward_model.data_loader import DataLoader
+from src.reward_model.data_loader import Mimic4DataLoader
 from src.reward_model.masking import MaskingSchedule
 from src.reward_model.model import RewardModel
 from src.reward_model.reward_model_utils import (
@@ -107,12 +107,12 @@ def _load_and_broadcast_dataset(
 ) -> Tuple[Optional[DatasetBundle], float, float]:
     """Load dataset on rank 0 and broadcast pos_weight scalars to all ranks.
 
-    Rank 0 calls ``DataLoader(config).load()`` to load and validate the Parquet
+    Rank 0 calls ``Mimic4DataLoader(config).load()`` to load and validate the Parquet
     dataset, build the feature index map, and compute positive class weights.
     It then broadcasts ``pos_weight_y1`` and ``pos_weight_y2`` to all other
     ranks via ``broadcast_tensor()``.
 
-    Non-rank-0 processes do not call ``DataLoader.load()`` — they receive only
+    Non-rank-0 processes do not call ``Mimic4DataLoader.load()`` — they receive only
     the two scalar weights and return ``None`` for the bundle.  All ranks wait
     at a barrier after the broadcast.
 
@@ -129,7 +129,7 @@ def _load_and_broadcast_dataset(
     """
     bundle: Optional[DatasetBundle] = None
     if rank == 0:
-        bundle = DataLoader(config).load()
+        bundle = Mimic4DataLoader(config).load()
         pos_weight_y1 = bundle.pos_weight_y1
         pos_weight_y2 = bundle.pos_weight_y2
     else:
@@ -689,7 +689,7 @@ def main() -> None:
       3.  Initialise DDP process group via ``_init_ddp()``.  Fall back to
           single-process mode if fewer than 2 CUDA devices are available
           (logged at WARNING).
-      4.  Rank 0 calls ``DataLoader(config).load()``; broadcasts
+      4.  Rank 0 calls ``Mimic4DataLoader(config).load()``; broadcasts
           ``pos_weight_y1`` and ``pos_weight_y2`` via
           ``_load_and_broadcast_dataset()``.  Non-rank-0 processes wait at
           barrier; receive scalar weights only.
