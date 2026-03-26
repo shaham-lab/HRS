@@ -32,6 +32,7 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
+from src.reward_model.checkpoint_manager import CheckpointManager
 from src.reward_model.loss import compute_loss, compute_metrics
 from src.reward_model.mimic4_data_loader import Mimic4DataLoader
 from src.reward_model.masking import MaskingSchedule
@@ -213,167 +214,6 @@ def _build_lr_scheduler(
     for _ in range(start_step):
         scheduler.step()
     return scheduler
-
-
-# ---------------------------------------------------------------------------
-# Checkpoint helpers
-# ---------------------------------------------------------------------------
-
-
-def _find_latest_checkpoint(checkpoint_dir: Path) -> Optional[Path]:
-    """Return the path of the highest-epoch checkpoint in *checkpoint_dir*.
-
-    Checkpoint filenames follow the pattern ``epoch_<N>.pt``.  The latest
-    checkpoint is identified by the epoch number embedded in the filename, not
-    by filesystem modification time.
-
-    Args:
-        checkpoint_dir: Directory to search.
-
-    Returns:
-        Path to the latest ``epoch_<N>.pt`` file, or ``None`` if no checkpoint
-        exists.
-    """
-    checkpoints = []
-    for path in checkpoint_dir.glob("epoch_*.pt"):
-        try:
-            epoch_str = path.stem.split("_", maxsplit=1)[1]
-            epoch_num = int(epoch_str)
-            checkpoints.append((epoch_num, path))
-        except (IndexError, ValueError):
-            continue
-    if not checkpoints:
-        return None
-    checkpoints.sort(key=lambda pair: pair[0], reverse=True)
-    return checkpoints[0][1]
-
-
-def _save_checkpoint(
-    checkpoint_dir: Path,
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    epoch: int,
-    best_dev_loss: float,
-    feature_index_map: Dict[str, Tuple[int, int]],
-    config: RewardModelConfig,
-) -> Path:
-    """Write a checkpoint to *checkpoint_dir*/epoch_<epoch>.pt (rank 0 only).
-
-    Checkpoint contents (Detailed Design §8):
-        - Model state dict, unwrapped from DDP via ``unwrap_ddp()``
-        - Optimiser state dict
-        - LR scheduler state dict
-        - Current epoch number
-        - Best dev loss seen so far
-        - Feature index map snapshot
-        - Full config snapshot serialised from the Pydantic model
-
-    Uses an atomic write (temp file + ``os.replace``) to prevent partial
-    checkpoints on SLURM preemption.
-
-    Args:
-        checkpoint_dir: Directory to write the checkpoint into.
-        model: The (possibly DDP-wrapped) model.
-        optimizer: AdamW optimiser.
-        scheduler: LR scheduler.
-        epoch: Current epoch number (0-indexed).
-        best_dev_loss: Best dev loss seen up to and including this epoch.
-        feature_index_map: Feature index map snapshot from the loaded dataset.
-        config: Validated ``RewardModelConfig``.
-
-    Returns:
-        Path of the written checkpoint file.
-    """
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    state = {
-        "model_state_dict": unwrap_ddp(model).state_dict(),
-        "optimizer_state_dict": optimizer.state_dict(),
-        "scheduler_state_dict": scheduler.state_dict(),
-        "epoch": epoch,
-        "masking_schedule_state": {
-            "start_ratios": config.MASKING_START_RATIOS,
-            "end_ratios": config.MASKING_END_RATIOS,
-            "transition_shape": config.MASKING_TRANSITION_SHAPE,
-            "transition_midpoint_epoch": config.MASKING_TRANSITION_MIDPOINT_EPOCH,
-            "total_epochs": config.MAX_EPOCHS,
-            "k": config.MASKING_K,
-            "always_visible_slots": list(ALWAYS_VISIBLE_SLOTS),
-        },
-        "best_dev_loss": best_dev_loss,
-        "feature_index_map": feature_index_map,
-        "config": config.model_dump(),
-    }
-
-    target_path = checkpoint_dir / f"epoch_{epoch}.pt"
-    tmp_path = target_path.with_suffix(".pt.tmp")
-    torch.save(state, tmp_path)
-    os.replace(tmp_path, target_path)
-    return target_path
-
-
-def _save_best_model(
-    checkpoint_dir: Path,
-    model: torch.nn.Module,
-    epoch: int,
-    best_dev_loss: float,
-    feature_index_map: Dict[str, Tuple[int, int]],
-    config: RewardModelConfig,
-) -> None:
-    """Overwrite *checkpoint_dir*/best_model.pt atomically (rank 0 only).
-
-    ``best_model.pt`` always reflects the highest-performing epoch seen so far.
-    It is written independently of the rolling epoch checkpoint and is always
-    retained regardless of ``CHECKPOINT_KEEP_N``.
-
-    Args:
-        checkpoint_dir: Directory containing ``best_model.pt``.
-        model: The (possibly DDP-wrapped) model.
-        epoch: Epoch that achieved the new best dev loss.
-        best_dev_loss: The new best dev loss value.
-        feature_index_map: Feature index map snapshot.
-        config: Validated ``RewardModelConfig``.
-    """
-    checkpoint_dir.mkdir(parents=True, exist_ok=True)
-    state = {
-        "model_state_dict": unwrap_ddp(model).state_dict(),
-        "epoch": epoch,
-        "best_dev_loss": best_dev_loss,
-        "feature_index_map": feature_index_map,
-        "config": config.model_dump(),
-    }
-    target_path = checkpoint_dir / "best_model.pt"
-    tmp_path = target_path.with_suffix(".pt.tmp")
-    torch.save(state, tmp_path)
-    os.replace(tmp_path, target_path)
-
-
-def _prune_old_checkpoints(checkpoint_dir: Path, keep_n: int) -> None:
-    """Delete epoch checkpoints beyond the *keep_n* most recent (rank 0 only).
-
-    Identifies all ``epoch_<N>.pt`` files in *checkpoint_dir* by their epoch
-    numbers, retains the *keep_n* highest, and deletes the rest.
-    ``best_model.pt`` is never touched.
-
-    Args:
-        checkpoint_dir: Checkpoint directory to prune.
-        keep_n: Number of most-recent epoch checkpoints to retain
-            (``CHECKPOINT_KEEP_N`` in config).
-    """
-    checkpoints = []
-    for path in checkpoint_dir.glob("epoch_*.pt"):
-        try:
-            epoch_num = int(path.stem.split("_", maxsplit=1)[1])
-            checkpoints.append((epoch_num, path))
-        except (IndexError, ValueError):
-            continue
-
-    checkpoints.sort(key=lambda pair: pair[0], reverse=True)
-    for _, path in checkpoints[keep_n:]:
-        try:
-            path.unlink()
-        except FileNotFoundError:
-            continue
 
 
 # ---------------------------------------------------------------------------
@@ -709,10 +549,9 @@ def main() -> None:
       7.  Instantiate ``AdamW`` with ``LEARNING_RATE``, ``WEIGHT_DECAY``,
           ``ADAM_BETA1``, ``ADAM_BETA2``.  Build cosine + warmup scheduler
           via ``_build_lr_scheduler()``.
-      8.  If ``--resume``: rank 0 finds latest checkpoint via
-          ``_find_latest_checkpoint()``; loads model, optimizer, scheduler,
-          epoch, best_dev_loss; validates feature index map snapshot against
-          current dataset (raises on mismatch); broadcasts model state dict
+      8.  If ``--resume``: rank 0 uses ``CheckpointManager`` to find and load the
+          latest checkpoint; validates the checkpoint feature index map against
+          the current dataset (raises on mismatch); broadcasts the loaded state
           via ``dist.broadcast_object_list()``; ``dist.barrier()``.
       9.  Construct ``RowGroupBlockSampler`` over ``train_dataset`` (round-robin
           row group partitioning across ranks); wrap in ``DataLoader`` with
@@ -759,6 +598,7 @@ def main() -> None:
 
     checkpoint_dir = Path(config.CHECKPOINT_DIR)
     metrics_path = Path(config.METRICS_PATH)
+    checkpoint_manager = CheckpointManager(checkpoint_dir, config.CHECKPOINT_KEEP_N)
 
     if feature_index_map is None or input_dim is None or train_dataset is None or dev_dataset is None:
         raise RuntimeError("Dataset must be available on all ranks after broadcast")
@@ -768,14 +608,11 @@ def main() -> None:
     ckpt_state: Optional[dict] = None
 
     if args.resume:
-        latest = _find_latest_checkpoint(checkpoint_dir)
+        latest = checkpoint_manager.find_latest()
         if latest is None:
             raise RuntimeError("Resume requested but no checkpoint found")
         if rank == 0:
-            ckpt_state = torch.load(latest, map_location="cpu")
-            ckpt_feature_map = ckpt_state["feature_index_map"]
-            if feature_index_map != ckpt_feature_map:
-                raise RuntimeError("Feature index map mismatch between checkpoint and current dataset")
+            ckpt_state = checkpoint_manager.load(latest, feature_index_map if feature_index_map is not None else {})
         if is_ddp:
             obj_state: list = [ckpt_state]
             dist.broadcast_object_list(obj_state, src=0)
@@ -930,8 +767,7 @@ def main() -> None:
             if improved:
                 best_dev_loss = current_dev_loss
                 epochs_without_improve = 0
-                _save_checkpoint(
-                    checkpoint_dir,
+                checkpoint_manager.save_epoch_checkpoint(
                     model,
                     optimizer,
                     scheduler,
@@ -939,16 +775,16 @@ def main() -> None:
                     best_dev_loss,
                     feature_index_map if feature_index_map is not None else {},
                     config,
+                    ALWAYS_VISIBLE_SLOTS,
                 )
-                _save_best_model(
-                    checkpoint_dir,
+                checkpoint_manager.save_best_model(
                     model,
                     epoch,
                     best_dev_loss,
                     feature_index_map if feature_index_map is not None else {},
                     config,
                 )
-                _prune_old_checkpoints(checkpoint_dir, config.CHECKPOINT_KEEP_N)
+                checkpoint_manager.prune_old_checkpoints()
             else:
                 epochs_without_improve += 1
 
@@ -972,8 +808,7 @@ def main() -> None:
     if is_ddp:
         dist.barrier()
     if rank == 0:
-        _save_checkpoint(
-            checkpoint_dir,
+        checkpoint_manager.save_epoch_checkpoint(
             model,
             optimizer,
             scheduler,
@@ -981,6 +816,7 @@ def main() -> None:
             best_dev_loss,
             feature_index_map if feature_index_map is not None else {},
             config,
+            ALWAYS_VISIBLE_SLOTS,
         )
     if is_ddp:
         dist.barrier()

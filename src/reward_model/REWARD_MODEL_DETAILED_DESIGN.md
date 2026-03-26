@@ -52,6 +52,22 @@ The reward model does not perform any identifier linkage. All identifier resolut
 
 Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `mimic4_data_loader.py` (via `Mimic4DataLoader`, a subclass of the generic `DataLoader` base).
 
+### Class inventory (one class per file)
+
+| File | Class | Role |
+|------|-------|------|
+| `data_loader.py` | `DataLoader` | Abstract base for dataset loaders. |
+| `mimic4_data_loader.py` | `Mimic4DataLoader` | MIMIC-IV implementation of `DataLoader`. |
+| `parquet_dataset.py` | `ParquetDataset` | `torch.utils.data.Dataset` backed by a Parquet file and feature index map. |
+| `row_group_block_sampler.py` | `RowGroupBlockSampler` | Sampler that shards row groups round-robin across DDP ranks. |
+| `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, and pos-weights. |
+| `schema_error.py` | `SchemaError` | Custom exception for schema validation failures. |
+| `model.py` | `RewardModel` | Feedforward MLP with two output heads. |
+| `masking.py` | `MaskingSchedule` | Masking curriculum with random/adversarial/none modes. |
+| `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
+| `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
+| `inference.py` | `RewardModelInference` | Frozen inference wrapper with calibration parameters. |
+
 ### Class vs plain script
 
 | Module | Pattern | Reason |
@@ -406,7 +422,7 @@ For each sample and each of the 56 feature slots, the importance score is the L2
 - Feature index map snapshot
 - Full config snapshot serialised from the Pydantic model
 
-Checkpoint ownership is centralised in a `CheckpointManager` helper (a thin wrapper around the current inline checkpoint helpers in `train.py`). It is the sole writer/loader of `epoch_<N>.pt` and `best_model.pt`, and it performs schema safety checks before a resume proceeds. `CheckpointManager.validate_feature_index_map(old_map, new_map)` wraps the existing equality check between the feature-index map stored inside the checkpoint and the freshly derived map from `Mimic4DataLoader`; if keys or index ranges differ, it raises and aborts the resume to prevent continuing with shifted feature boundaries after an upstream dataset change.
+Checkpoint ownership is centralised in a dedicated `CheckpointManager` class (own file: `checkpoint_manager.py`). It is the sole writer/loader of `epoch_<N>.pt` and `best_model.pt`, and it performs schema safety checks before a resume proceeds. `CheckpointManager.validate_feature_index_map(old_map, new_map)` compares the feature-index map stored inside the checkpoint against the freshly derived map from `Mimic4DataLoader`; if keys or index ranges differ, it raises and aborts the resume to prevent continuing with shifted feature boundaries after an upstream dataset change.
 
 The config snapshot inside the checkpoint is authoritative for architecture reconstruction. If `config/reward_model.yaml` is modified between a run and a resume, the resumed run uses the checkpoint's config to ensure no architecture mismatch. The current YAML is still loaded for non-architecture settings (paths, logging) but architecture keys are ignored in favour of the checkpoint snapshot.
 

@@ -199,6 +199,26 @@ HRS/src/preprocessing
 | 6 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split; single GPU |
 | 7 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
 
+### Dependency diagram (modules and classes)
+
+```mermaid
+graph TD
+  Train[train.py] --> CheckpointManager
+  Train --> MaskingSchedule
+  Train --> RewardModel
+  Train --> Mimic4DataLoader
+  Train --> LossFns[loss.py functions]
+  Train --> RewardModelConfig
+  Mimic4DataLoader --> ParquetDataset
+  Mimic4DataLoader --> RowGroupBlockSampler
+  ParquetDataset --> FeatureIndexMap
+  MaskingSchedule --> FeatureIndexMap
+  CheckpointManager -->|validates| FeatureIndexMap
+  CheckpointManager -->|persists state dicts from| RewardModel
+```
+
+Edges show module-level dependencies (train orchestrates all) and class-level dependencies (e.g., `CheckpointManager` validates the feature index map produced by `Mimic4DataLoader` and persisted with `RewardModel` state).
+
 Supporting scripts (not in the training pipeline): `validate_contract.py` (standalone schema assertion runner without training), `export_model.py` (serialise frozen model for RL consumption).
 
 ---
@@ -260,7 +280,7 @@ At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_
 
 #### Checkpoint manager and feature-index validation
 
-Checkpointing and resume logic is being encapsulated behind a `CheckpointManager` helper (a small refactor of the existing inline `_save_checkpoint()` / `_find_latest_checkpoint()` helpers in `train.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` wraps the current equality check between the checkpoint snapshot and the freshly derived map from `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
+Checkpointing and resume logic is encapsulated in `CheckpointManager` (`checkpoint_manager.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
 
 ### 8.3 Multi-GPU Distributed Training
 
