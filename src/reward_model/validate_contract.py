@@ -6,12 +6,13 @@ from typing import List, Tuple
 import pyarrow.parquet as pq
 
 from src.reward_model.mimic4_data_loader import Mimic4DataLoader
+from src.reward_model.reward_model_config import RewardModelConfig
 from src.reward_model.reward_model_utils import load_and_validate_config
 
 logger = logging.getLogger(__name__)
 
 
-def _run_assertions(parquet_file: pq.ParquetFile, config) -> List[Tuple[str, str, str]]:
+def _run_assertions(parquet_file: pq.ParquetFile, config: RewardModelConfig) -> List[Tuple[str, str, str]]:
     results: List[Tuple[str, str, str]] = []
 
     def _skip_y2_alignment() -> None:
