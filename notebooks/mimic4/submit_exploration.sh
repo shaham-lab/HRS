@@ -39,6 +39,7 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+CALLER_PWD="$(pwd)"
 
 declare -a REQUESTED
 
@@ -69,9 +70,9 @@ resolve_notebook() {
     local nb="$1"
     local candidate="$nb"
 
-    # If only a basename was provided, resolve in the current working directory.
-    if [[ "$nb" != /* && "$nb" != *"/"* ]]; then
-        candidate="${PWD}/${nb}"
+    # Resolve relative paths (including basenames) against the caller's cwd.
+    if [[ "$nb" != /* ]]; then
+        candidate="${CALLER_PWD}/${nb}"
     fi
 
     # Allow missing .ipynb extension when a basename is provided.
