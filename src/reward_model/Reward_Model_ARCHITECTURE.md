@@ -20,14 +20,15 @@
 12. [Design Principles](#12-design-principles)
 13. [Directory Structure](#13-directory-structure)
 14. [Infrastructure and Execution](#14-infrastructure-and-execution)
+15. [MIMIC-IV Reference Configuration](#15-mimic-iv-reference-configuration)
 
 ---
 
 ## 1. Overview
 
-The CDSS-ML Reward Model is a supervised feedforward neural network that consumes a fixed-length patient feature vector derived from `final_cdss_dataset.parquet` — produced by `HRS/src/preprocessing` — and outputs two calibrated probability scores: in-hospital mortality (Y1) and 30-day readmission conditional on survival (Y2). Once trained, the model is frozen and used exclusively as an inference module by the RL agent, which computes a potential-based reward from the delta in output probabilities between consecutive episode states. The three most important architectural properties are: masking-aware training (the network trains under random and adversarial feature zeroing to simulate partial information availability at RL inference time), multi-GPU distributed training via PyTorch DDP (training runs across 2 GPUs by default, configurable via `NUM_GPUS`), and full configurability (all hyperparameters, schedule parameters, and architectural dimensions are defined in `config/reward_model.yaml` with no hardcoded values).
+The CDSS-ML Reward Model is a supervised feedforward neural network that consumes a fixed-length feature vector derived from `final_cdss_dataset.parquet` — produced by `HRS/src/preprocessing` — and outputs T calibrated probability scores, one per configured classification target. Once trained, the model is frozen and used exclusively as an inference module by the RL agent, which computes a potential-based reward from the delta in output probabilities between consecutive episode states: `R = Σ wᵢ · ΔP(Yᵢ)`. The three most important architectural properties are: masking-aware training (the network trains under random and adversarial feature zeroing to simulate partial information availability at RL inference time), multi-GPU distributed training via PyTorch DDP (training runs across 2 GPUs by default, configurable via `NUM_GPUS`), and full configurability (all hyperparameters, schedule parameters, and architectural dimensions are defined in `config/reward_model.yaml` with no hardcoded values).
 
-See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING_ARCHITECTURE.md` for the upstream pipeline that produces the input dataset.
+The current implementation is deployed on MIMIC-IV clinical data with T=2 targets (in-hospital mortality Y1 and 30-day readmission Y2). See Section 15 for the full MIMIC-IV-specific configuration. See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING_ARCHITECTURE.md` for the upstream pipeline that produces the input dataset.
 
 ---
 
@@ -38,7 +39,7 @@ See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING
 | Y1 — In-hospital mortality | `y1_mortality` | `admissions.hospital_expire_flag = 1` | All admissions | ~8–10% |
 | Y2 — 30-day readmission | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors only (`y1_mortality = 0`) | ~20% |
 
-**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `Mimic4DataLoader` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement.
+**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `Mimic4DataLoader` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement. For full MIMIC-IV target definitions see Section 15.
 
 ---
 
@@ -191,13 +192,23 @@ HRS/src/preprocessing
 
 | # | Module | Output | Notes |
 |---|--------|--------|-------|
-| 1 | `data_loader.py` / `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `DataLoader` base with `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
-| 2 | `model.py` | `RewardModel` class | MLP definition only — no training logic; wrapped in `DistributedDataParallel` by `train.py` |
-| 3 | `masking.py` | Masked input tensors | Reads feature index map from `mimic4_data_loader.py`; implements random, adversarial, and no-mask modes |
-| 4 | `loss.py` | Scalar loss tensor | Dynamic NaN masking for `y2_readmission`; weighted BCE per head |
-| 5 | `train.py` | Checkpoint files | DDP entry point via `torchrun`; masking curriculum; AdamW + cosine LR; early stopping; metric logging on rank 0 |
-| 6 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split; single GPU |
-| 7 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
+| — | `schema_error.py` | `SchemaError` exception | Class-only module; re-exported by `reward_model_utils.py` |
+| — | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model; re-exported by `reward_model_utils.py` |
+| — | `parquet_dataset.py` | `ParquetDataset` | Lazy Parquet reader with LRU row-group cache; re-exported by `reward_model_utils.py` |
+| — | `row_group_block_sampler.py` | `RowGroupBlockSampler` | Row-group-aware DDP sampler; re-exported by `reward_model_utils.py` |
+| — | `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, pos-weights; re-exported by `reward_model_utils.py` |
+| — | `checkpoint_manager.py` | `CheckpointManager` | Owns all checkpoint read/write/prune; validates feature index map on resume |
+| — | `reward_model_utils.py` | Shared helpers + re-exports | No class definitions; re-exports all class-only modules for backward compatibility |
+| 1 | `data_loader.py` | Abstract `DataLoader` base | Template method for open → validate → build index map → split → bundle; subclassed by dataset-specific loaders |
+| 2 | `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
+| 3 | `model.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `train.py` |
+| 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
+| 5 | `loss.py` | Scalar loss tensor | Generic T-target weighted BCE with dynamic NaN masking per target; weights normalised to sum to 1.0 |
+| 6 | `train.py` | Checkpoint files | DDP entry point via `torchrun`; masking curriculum; AdamW + cosine LR; unmasked dev evaluation; early stopping; metric logging on rank 0 |
+| 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split using log-space L-BFGS; single GPU |
+| 8 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
+| 9 | `validate_contract.py` | Exit code 0/1 | Standalone schema assertion runner; metadata-only, no tensor construction |
+| 10 | `export_model.py` | `frozen_model.pt` | Serialise frozen model + calibration params + feature index map for RL consumption |
 
 ### Dependency diagram (modules and classes)
 
@@ -306,22 +317,21 @@ The probability of each mode evolves via a configurable sigmoid crossover schedu
 
 ### 8.5 Loss Function and Class Imbalance
 
-Total loss: `L = w1 * L_Y1 + w2 * L_Y2`. Weights `w1` and `w2` are normalised to sum to 1.0 (validated by `RewardModelConfig` at startup), keeping total loss magnitude invariant across different weight distributions. Default: `w1 = 0.75`, `w2 = 0.25` (3:1 ratio favouring mortality given its lower positive rate). `L_Y1` uses `BCEWithLogitsLoss` with `pos_weight_y1 ≈ 9.0` (computed from training rows). `L_Y2` applies a dynamic per-batch NaN mask before `BCEWithLogitsLoss` with `pos_weight_y2 ≈ 4.0` (computed from training survivors only). The all-deceased-batch edge case sets `L_Y2 = 0.0` explicitly. Both `pos_weight` values are computed once from `split = 'train'` rows on rank 0 and broadcast to all ranks before training begins.
+Total loss: `L = Σᵢ wᵢ * L_Yᵢ` summed over all T targets. Weights are normalised to sum to 1.0 (validated by `RewardModelConfig` at startup), keeping total loss magnitude invariant as T changes. For the MIMIC-IV default (T=2): `w1 = 0.75`, `w2 = 0.25` (3:1 ratio favouring mortality). Each `L_Yᵢ` uses `BCEWithLogitsLoss` with the corresponding `pos_weight_i` and applies a dynamic per-batch NaN mask to exclude non-applicable samples for that target. The all-NaN-batch edge case for any target sets `L_Yᵢ = 0.0` explicitly. All `pos_weight` values are computed once from `split = 'train'` rows on rank 0 and broadcast to all ranks before training begins. See Section 15.3 for MIMIC-IV default values.
 
 ### 8.6 Neural Network Architecture
 
 The network is a feedforward MLP with a gradual funnel. Under DDP, each GPU holds a full model copy (~1.32 GB for Hidden 1 alone at float32). With 2 GPUs and AdamW optimizer state, total GPU memory per device is approximately 14–18 GB at batch size 256 per GPU (512 effective). The recommended mitigation if memory is exceeded is PCA reduction of BERT embeddings (768 → 256) applied in `HRS/src/preprocessing` — input reduces to ~14,088 dims with no architectural change to this module.
 
-| Layer | In | Out | Activation | Regularisation |
-|-------|----|-----|------------|----------------|
-| Hidden 1 | 42,248 | 8,192 | ReLU | BatchNorm + Dropout |
-| Hidden 2 | 8,192 | 2,048 | ReLU | BatchNorm + Dropout |
-| Hidden 3 | 2,048 | 512 | ReLU | BatchNorm + Dropout |
-| Hidden 4 | 512 | 128 | ReLU | BatchNorm + Dropout |
-| Head Y1 | 128 | 1 | Sigmoid | — |
-| Head Y2 | 128 | 1 | Sigmoid | — |
+The number of output heads T equals the number of configured classification targets (default T=2 for MIMIC-IV). All layer widths and dropout rates are configurable in `config/reward_model.yaml`. Dropout is configured per layer (`DROPOUT_RATES` as a list) to allow heavier regularisation on wider early layers.
 
-All widths and dropout rates are configurable in `config/reward_model.yaml`.
+| Layer | In | Out | Activation | Dropout rate |
+|-------|----|-----|------------|--------------|
+| Hidden 1 | D | 8,192 | ReLU + BatchNorm | 0.4 |
+| Hidden 2 | 8,192 | 2,048 | ReLU + BatchNorm | 0.3 |
+| Hidden 3 | 2,048 | 512 | ReLU + BatchNorm | 0.3 |
+| Hidden 4 | 512 | 128 | ReLU + BatchNorm | 0.2 |
+| Head Y1…YT | 128 | 1 each | Sigmoid | — |
 
 ### 8.7 Post-Training Calibration
 
@@ -517,3 +527,56 @@ Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each w
 > See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module implementation details, full `config/reward_model.yaml` reference, and per-layer memory requirements.
 >
 > See `PREPROCESSING_ARCHITECTURE.md` and `PREPROCESSING_DATA_MODEL.md` for the upstream pipeline that produces `final_cdss_dataset.parquet`.
+
+---
+
+## 15. MIMIC-IV Reference Configuration
+
+This section documents the specific configuration of the Reward Model for the MIMIC-IV clinical dataset. All values here are the defaults in `config/reward_model.yaml`. When deploying on a different dataset, update these values while leaving all generic framework code unchanged.
+
+### 15.1 Prediction Targets (T=2)
+
+| Target | Config index | Column | Definition | Population | Positive rate |
+|--------|-------------|--------|------------|------------|---------------|
+| Y1 — In-hospital mortality | 0 | `y1_mortality` | `admissions.hospital_expire_flag = 1` | All admissions | ~8–10% |
+| Y2 — 30-day readmission | 1 | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors only (`y1_mortality = 0`) | ~20% |
+
+**NaN convention:** Y2 = NaN for all rows where Y1 = 1. Readmission is undefined for deceased patients. The reward model excludes NaN rows from the Y2 loss dynamically per batch — no samples are removed from the dataset.
+
+### 15.2 Input Dimensionality
+
+| Property | Value |
+|----------|-------|
+| Total feature slots | 56 (F1–F56) |
+| Always-visible slots | 5 (F1–F5: demographics, diagnosis history, discharge summary, triage, chief complaint) |
+| Maskable slots (M) | 51 (F6–F56: lab groups, radiology, microbiology panels) |
+| Total input dimensionality D | 8 + (55 × 768) = **42,248** |
+
+### 15.3 Loss Configuration
+
+| Parameter | Value | Rationale |
+|-----------|-------|-----------|
+| `LOSS_WEIGHT_Y1` | 0.75 | Mortality has lower positive rate (~8–10%); higher weight compensates |
+| `LOSS_WEIGHT_Y2` | 0.25 | Readmission more frequent (~20%); lower weight |
+| `pos_weight_Y1` | ~9.0 (computed) | n_negative / n_positive from training split |
+| `pos_weight_Y2` | ~4.0 (computed) | Computed from survivors in training split only |
+
+Weights sum to 1.0 — normalisation is enforced by `RewardModelConfig` at startup.
+
+### 15.4 Reward Formula
+
+```
+R = w₁ · ΔP(dies) + w₂ · ΔP(readmitted | survived)
+```
+
+where `w₁` and `w₂` are RL agent reward weights (distinct from training loss weights above) and Δ denotes the change in probability between consecutive episode steps. Reward weights and sign convention are defined by the RL agent design document.
+
+### 15.5 Default Layer Configuration
+
+| Layer | In | Out | Dropout |
+|-------|----|-----|---------|
+| Hidden 1 | 42,248 | 8,192 | 0.4 |
+| Hidden 2 | 8,192 | 2,048 | 0.3 |
+| Hidden 3 | 2,048 | 512 | 0.3 |
+| Hidden 4 | 512 | 128 | 0.2 |
+| Head Y1, Head Y2 | 128 | 1 each | — |
