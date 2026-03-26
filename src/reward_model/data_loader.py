@@ -32,24 +32,29 @@ class DataLoader(ABC):
     def _open_parquet(self) -> pq.ParquetFile:
         return pq.ParquetFile(self._config.DATASET_PATH)
 
+    # pragma: no cover - abstract hook
     @abstractmethod
-    def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:  # pragma: no cover - abstract hook
+    def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
         ...
 
+    # pragma: no cover - abstract hook
     @abstractmethod
-    def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:  # pragma: no cover - abstract hook
+    def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:
         ...
 
+    # pragma: no cover - abstract hook
     @abstractmethod
-    def _validate_labels(self, label_table: pa.Table) -> None:  # pragma: no cover - abstract hook
+    def _validate_labels(self, label_table: pa.Table) -> None:
         ...
 
+    # pragma: no cover - abstract hook
     @abstractmethod
-    def _build_feature_index_map(self, parquet_file: pq.ParquetFile) -> Dict[str, Tuple[int, int]]:  # pragma: no cover - abstract hook
+    def _build_feature_index_map(self, parquet_file: pq.ParquetFile) -> Dict[str, Tuple[int, int]]:
         ...
 
+    # pragma: no cover - abstract hook
     @abstractmethod
-    def _compute_pos_weights(self, label_table, train_rows: List[int]) -> Tuple[float, float]:  # pragma: no cover - abstract hook
+    def _compute_pos_weights(self, label_table, train_rows: List[int]) -> Tuple[float, float]:
         ...
 
     # ---------------------------- #
