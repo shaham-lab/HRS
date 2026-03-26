@@ -101,6 +101,7 @@ def _build_export_dict(
         **temperatures,
         "config_snapshot": config_snapshot,
         "input_dim": input_dim,
+        "NUM_TARGETS": num_targets,
     }
 
 

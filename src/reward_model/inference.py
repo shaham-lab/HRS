@@ -81,18 +81,18 @@ class RewardModelInference:
 
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
         self._feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
-        input_dim = ckpt.get("input_dim") or sum(
-            end - start for start, end in self._feature_index_map.values()
-        )
+        input_dim = sum(end - start for start, end in self._feature_index_map.values())
 
         if "T_0" in ckpt:
             # Exported artefact format: calibration temperatures embedded directly.
             config_snapshot = ckpt["config_snapshot"]
-            num_targets = config_snapshot.get("NUM_TARGETS", 2)
+            num_targets = ckpt.get(
+                "NUM_TARGETS", len([k for k in ckpt.keys() if k.startswith("T_")])
+            )
             self._temperatures: List[float] = [
-                max(float(ckpt[f"T_{i}"]), 1e-8)
-                for i in range(num_targets)
+                max(float(ckpt[f"T_{i}"]), 1e-8) for i in range(num_targets)
             ]
+            state_dict = ckpt["model_state_dict"]
         else:
             # Train.py checkpoint format: separate calibration JSON.
             with open(calibration_params_path, "r") as f:
@@ -100,23 +100,19 @@ class RewardModelInference:
             config_snapshot = ckpt["config"]
             num_targets = config_snapshot.get("NUM_TARGETS", 2)
             self._temperatures = [
-                max(float(calib[f"T_{i}"]), 1e-8)
-                for i in range(num_targets)
+                max(float(calib[f"T_{i}"]), 1e-8) for i in range(num_targets)
             ]
+            raw = ckpt["model_state_dict"]
+            state_dict = {k[len("module."):] if k.startswith("module.") else k: v for k, v in raw.items()}
 
         model = RewardModel(
             input_dim=input_dim,
             layer_widths=config_snapshot["LAYER_WIDTHS"],
             dropout_rates=config_snapshot["DROPOUT_RATES"],
-            activation=config_snapshot["ACTIVATION"],
+            activation=config_snapshot.get("ACTIVATION", "relu"),
             num_targets=num_targets,
         )
-        raw_state_dict = ckpt["model_state_dict"]
-        if any(k.startswith("module.") for k in raw_state_dict.keys()):
-            raw_state_dict = {
-                k[len("module."):]: v for k, v in raw_state_dict.items()
-            }
-        model.load_state_dict(raw_state_dict)
+        model.load_state_dict(state_dict)
         model.to(device)
         model.eval()
         for param in model.parameters():
