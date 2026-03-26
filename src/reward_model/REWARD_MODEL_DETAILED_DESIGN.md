@@ -465,7 +465,7 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `INPUT_DIM` | (derived) | `mimic4_data_loader.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup |
+| `INPUT_DIM` | `42248` (MIMIC-IV) | `mimic4_data_loader.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup; update when deploying on a different dataset |
 | `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | `model.py` | Hidden layer output sizes; length determines depth |
 | `★ DROPOUT_RATES` | `[0.4, 0.3, 0.3, 0.2]` | `model.py` | Per-layer dropout probabilities; must match length of `LAYER_WIDTHS`. A single float is also accepted and broadcast to all layers for backward compatibility |
 | `ACTIVATION` | `relu` | `model.py` | Activation function; supports `relu`, `leaky_relu` |
