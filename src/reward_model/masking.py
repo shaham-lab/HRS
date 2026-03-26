@@ -112,9 +112,9 @@ class MaskingSchedule:
 
         # Derive always-visible and maskable slots positionally from the map.
         all_slots: List[str] = list(feature_index_map.keys())
-        n_always = max(0, min(num_always_visible, len(all_slots)))
-        self._always_visible_slots: List[str] = all_slots[:n_always]
-        self._maskable_slots: List[str] = all_slots[n_always:]
+        self._always_visible_slots: List[str] = all_slots[:num_always_visible]
+        self._maskable_slots: List[str] = all_slots[num_always_visible:]
+        self._slot_names: List[str] = self._maskable_slots
         self._M: int = len(self._maskable_slots)
 
     # ------------------------------------------------------------------
@@ -175,8 +175,9 @@ class MaskingSchedule:
         masked = X.clone()
         for i in range(X.shape[0]):
             k = self._sample_k(self._random_k_min_fraction, self._random_k_max_fraction)
-            chosen = np.random.choice(self._maskable_slots, size=k, replace=False)
-            for slot in chosen:
+            selected = np.random.choice(len(self._maskable_slots), size=k, replace=False)
+            for slot_idx in selected:
+                slot = self._maskable_slots[slot_idx]
                 start, end = self._feature_index_map[slot]
                 masked[i, start:end] = 0.0
         return masked

@@ -12,23 +12,17 @@ def _compute_ece(probs: np.ndarray, labels: np.ndarray, n_bins: int = 10) -> flo
     """Compute ECE using equal-mass (adaptive) binning via np.percentile."""
     if len(probs) == 0:
         return float("nan")
-    percentiles = np.linspace(0.0, 100.0, n_bins + 1)
-    bin_edges = np.percentile(probs, percentiles)
-    # Deduplicate edges to avoid empty bins from flat probability regions.
+    bin_edges = np.percentile(probs, np.linspace(0, 100, n_bins + 1))
+    bin_edges[0] = 0.0
+    bin_edges[-1] = 1.0
     bin_edges = np.unique(bin_edges)
-    if len(bin_edges) < 2:
-        return float("nan")
+    inds = np.searchsorted(bin_edges[:-1], probs, side="right") - 1
+    inds = np.clip(inds, 0, len(bin_edges) - 2)
 
     ece = 0.0
     total = len(probs)
     for i in range(len(bin_edges) - 1):
-        lower = bin_edges[i]
-        upper = bin_edges[i + 1]
-        # Close the rightmost bin on both sides.
-        if i < len(bin_edges) - 2:
-            in_bin = (probs >= lower) & (probs < upper)
-        else:
-            in_bin = (probs >= lower) & (probs <= upper)
+        in_bin = inds == i
         if not np.any(in_bin):
             continue
         avg_conf = probs[in_bin].mean()
@@ -64,24 +58,19 @@ def compute_loss(
         tensors on the same device as their logits.
     """
     device = logits_list[0].device
-    component_losses: List[torch.Tensor] = []
     total_loss = torch.tensor(0.0, device=device)
+    component_losses: List[torch.Tensor] = []
 
-    for i, (logits, labels, pw, lw) in enumerate(
-        zip(logits_list, labels_list, pos_weights, loss_weights)
-    ):
-        valid_mask = ~torch.isnan(labels)
-        if not valid_mask.any():
+    for logits, labels, pw, w in zip(logits_list, labels_list, pos_weights, loss_weights):
+        mask = ~torch.isnan(labels)
+        if not mask.any():
             loss_i = torch.tensor(0.0, device=device)
         else:
             pw_tensor = torch.tensor(pw, device=device)
             loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw_tensor)
-            loss_i = loss_fn(
-                logits.view(-1)[valid_mask],
-                labels.view(-1)[valid_mask].float(),
-            )
+            loss_i = loss_fn(logits.view(-1)[mask], labels.view(-1)[mask].float())
         component_losses.append(loss_i)
-        total_loss = total_loss + lw * loss_i
+        total_loss = total_loss + w * loss_i
 
     return total_loss, component_losses
 
@@ -103,24 +92,18 @@ def compute_metrics(
         ``{0: {'auroc': ..., 'auprc': ..., 'ece': ...}, 1: {...}, ...,
            'masked': masked}``.
     """
-    result: Dict[Union[int, str], object] = {"masked": masked}
+    result: Dict[Union[int, str], object] = {}
 
     for i, (logits, labels) in enumerate(zip(logits_list, labels_list)):
-        probs_np = torch.sigmoid(logits).detach().cpu().view(-1).numpy()
+        probs = torch.sigmoid(logits).detach().cpu().view(-1).numpy()
         labels_np = labels.detach().cpu().view(-1).numpy().astype(float)
-
         valid_mask = ~np.isnan(labels_np)
-        probs_valid = probs_np[valid_mask]
-        labels_valid = labels_np[valid_mask]
-
-        if len(labels_valid) == 0:
-            result[i] = {"auroc": float("nan"), "auprc": float("nan"), "ece": float("nan")}
-            continue
-
+        p_valid = probs[valid_mask]
+        l_valid = labels_np[valid_mask]
         result[i] = {
-            "auroc": _safe_metric(roc_auc_score, labels_valid, probs_valid),
-            "auprc": _safe_metric(average_precision_score, labels_valid, probs_valid),
-            "ece": _compute_ece(probs_valid, labels_valid),
+            "auroc": _safe_metric(roc_auc_score, l_valid, p_valid),
+            "auprc": _safe_metric(average_precision_score, l_valid, p_valid),
+            "ece": _compute_ece(p_valid, l_valid),
         }
-
+    result["masked"] = masked
     return result
