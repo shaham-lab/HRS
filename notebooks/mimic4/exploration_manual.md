@@ -6,12 +6,12 @@ This guide explains how to execute the MIMIC-IV exploration notebooks either loc
 
 Located in `notebooks/mimic4/`:
 
-- `mimic4_data_exploration.ipynb`
-- `mimic4_chartevents_exploration.ipynb`
-- `mimic4_labevents_exploration.ipynb`
-- `mimic4_microbiology_exploration.ipynb`
-- `demographic_feature_exploration.ipynb`
-- `notes_exploration.ipynb`
+- `mimic4_data_exploration.ipynb` — high-level cohort/visit counts and table coverage.
+- `mimic4_chartevents_exploration.ipynb` — vital signs/charted measurements exploration.
+- `mimic4_labevents_exploration.ipynb` — laboratory result distributions and missingness.
+- `mimic4_microbiology_exploration.ipynb` — cultures, organisms, and sensitivities overview.
+- `demographic_feature_exploration.ipynb` — demographics feature ranges and sparsity.
+- `notes_exploration.ipynb` — clinical note counts and length/section statistics.
 
 ## Local (no SLURM)
 
@@ -49,10 +49,12 @@ bash notebooks/mimic4/submit_exploration.sh --all
 ```
 
 ### Run selected notebooks
-You can pass paths or basenames:
+You can pass notebook paths or basenames. Paths are used as given; if you provide only a file
+name it is resolved in your current working directory (e.g., `notebooks/mimic4/` if you `cd`
+there first):
 ```bash
 cd ~/Python/HRS
-bash notebooks/mimic4/submit_exploration.sh mimic4_data_exploration.ipynb mimic4_labevents_exploration.ipynb
+bash notebooks/mimic4/submit_exploration.sh notebooks/mimic4/mimic4_data_exploration.ipynb mimic4_labevents_exploration.ipynb
 ```
 
 Each job:

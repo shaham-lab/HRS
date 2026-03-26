@@ -15,7 +15,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-    echo "Usage: sbatch notebooks/exploration_job.sh <notebook_path>" >&2
+    echo "Usage: sbatch notebooks/mimic4/exploration_job.sh <notebook_path>" >&2
     exit 1
 fi
 
@@ -25,15 +25,19 @@ if [[ ! -f "$NOTEBOOK_PATH" ]]; then
     exit 1
 fi
 
-cd ~/Python/HRS
-mkdir -p logs notebooks/executed
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+
+NOTEBOOK_ABS="$(realpath "$NOTEBOOK_PATH")"
+NOTEBOOK_NAME="$(basename "${NOTEBOOK_ABS}" .ipynb)"
+
+cd "${REPO_ROOT}"
+mkdir -p logs notebooks/mimic4/executed
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate hrs
 
-NOTEBOOK_ABS="$(realpath "$NOTEBOOK_PATH")"
-NOTEBOOK_NAME="$(basename "${NOTEBOOK_ABS}" .ipynb)"
-OUTPUT_DIR="notebooks/executed"
+OUTPUT_DIR="notebooks/mimic4/executed"
 OUTPUT_NAME="${NOTEBOOK_NAME}_executed.ipynb"
 
 echo "Host: $(hostname)"

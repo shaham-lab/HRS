@@ -3,8 +3,8 @@
 # Inspired by preprocessing/reward_model submit scripts.
 #
 # Usage:
-#   bash notebooks/submit_exploration.sh --all
-#   bash notebooks/submit_exploration.sh notebooks/mimic4_data_exploration.ipynb mimic4_chartevents_exploration.ipynb
+#   bash notebooks/mimic4/submit_exploration.sh --all
+#   bash notebooks/mimic4/submit_exploration.sh notebooks/mimic4/mimic4_data_exploration.ipynb mimic4_chartevents_exploration.ipynb
 #
 # Notes:
 #   - Requests 1× A100 GPU per notebook job.
@@ -17,16 +17,18 @@ usage() {
 Submit exploration notebooks to SLURM (one job per notebook, 1x A100 GPU).
 
 Usage:
-  bash notebooks/submit_exploration.sh --all
-  bash notebooks/submit_exploration.sh <nb1.ipynb> [<nb2.ipynb> ...]
+  bash notebooks/mimic4/submit_exploration.sh --all
+  bash notebooks/mimic4/submit_exploration.sh <nb1.ipynb> [<nb2.ipynb> ...]
 
 Arguments:
-  --all           Submit all notebooks matching notebooks/*exploration*.ipynb
-  <notebook>      Specific notebooks to run (path or basename). Multiple allowed.
+  --all           Submit all notebooks matching notebooks/mimic4/*exploration*.ipynb
+  <notebook>      Specific notebooks to run. If a path is provided, it is used as-is.
+                  If only a file name is provided, it is resolved in the current
+                  working directory. Multiple notebooks allowed.
 
 Examples:
-  bash notebooks/submit_exploration.sh --all
-  bash notebooks/submit_exploration.sh mimic4_data_exploration.ipynb mimic4_chartevents_exploration.ipynb
+  bash notebooks/mimic4/submit_exploration.sh --all
+  bash notebooks/mimic4/submit_exploration.sh notebooks/mimic4/mimic4_data_exploration.ipynb mimic4_chartevents_exploration.ipynb
 EOF
 }
 
@@ -35,13 +37,14 @@ if [[ $# -lt 1 ]]; then
     exit 1
 fi
 
-cd ~/Python/HRS
-mkdir -p logs
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+mkdir -p "${REPO_ROOT}/logs"
 
 declare -a REQUESTED
 
 if [[ "$1" == "--all" ]]; then
-    mapfile -t REQUESTED < <(ls notebooks/*exploration*.ipynb)
+    mapfile -t REQUESTED < <(cd "${REPO_ROOT}" && ls notebooks/mimic4/*exploration*.ipynb)
     shift
 else
     while [[ $# -gt 0 ]]; do
@@ -65,15 +68,24 @@ fi
 
 resolve_notebook() {
     local nb="$1"
-    if [[ -f "$nb" ]]; then
-        echo "$nb"
-    elif [[ -f "notebooks/$nb" ]]; then
-        echo "notebooks/$nb"
-    elif [[ -f "notebooks/${nb}.ipynb" ]]; then
-        echo "notebooks/${nb}.ipynb"
-    else
-        return 1
+    local candidate="$nb"
+
+    # If only a basename was provided, resolve in the current working directory.
+    if [[ "$nb" != /* && "$nb" != *"/"* ]]; then
+        candidate="${PWD}/${nb}"
     fi
+
+    # Allow missing .ipynb extension when a basename is provided.
+    if [[ ! -f "$candidate" && "$candidate" != *.ipynb ]]; then
+        candidate="${candidate}.ipynb"
+    fi
+
+    if [[ -f "$candidate" ]]; then
+        realpath "$candidate"
+        return 0
+    fi
+
+    return 1
 }
 
 echo "Submitting exploration notebooks..."
@@ -85,7 +97,7 @@ for nb in "${REQUESTED[@]}"; do
     fi
     base="$(basename "$resolved" .ipynb)"
     job_name="explore_${base}"
-    job_id=$(sbatch --parsable --job-name="$job_name" notebooks/exploration_job.sh "$resolved")
+    job_id=$(sbatch --parsable --job-name="$job_name" "${SCRIPT_DIR}/exploration_job.sh" "$resolved")
     echo "  [${job_id}] $resolved (job-name: $job_name)"
 done
 
