@@ -53,8 +53,13 @@ class DataLoader(ABC):
 
     # pragma: no cover  # abstract hook
     @abstractmethod
-    def _compute_pos_weights(self, label_table: pa.Table, train_rows: List[int]) -> Tuple[float, float]:
+    def _compute_pos_weights(self, label_table: pa.Table, train_rows: List[int]) -> List[float]:
         """Compute positive class weights from the training split (or use config overrides)."""
+
+    # pragma: no cover  # abstract hook
+    @abstractmethod
+    def _get_label_columns(self) -> List[str]:
+        """Return the ordered list of label column names for this dataset."""
 
     # ---------------------------- #
     # Shared helpers / defaults    #
@@ -79,24 +84,28 @@ class DataLoader(ABC):
         self._validate_labels(label_table)
 
         feature_index_map = self._build_feature_index_map(parquet_file)
+        label_columns = self._get_label_columns()
 
         split_table = parquet_file.read(columns=["split"])
         split_indices = self._build_split_indices(split_table)
 
         train_rows = split_indices["train"]
-        pos_weight_y1, pos_weight_y2 = self._compute_pos_weights(label_table, train_rows)
+        pos_weights = self._compute_pos_weights(label_table, train_rows)
 
         derived_dim = max(end for _, end in feature_index_map.values())
 
         cache_size = self._config.DATASET_ROW_GROUP_CACHE_SIZE
         train_dataset = ParquetDataset(
-            parquet_file, self._config.DATASET_PATH, train_rows, feature_index_map, cache_size
+            parquet_file, self._config.DATASET_PATH, train_rows, feature_index_map,
+            cache_size, label_columns,
         )
         dev_dataset = ParquetDataset(
-            parquet_file, self._config.DATASET_PATH, split_indices["dev"], feature_index_map, cache_size
+            parquet_file, self._config.DATASET_PATH, split_indices["dev"], feature_index_map,
+            cache_size, label_columns,
         )
         test_dataset = ParquetDataset(
-            parquet_file, self._config.DATASET_PATH, split_indices["test"], feature_index_map, cache_size
+            parquet_file, self._config.DATASET_PATH, split_indices["test"], feature_index_map,
+            cache_size, label_columns,
         )
 
         return DatasetBundle(
@@ -104,7 +113,6 @@ class DataLoader(ABC):
             dev_dataset=dev_dataset,
             test_dataset=test_dataset,
             feature_index_map=feature_index_map,
-            pos_weight_y1=pos_weight_y1,
-            pos_weight_y2=pos_weight_y2,
+            pos_weights=pos_weights,
             input_dim=derived_dim,
         )

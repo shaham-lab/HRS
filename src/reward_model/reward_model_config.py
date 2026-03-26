@@ -2,7 +2,7 @@
 
 import math
 import os
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Union
 
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
@@ -12,8 +12,9 @@ from src.reward_model.schema_error import SchemaError
 
 class RewardModelConfig(BaseModel):
     LAYER_WIDTHS: List[int]
-    DROPOUT_RATE: float
+    DROPOUT_RATES: Union[float, List[float]]
     ACTIVATION: str
+    NUM_TARGETS: int = 2
 
     MAX_EPOCHS: int
     BATCH_SIZE_PER_GPU: int
@@ -27,17 +28,20 @@ class RewardModelConfig(BaseModel):
     EARLY_STOPPING_PATIENCE: int
     CHECKPOINT_KEEP_N: int
 
-    LOSS_WEIGHT_Y1: float
-    LOSS_WEIGHT_Y2: float
-    POS_WEIGHT_Y1: Optional[float] = Field(default=None)
-    POS_WEIGHT_Y2: Optional[float] = Field(default=None)
+    LOSS_WEIGHTS: List[float]
+    POS_WEIGHTS: Optional[List[float]] = Field(default=None)
 
     MASKING_START_RATIOS: Dict[str, float]
     MASKING_END_RATIOS: Dict[str, float]
     MASKING_TRANSITION_MIDPOINT_EPOCH: int
     MASKING_TRANSITION_SHAPE: str
-    MASKING_K: int
+    MASKING_RANDOM_K_MIN_FRACTION: float
+    MASKING_RANDOM_K_MAX_FRACTION: float
+    MASKING_ADVERSARIAL_K_MIN_FRACTION: float
+    MASKING_ADVERSARIAL_K_MAX_FRACTION: float
+    NUM_ALWAYS_VISIBLE_FEATURES: int = 5
 
+    INPUT_DIM: Optional[int] = None
     DATASET_PATH: str
     DATASET_ROW_GROUP_CACHE_SIZE: int = 2
     DATALOADER_NUM_WORKERS: int = 4
@@ -65,19 +69,54 @@ class RewardModelConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _expand_paths(self) -> "RewardModelConfig":
+    def _validate_and_normalise(self) -> "RewardModelConfig":
+        # --- path expansion ---
         for field_name, field_value in self.__dict__.items():
             if field_value is None:
                 continue
             if field_name.endswith(("_PATH", "_DIR", "_FILE")):
                 expanded = os.path.abspath(os.path.expanduser(str(field_value)))
                 object.__setattr__(self, field_name, expanded)
+
+        # --- masking ratio sums ---
         start_sum = sum(self.MASKING_START_RATIOS.values())
         end_sum = sum(self.MASKING_END_RATIOS.values())
         if not math.isclose(start_sum, 1.0, rel_tol=1e-6, abs_tol=1e-6):
             raise ValueError(f"MASKING_START_RATIOS must sum to 1.0, found {start_sum}")
         if not math.isclose(end_sum, 1.0, rel_tol=1e-6, abs_tol=1e-6):
             raise ValueError(f"MASKING_END_RATIOS must sum to 1.0, found {end_sum}")
+
+        # --- normalise DROPOUT_RATES ---
+        if isinstance(self.DROPOUT_RATES, float):
+            object.__setattr__(
+                self, "DROPOUT_RATES", [self.DROPOUT_RATES] * len(self.LAYER_WIDTHS)
+            )
+        if len(self.DROPOUT_RATES) != len(self.LAYER_WIDTHS):
+            raise ValueError(
+                f"DROPOUT_RATES length ({len(self.DROPOUT_RATES)}) must equal "
+                f"LAYER_WIDTHS length ({len(self.LAYER_WIDTHS)})"
+            )
+
+        # --- LOSS_WEIGHTS ---
+        if len(self.LOSS_WEIGHTS) != self.NUM_TARGETS:
+            raise ValueError(
+                f"LOSS_WEIGHTS length ({len(self.LOSS_WEIGHTS)}) must equal "
+                f"NUM_TARGETS ({self.NUM_TARGETS})"
+            )
+        total = sum(self.LOSS_WEIGHTS)
+        if total <= 0:
+            raise ValueError("LOSS_WEIGHTS must sum to a positive value")
+        object.__setattr__(
+            self, "LOSS_WEIGHTS", [w / total for w in self.LOSS_WEIGHTS]
+        )
+
+        # --- POS_WEIGHTS ---
+        if self.POS_WEIGHTS is not None and len(self.POS_WEIGHTS) != self.NUM_TARGETS:
+            raise ValueError(
+                f"POS_WEIGHTS length ({len(self.POS_WEIGHTS)}) must equal "
+                f"NUM_TARGETS ({self.NUM_TARGETS})"
+            )
+
         return self
 
     class Config:
@@ -92,5 +131,3 @@ def load_and_validate_config(path: str) -> RewardModelConfig:
         return RewardModelConfig(**data)
     except ValidationError as exc:
         raise SchemaError(f"Invalid reward model configuration: {exc}") from exc
-
-

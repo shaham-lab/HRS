@@ -38,7 +38,6 @@ from src.reward_model.mimic4_data_loader import Mimic4DataLoader
 from src.reward_model.masking import MaskingSchedule
 from src.reward_model.model import RewardModel
 from src.reward_model.reward_model_utils import (
-    ALWAYS_VISIBLE_SLOTS,
     DatasetBundle,
     RewardModelConfig,
     RowGroupBlockSampler,
@@ -115,16 +114,16 @@ def _load_and_broadcast_dataset(
     rank: int,
     device: torch.device,
     is_ddp: bool,
-) -> Tuple[DatasetBundle, float, float]:
-    """Load dataset on rank 0 and broadcast pos_weight scalars to all ranks.
+) -> Tuple[DatasetBundle, list]:
+    """Load dataset on rank 0 and broadcast pos_weights to all ranks.
 
     Rank 0 calls ``Mimic4DataLoader(config).load()`` to load and validate the Parquet
     dataset, build the feature index map, and compute positive class weights.
-    It then broadcasts ``pos_weight_y1`` and ``pos_weight_y2`` to all other
-    ranks via ``broadcast_tensor()``.
+    It then broadcasts each ``pos_weight`` scalar to all other ranks via
+    ``broadcast_tensor()``.
 
     Non-rank-0 processes do not call ``Mimic4DataLoader.load()`` — they receive only
-    the two scalar weights and return ``None`` for the bundle.  All ranks wait
+    the scalar weights and return ``None`` for the bundle.  All ranks wait
     at a barrier after the broadcast.
 
     Args:
@@ -135,28 +134,26 @@ def _load_and_broadcast_dataset(
             performed.
 
     Returns:
-        Tuple of ``(bundle, pos_weight_y1, pos_weight_y2)``.
+        Tuple of ``(bundle, pos_weights)`` where pos_weights is a List[float].
     """
+    T = config.NUM_TARGETS
     bundle: Optional[DatasetBundle] = None
     if rank == 0:
         bundle = Mimic4DataLoader(config).load()
-        pos_weight_y1 = bundle.pos_weight_y1
-        pos_weight_y2 = bundle.pos_weight_y2
+        pos_weights_local = list(bundle.pos_weights)
     else:
-        pos_weight_y1 = 0.0
-        pos_weight_y2 = 0.0
+        pos_weights_local = [0.0] * T
 
-    tensor_y1 = torch.tensor(pos_weight_y1, device=device)
-    tensor_y2 = torch.tensor(pos_weight_y2, device=device)
+    weight_tensors = [torch.tensor(w, device=device) for w in pos_weights_local]
     if is_ddp:
-        broadcast_tensor(tensor_y1, src_rank=0)
-        broadcast_tensor(tensor_y2, src_rank=0)
+        for t in weight_tensors:
+            broadcast_tensor(t, src_rank=0)
         obj_list = [bundle]
         dist.broadcast_object_list(obj_list, src=0)
         bundle = obj_list[0]
         dist.barrier()
 
-    return bundle, float(tensor_y1.item()), float(tensor_y2.item())
+    return bundle, [float(t.item()) for t in weight_tensors]
 
 
 # ---------------------------------------------------------------------------
@@ -221,7 +218,7 @@ def _build_lr_scheduler(
 # ---------------------------------------------------------------------------
 
 
-def _append_metrics_row(metrics_path: Path, row: Dict[str, float]) -> None:
+def _append_metrics_row(metrics_path: Path, row: Dict, num_targets: int = 2) -> None:
     """Append one epoch's metrics to *metrics_path* (rank 0 only).
 
     Uses an atomic write (write to temp file, rename) so that a SLURM
@@ -230,12 +227,14 @@ def _append_metrics_row(metrics_path: Path, row: Dict[str, float]) -> None:
 
     Columns written (Architecture §9):
         epoch, wall_time_s, masking_random_pct, masking_adversarial_pct,
-        masking_none_pct, loss_total, loss_y1, loss_y2,
-        auroc_y1, auprc_y1, ece_y1, auroc_y2, auprc_y2, ece_y2.
+        masking_none_pct, loss_total,
+        loss_target_<i>, auroc_target_<i>, auprc_target_<i>, ece_target_<i>
+        for each i in 0..num_targets-1.
 
     Args:
         metrics_path: Path to ``training_metrics.parquet``.
         row: Dict mapping column name to scalar value for this epoch.
+        num_targets: Number of classification targets T.
     """
     import pyarrow as pa
     import pyarrow.parquet as pq
@@ -248,33 +247,31 @@ def _append_metrics_row(metrics_path: Path, row: Dict[str, float]) -> None:
         "masking_adversarial_pct",
         "masking_none_pct",
         "loss_total",
-        "loss_y1",
-        "loss_y2",
-        "auroc_y1",
-        "auprc_y1",
-        "ece_y1",
-        "auroc_y2",
-        "auprc_y2",
-        "ece_y2",
     ]
-    schema = pa.schema(
-        [
-            ("epoch", pa.int64()),
-            ("wall_time_s", pa.float64()),
-            ("masking_random_pct", pa.float64()),
-            ("masking_adversarial_pct", pa.float64()),
-            ("masking_none_pct", pa.float64()),
-            ("loss_total", pa.float64()),
-            ("loss_y1", pa.float64()),
-            ("loss_y2", pa.float64()),
-            ("auroc_y1", pa.float64()),
-            ("auprc_y1", pa.float64()),
-            ("ece_y1", pa.float64()),
-            ("auroc_y2", pa.float64()),
-            ("auprc_y2", pa.float64()),
-            ("ece_y2", pa.float64()),
+    for i in range(num_targets):
+        columns += [
+            f"loss_target_{i}",
+            f"auroc_target_{i}",
+            f"auprc_target_{i}",
+            f"ece_target_{i}",
         ]
-    )
+
+    schema_fields = [
+        ("epoch", pa.int64()),
+        ("wall_time_s", pa.float64()),
+        ("masking_random_pct", pa.float64()),
+        ("masking_adversarial_pct", pa.float64()),
+        ("masking_none_pct", pa.float64()),
+        ("loss_total", pa.float64()),
+    ]
+    for i in range(num_targets):
+        schema_fields += [
+            (f"loss_target_{i}", pa.float64()),
+            (f"auroc_target_{i}", pa.float64()),
+            (f"auprc_target_{i}", pa.float64()),
+            (f"ece_target_{i}", pa.float64()),
+        ]
+    schema = pa.schema(schema_fields)
 
     new_row = {name: [row[name]] for name in columns}
     new_table = pa.table(new_row, schema=schema)
@@ -298,51 +295,29 @@ def _append_metrics_row(metrics_path: Path, row: Dict[str, float]) -> None:
 def _run_train_batch(
     model: torch.nn.Module,
     X: torch.Tensor,
-    y1: torch.Tensor,
-    y2: torch.Tensor,
+    labels: list,
     masking_schedule: MaskingSchedule,
     optimizer: torch.optim.Optimizer,
-    pos_weight_y1: float,
-    pos_weight_y2: float,
+    pos_weights: list,
     config: RewardModelConfig,
     epoch: int,
     is_ddp: bool,
-) -> Tuple[float, float, float]:
+) -> Tuple[float, ...]:
     """Execute one mini-batch forward/backward/step.
-
-    Masking mode is sampled from *masking_schedule* for this batch.
-
-    For **random** and **none** modes, a single forward/backward pass is run
-    with the (possibly masked) input.  DDP all-reduce fires normally on
-    ``loss.backward()``.
-
-    For **adversarial** mode, two passes are required (Detailed Design §7):
-
-      1. Clone *X*, call ``requires_grad_(True)`` on the clone.  Run forward
-         and backward inside ``model.no_sync()`` (DDP) or ``nullcontext()``
-         (single-GPU).  Read ``clone.grad`` to obtain ``∂L/∂X``.
-      2. Call ``optimizer.zero_grad()``.  Apply
-         ``masking_schedule.apply_adversarial_mask(X, grad_X)`` using the
-         gradient from step 1.  Run the second forward/backward pass normally
-         (DDP all-reduce fires here).
 
     Args:
         model: The (possibly DDP-wrapped) ``RewardModel``.
         X: Input batch tensor ``(batch_size, input_dim)``, float32.
-        y1: Mortality labels ``(batch_size,)``, int8.
-        y2: Readmission labels ``(batch_size,)``, float32 with NaN for deceased.
+        labels: List of T label tensors, each ``(batch_size,)``, float32.
         masking_schedule: Active ``MaskingSchedule`` instance.
         optimizer: AdamW optimiser.
-        pos_weight_y1: Positive class weight for Y1.
-        pos_weight_y2: Positive class weight for Y2 (survivors only).
+        pos_weights: List of T positive class weights.
         config: Validated ``RewardModelConfig``.
         epoch: Current epoch (passed to ``masking_schedule.sample_mode()``).
-        is_ddp: Whether the model is DDP-wrapped (determines whether
-            ``model.no_sync()`` is available or ``nullcontext()`` is used).
+        is_ddp: Whether the model is DDP-wrapped.
 
     Returns:
-        Tuple of ``(total_loss, loss_y1, loss_y2)`` as Python floats for
-        epoch-level accumulation before logging.
+        Tuple of ``(total_loss, loss_0, loss_1, ...)`` as Python floats.
     """
     mode = masking_schedule.sample_mode(epoch)
 
@@ -352,31 +327,15 @@ def _run_train_batch(
         context = model.no_sync() if is_ddp and hasattr(model, "no_sync") else nullcontext()
         X_grad = X.clone().requires_grad_(True)
         with context:
-            logits_y1, logits_y2 = model(X_grad)
-            loss_total, loss_y1_t, loss_y2_t = compute_loss(
-                logits_y1,
-                logits_y2,
-                y1,
-                y2,
-                pos_weight_y1,
-                pos_weight_y2,
-                config.LOSS_WEIGHT_Y1,
-                config.LOSS_WEIGHT_Y2,
-            )
+            logits_list = list(model(X_grad))
+            loss_total, _ = compute_loss(logits_list, labels, pos_weights, config.LOSS_WEIGHTS)
             loss_total.backward()
         grad_X = X_grad.grad.detach()
         optimizer.zero_grad()
         X_masked = masking_schedule.apply_adversarial_mask(X, grad_X)
-        logits_y1, logits_y2 = model(X_masked)
-        loss_total, loss_y1_t, loss_y2_t = compute_loss(
-            logits_y1,
-            logits_y2,
-            y1,
-            y2,
-            pos_weight_y1,
-            pos_weight_y2,
-            config.LOSS_WEIGHT_Y1,
-            config.LOSS_WEIGHT_Y2,
+        logits_list = list(model(X_masked))
+        loss_total, component_losses = compute_loss(
+            logits_list, labels, pos_weights, config.LOSS_WEIGHTS
         )
         loss_total.backward()
     else:
@@ -384,25 +343,16 @@ def _run_train_batch(
             X = masking_schedule.apply_random_mask(X)
         else:
             X = masking_schedule.apply_no_mask(X)
-        logits_y1, logits_y2 = model(X)
-        loss_total, loss_y1_t, loss_y2_t = compute_loss(
-            logits_y1,
-            logits_y2,
-            y1,
-            y2,
-            pos_weight_y1,
-            pos_weight_y2,
-            config.LOSS_WEIGHT_Y1,
-            config.LOSS_WEIGHT_Y2,
+        logits_list = list(model(X))
+        loss_total, component_losses = compute_loss(
+            logits_list, labels, pos_weights, config.LOSS_WEIGHTS
         )
         loss_total.backward()
 
     optimizer.step()
 
-    return (
-        float(loss_total.detach().item()),
-        float(loss_y1_t.detach().item()),
-        float(loss_y2_t.detach().item()),
+    return (float(loss_total.detach().item()),) + tuple(
+        float(l.detach().item()) for l in component_losses
     )
 
 
@@ -414,35 +364,17 @@ def _run_train_batch(
 def _eval_dev(
     model: torch.nn.Module,
     dev_dataset: torch.utils.data.Dataset,
-    pos_weight_y1: float,
-    pos_weight_y2: float,
+    pos_weights: list,
     config: RewardModelConfig,
     device: torch.device,
-) -> Dict[str, float]:
+) -> Dict:
     """Run full dev-split evaluation on rank 0 (no DDP, no masking).
 
-    Iterates the complete *dev_dataset* via a standard (non-distributed)
-    ``DataLoader`` with ``torch.no_grad()``, accumulates logits and labels,
-    computes total loss via ``compute_loss()``, and computes metrics via
-    ``compute_metrics()``.  The dev tensor is never fully resident in RAM —
-    rows are read lazily from ``ParquetDataset`` one batch at a time.
-
-    Called once at the end of each epoch by rank 0 only.
-
-    Args:
-        model: The (possibly DDP-wrapped) ``RewardModel``.  Unwrapped
-            internally via ``unwrap_ddp()`` before evaluation.
-        dev_dataset: Dev-split ``ParquetDataset`` from ``DatasetBundle``.
-        pos_weight_y1: Positive class weight for Y1 loss computation.
-        pos_weight_y2: Positive class weight for Y2 loss computation.
-        config: Validated ``RewardModelConfig``.
-        device: CUDA device for rank 0.
-
-    Returns:
-        Dict with keys: ``loss_total``, ``loss_y1``, ``loss_y2``,
-        ``auroc_y1``, ``auprc_y1``, ``ece_y1``,
-        ``auroc_y2``, ``auprc_y2``, ``ece_y2``.
+    Returns a dict with keys ``loss_total``, ``loss_target_<i>``,
+    ``auroc_target_<i>``, ``auprc_target_<i>``, ``ece_target_<i>``
+    for each target i in 0..NUM_TARGETS-1.
     """
+    T = config.NUM_TARGETS
     eval_model = unwrap_ddp(model)
     eval_model.eval()
 
@@ -454,71 +386,54 @@ def _eval_dev(
         pin_memory=torch.cuda.is_available(),
     )
 
-    total_loss = 0.0
-    total_loss_y1 = 0.0
-    total_loss_y2 = 0.0
+    total_loss_acc = 0.0
+    component_loss_acc = [0.0] * T
     n_batches = 0
 
-    logits_y1_all = []
-    logits_y2_all = []
-    y1_all = []
-    y2_all = []
+    logits_all = [[] for _ in range(T)]
+    labels_all = [[] for _ in range(T)]
 
     with torch.no_grad():
-        for X, y1, y2 in dataloader:
-            X = X.to(device)
-            y1 = y1.to(device)
-            y2 = y2.to(device)
+        for batch in dataloader:
+            X = batch[0].to(device)
+            batch_labels = [batch[i + 1].to(device) for i in range(T)]
 
-            logits_y1, logits_y2 = eval_model(X)
-            loss_total, loss_y1_t, loss_y2_t = compute_loss(
-                logits_y1,
-                logits_y2,
-                y1,
-                y2,
-                pos_weight_y1,
-                pos_weight_y2,
-                config.LOSS_WEIGHT_Y1,
-                config.LOSS_WEIGHT_Y2,
+            logits_list = list(eval_model(X))
+            loss_total, component_losses = compute_loss(
+                logits_list, batch_labels, pos_weights, config.LOSS_WEIGHTS
             )
 
-            total_loss += float(loss_total.detach().item())
-            total_loss_y1 += float(loss_y1_t.detach().item())
-            total_loss_y2 += float(loss_y2_t.detach().item())
+            total_loss_acc += float(loss_total.detach().item())
+            for i, cl in enumerate(component_losses):
+                component_loss_acc[i] += float(cl.detach().item())
             n_batches += 1
 
-            logits_y1_all.append(logits_y1.detach())
-            logits_y2_all.append(logits_y2.detach())
-            y1_all.append(y1.detach())
-            y2_all.append(y2.detach())
+            for i in range(T):
+                logits_all[i].append(logits_list[i].detach())
+                labels_all[i].append(batch_labels[i].detach())
 
+    nan_result: Dict = {"loss_total": float("nan")}
+    for i in range(T):
+        nan_result[f"loss_target_{i}"] = float("nan")
+        nan_result[f"auroc_target_{i}"] = float("nan")
+        nan_result[f"auprc_target_{i}"] = float("nan")
+        nan_result[f"ece_target_{i}"] = float("nan")
     if n_batches == 0:
-        return {
-            "loss_total": float("nan"),
-            "loss_y1": float("nan"),
-            "loss_y2": float("nan"),
-            "auroc_y1": float("nan"),
-            "auprc_y1": float("nan"),
-            "ece_y1": float("nan"),
-            "auroc_y2": float("nan"),
-            "auprc_y2": float("nan"),
-            "ece_y2": float("nan"),
-        }
+        return nan_result
 
-    logits_y1_cat = torch.cat(logits_y1_all, dim=0)
-    logits_y2_cat = torch.cat(logits_y2_all, dim=0)
-    y1_cat = torch.cat(y1_all, dim=0)
-    y2_cat = torch.cat(y2_all, dim=0)
+    logits_cat = [torch.cat(logits_all[i], dim=0) for i in range(T)]
+    labels_cat = [torch.cat(labels_all[i], dim=0) for i in range(T)]
 
-    metrics = compute_metrics(logits_y1_cat, logits_y2_cat, y1_cat, y2_cat)
-    metrics.update(
-        {
-            "loss_total": total_loss / n_batches,
-            "loss_y1": total_loss_y1 / n_batches,
-            "loss_y2": total_loss_y2 / n_batches,
-        }
-    )
-    return metrics
+    per_target = compute_metrics(logits_cat, labels_cat, masked=False)
+
+    result: Dict = {"loss_total": total_loss_acc / n_batches}
+    for i in range(T):
+        result[f"loss_target_{i}"] = component_loss_acc[i] / n_batches
+        target_metrics = per_target[i]
+        result[f"auroc_target_{i}"] = target_metrics["auroc"]
+        result[f"auprc_target_{i}"] = target_metrics["auprc"]
+        result[f"ece_target_{i}"] = target_metrics["ece"]
+    return result
 
 
 def _parse_args() -> argparse.Namespace:
@@ -547,11 +462,11 @@ def _init_runtime(config: RewardModelConfig) -> Tuple[int, int, int, bool, torch
 
 def _load_datasets_and_weights(
     config: RewardModelConfig, rank: int, device: torch.device, is_ddp: bool
-) -> Tuple[DatasetBundle, float, float]:
-    bundle, pos_weight_y1, pos_weight_y2 = _load_and_broadcast_dataset(config, rank, device, is_ddp)
+) -> Tuple[DatasetBundle, list]:
+    bundle, pos_weights = _load_and_broadcast_dataset(config, rank, device, is_ddp)
     if bundle is None:
         raise RuntimeError("Dataset must be available on all ranks after broadcast")
-    return bundle, pos_weight_y1, pos_weight_y2
+    return bundle, pos_weights
 
 
 def _resume_from_checkpoint(
@@ -597,8 +512,11 @@ def _build_masking_schedule(
             transition_shape=ms["transition_shape"],
             transition_midpoint_epoch=ms["transition_midpoint_epoch"],
             total_epochs=ms["total_epochs"],
-            k=ms["k"],
-            always_visible_slots=ms.get("always_visible_slots", ALWAYS_VISIBLE_SLOTS),
+            num_always_visible=ms["num_always_visible"],
+            random_k_min_fraction=ms["random_k_min_fraction"],
+            random_k_max_fraction=ms["random_k_max_fraction"],
+            adversarial_k_min_fraction=ms["adversarial_k_min_fraction"],
+            adversarial_k_max_fraction=ms["adversarial_k_max_fraction"],
         )
 
     return MaskingSchedule(
@@ -608,8 +526,11 @@ def _build_masking_schedule(
         transition_shape=config.MASKING_TRANSITION_SHAPE,
         transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
         total_epochs=config.MAX_EPOCHS,
-        k=config.MASKING_K,
-        always_visible_slots=ALWAYS_VISIBLE_SLOTS,
+        num_always_visible=config.NUM_ALWAYS_VISIBLE_FEATURES,
+        random_k_min_fraction=config.MASKING_RANDOM_K_MIN_FRACTION,
+        random_k_max_fraction=config.MASKING_RANDOM_K_MAX_FRACTION,
+        adversarial_k_min_fraction=config.MASKING_ADVERSARIAL_K_MIN_FRACTION,
+        adversarial_k_max_fraction=config.MASKING_ADVERSARIAL_K_MAX_FRACTION,
     )
 
 
@@ -645,8 +566,9 @@ def _build_model(
     model = RewardModel(
         input_dim=input_dim,
         layer_widths=config.LAYER_WIDTHS,
-        dropout_rate=config.DROPOUT_RATE,
+        dropout_rates=config.DROPOUT_RATES,
         activation=config.ACTIVATION,
+        num_targets=config.NUM_TARGETS,
     ).to(device)
     if is_ddp:
         model = DistributedDataParallel(model, device_ids=[local_rank])
@@ -687,8 +609,7 @@ def _train_epochs(
     feature_index_map: Optional[Dict[str, Tuple[int, int]]],
     config: RewardModelConfig,
     device: torch.device,
-    pos_weight_y1: float,
-    pos_weight_y2: float,
+    pos_weights: list,
     start_epoch: int,
     best_dev_loss: float,
     rank: int,
@@ -696,6 +617,7 @@ def _train_epochs(
     metrics_path: Path,
 ) -> Tuple[int, float]:
     """Run the epoch loop and return the last completed epoch and best dev loss."""
+    T = config.NUM_TARGETS
     epochs_without_improve = 0
     last_epoch_completed = start_epoch - 1
 
@@ -708,20 +630,17 @@ def _train_epochs(
 
         epoch_start = time.time()
 
-        for X, y1, y2 in train_loader:
-            X = X.to(device, non_blocking=True)
-            y1 = y1.to(device, non_blocking=True)
-            y2 = y2.to(device, non_blocking=True)
+        for batch in train_loader:
+            X = batch[0].to(device, non_blocking=True)
+            labels = [batch[i + 1].to(device, non_blocking=True) for i in range(T)]
 
-            total, l1, l2 = _run_train_batch(
+            _run_train_batch(
                 model,
                 X,
-                y1,
-                y2,
+                labels,
                 masking_schedule,
                 optimizer,
-                pos_weight_y1,
-                pos_weight_y2,
+                pos_weights,
                 config,
                 epoch,
                 is_ddp,
@@ -733,26 +652,23 @@ def _train_epochs(
 
         if rank == 0:
             probs = masking_schedule.get_mode_probabilities(epoch)
-            dev_metrics = _eval_dev(model, dev_dataset, pos_weight_y1, pos_weight_y2, config, device)
+            dev_metrics = _eval_dev(model, dev_dataset, pos_weights, config, device)
             model.train()
 
-            row = {
+            row: Dict = {
                 "epoch": epoch,
                 "wall_time_s": float(time.time() - epoch_start),
                 "masking_random_pct": probs[0] * 100.0,
                 "masking_adversarial_pct": probs[1] * 100.0,
                 "masking_none_pct": probs[2] * 100.0,
                 "loss_total": dev_metrics["loss_total"],
-                "loss_y1": dev_metrics["loss_y1"],
-                "loss_y2": dev_metrics["loss_y2"],
-                "auroc_y1": dev_metrics["auroc_y1"],
-                "auprc_y1": dev_metrics["auprc_y1"],
-                "ece_y1": dev_metrics["ece_y1"],
-                "auroc_y2": dev_metrics["auroc_y2"],
-                "auprc_y2": dev_metrics["auprc_y2"],
-                "ece_y2": dev_metrics["ece_y2"],
             }
-            _append_metrics_row(metrics_path, row)
+            for i in range(T):
+                row[f"loss_target_{i}"] = dev_metrics[f"loss_target_{i}"]
+                row[f"auroc_target_{i}"] = dev_metrics[f"auroc_target_{i}"]
+                row[f"auprc_target_{i}"] = dev_metrics[f"auprc_target_{i}"]
+                row[f"ece_target_{i}"] = dev_metrics[f"ece_target_{i}"]
+            _append_metrics_row(metrics_path, row, num_targets=T)
 
             current_dev_loss = dev_metrics["loss_total"]
             improved = current_dev_loss < best_dev_loss
@@ -767,7 +683,6 @@ def _train_epochs(
                     best_dev_loss,
                     feature_index_map if feature_index_map is not None else {},
                     config,
-                    ALWAYS_VISIBLE_SLOTS,
                 )
                 checkpoint_manager.save_best_model(
                     model,
@@ -808,7 +723,6 @@ def _train_epochs(
             best_dev_loss,
             feature_index_map if feature_index_map is not None else {},
             config,
-            ALWAYS_VISIBLE_SLOTS,
         )
     if is_ddp:
         dist.barrier()
@@ -835,7 +749,7 @@ def main() -> None:
     rank, local_rank, world_size, is_ddp, device = _init_runtime(config)
 
     # Load dataset (rank 0) and broadcast class weights to all ranks.
-    bundle, pos_weight_y1, pos_weight_y2 = _load_datasets_and_weights(config, rank, device, is_ddp)
+    bundle, pos_weights = _load_datasets_and_weights(config, rank, device, is_ddp)
     feature_index_map: Dict[str, Tuple[int, int]] = bundle.feature_index_map
     input_dim: int = bundle.input_dim
     train_dataset = bundle.train_dataset
@@ -884,8 +798,7 @@ def main() -> None:
         feature_index_map=feature_index_map,
         config=config,
         device=device,
-        pos_weight_y1=pos_weight_y1,
-        pos_weight_y2=pos_weight_y2,
+        pos_weights=pos_weights,
         start_epoch=start_epoch,
         best_dev_loss=best_dev_loss,
         rank=rank,

@@ -4,6 +4,8 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
+from src.reward_model.schema_error import SchemaError
+
 
 class CheckpointManager:
     """Checkpoint lifecycle manager for reward model training.
@@ -29,7 +31,7 @@ class CheckpointManager:
         checkpoint_map: Dict[str, Tuple[int, int]], current_map: Dict[str, Tuple[int, int]]
     ) -> None:
         if checkpoint_map != current_map:
-            raise RuntimeError("Feature index map mismatch between checkpoint and current dataset")
+            raise SchemaError("Feature index map mismatch between checkpoint and current dataset")
 
     def find_latest(self) -> Optional[Path]:
         checkpoints = []
@@ -60,7 +62,6 @@ class CheckpointManager:
         best_dev_loss: float,
         feature_index_map: Dict[str, Tuple[int, int]],
         config,
-        always_visible_slots,
     ) -> Path:
         state = {
             "model_state_dict": self._unwrap_ddp(model).state_dict(),
@@ -73,8 +74,11 @@ class CheckpointManager:
                 "transition_shape": config.MASKING_TRANSITION_SHAPE,
                 "transition_midpoint_epoch": config.MASKING_TRANSITION_MIDPOINT_EPOCH,
                 "total_epochs": config.MAX_EPOCHS,
-                "k": config.MASKING_K,
-                "always_visible_slots": list(always_visible_slots),
+                "random_k_min_fraction": config.MASKING_RANDOM_K_MIN_FRACTION,
+                "random_k_max_fraction": config.MASKING_RANDOM_K_MAX_FRACTION,
+                "adversarial_k_min_fraction": config.MASKING_ADVERSARIAL_K_MIN_FRACTION,
+                "adversarial_k_max_fraction": config.MASKING_ADVERSARIAL_K_MAX_FRACTION,
+                "num_always_visible": config.NUM_ALWAYS_VISIBLE_FEATURES,
             },
             "best_dev_loss": best_dev_loss,
             "feature_index_map": feature_index_map,

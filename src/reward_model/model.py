@@ -1,5 +1,5 @@
 import logging
-from typing import Iterable, Tuple
+from typing import Iterable, List, Tuple, Union
 
 import torch
 from torch import nn
@@ -12,8 +12,9 @@ class RewardModel(nn.Module):
         self,
         input_dim: int,
         layer_widths: Iterable[int],
-        dropout_rate: float,
+        dropout_rates: Union[float, List[float]],
         activation: str = "relu",
+        num_targets: int = 2,
     ) -> None:
         """Initialize the reward model MLP with configurable widths and activation."""
         super().__init__()
@@ -21,9 +22,20 @@ class RewardModel(nn.Module):
         if not widths:
             raise ValueError("layer_widths must contain at least one layer width")
 
+        # Normalise dropout_rates to a per-layer list.
+        if isinstance(dropout_rates, float):
+            rates = [dropout_rates] * len(widths)
+        else:
+            rates = list(dropout_rates)
+        if len(rates) != len(widths):
+            raise ValueError(
+                f"dropout_rates length ({len(rates)}) must equal "
+                f"layer_widths length ({len(widths)})"
+            )
+
         layers = []
         in_dim = input_dim
-        for width in widths:
+        for i, width in enumerate(widths):
             layers.append(nn.Linear(in_dim, width))
             layers.append(nn.BatchNorm1d(width))
             if activation == "relu":
@@ -32,14 +44,13 @@ class RewardModel(nn.Module):
                 layers.append(nn.LeakyReLU())
             else:
                 raise ValueError("activation must be 'relu' or 'leaky_relu'")
-            layers.append(nn.Dropout(dropout_rate))
+            layers.append(nn.Dropout(rates[i]))
             in_dim = width
 
         self.backbone = nn.Sequential(*layers)
-        self.head_y1 = nn.Linear(in_dim, 1)
-        self.head_y2 = nn.Linear(in_dim, 1)
+        self.heads = nn.ModuleList([nn.Linear(in_dim, 1) for _ in range(num_targets)])
 
-    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Compute logits for Y1 and Y2 given input features."""
+    def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
+        """Compute logits for each target head given input features."""
         features = self.backbone(x)
-        return self.head_y1(features), self.head_y2(features)
+        return tuple(head(features) for head in self.heads)

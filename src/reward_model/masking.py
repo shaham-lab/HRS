@@ -3,8 +3,9 @@
 Implements MaskingSchedule, which maintains the masking curriculum state and
 applies the correct masking mode to each mini-batch.  Three modes:
 
-  random      — zero k feature slots selected uniformly at random per sample
-  adversarial — zero the highest-L2-norm gradient slot per sample
+  random      — zero k feature slots selected uniformly at random per sample,
+                where k is drawn per sample from a configured fraction range
+  adversarial — zero the top-k highest-RMS-gradient slots per sample
                 (Shaham et al. 2016, adapted for discrete feature-slot masking)
   none        — return X unchanged
 
@@ -16,7 +17,8 @@ See Detailed Design §5 (masking.py) and §6.3 (adversarial masking under DDP).
 
 import logging
 import math
-from typing import Dict, Set, Tuple
+import random
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -53,7 +55,9 @@ class MaskingSchedule:
 
     Config keys consumed (via constructor args, not direct config access):
         MASKING_START_RATIOS, MASKING_END_RATIOS, MASKING_TRANSITION_SHAPE,
-        MASKING_TRANSITION_MIDPOINT_EPOCH, MASKING_K.
+        MASKING_TRANSITION_MIDPOINT_EPOCH, NUM_ALWAYS_VISIBLE_FEATURES,
+        MASKING_RANDOM_K_MIN_FRACTION, MASKING_RANDOM_K_MAX_FRACTION,
+        MASKING_ADVERSARIAL_K_MIN_FRACTION, MASKING_ADVERSARIAL_K_MAX_FRACTION.
     """
 
     def __init__(
@@ -64,35 +68,36 @@ class MaskingSchedule:
         transition_shape: str,
         transition_midpoint_epoch: int,
         total_epochs: int,
-        k: int = 1,
-        always_visible_slots: Set[str] = frozenset(),
+        num_always_visible: int = 5,
+        random_k_min_fraction: float = 0.5,
+        random_k_max_fraction: float = 1.0,
+        adversarial_k_min_fraction: float = 0.3,
+        adversarial_k_max_fraction: float = 0.7,
     ) -> None:
         """Initialise the masking schedule.
 
         Args:
             feature_index_map: Mapping of feature column name to ``(start, end)``
-                byte-range within the flat input tensor, as derived by
-                a ``DataLoader`` subclass from the canonical Parquet column order.
-                Defines both the slot count and the index boundaries used for
-                zeroing.
-            start_ratios: Dict with keys ``'random'``, ``'adversarial'``,
-                ``'none'`` giving the masking mode probabilities at epoch 0.
-                Values must sum to 1.0.
-            end_ratios: Dict with keys ``'random'``, ``'adversarial'``,
-                ``'none'`` giving the masking mode probabilities at the final
-                epoch.  Values must sum to 1.0.
-            transition_shape: Crossover curve shape.  Only ``'sigmoid'`` is
-                supported; validated by RewardModelConfig at startup.
-            transition_midpoint_epoch: Epoch at the sigmoid crossover inflection
-                point (``MASKING_TRANSITION_MIDPOINT_EPOCH`` in config).
-            total_epochs: Total training epochs (``MAX_EPOCHS`` in config).
-            k: Number of feature slots zeroed per sample in random mode.
-                Default 1 (``MASKING_K`` in config).
-            always_visible_slots: Set of feature column names that are never
-                candidates for masking.  Corresponds to F1–F5 in the
-                architecture document: demographic_vec, diag_history_embedding,
-                discharge_history_embedding, triage_embedding,
-                chief_complaint_embedding.
+                index range within the flat input tensor.  The first
+                ``num_always_visible`` entries (in insertion order) are treated
+                as always-visible; all remaining entries are maskable.
+            start_ratios: Mode probabilities at epoch 0.
+            end_ratios: Mode probabilities at the final epoch.
+            transition_shape: Crossover curve shape (only ``'sigmoid'`` supported).
+            transition_midpoint_epoch: Epoch at sigmoid crossover inflection point.
+            total_epochs: Total training epochs.
+            num_always_visible: Number of leading slots in ``feature_index_map``
+                that are never masked.  Positional — must match the leading
+                always-visible slots enforced by the upstream preprocessing
+                pipeline column order.
+            random_k_min_fraction: Minimum fraction of maskable slots zeroed per
+                sample in random mode.
+            random_k_max_fraction: Maximum fraction of maskable slots zeroed per
+                sample in random mode (effective upper bound is M−1).
+            adversarial_k_min_fraction: Minimum fraction of maskable slots zeroed
+                per sample in adversarial mode.
+            adversarial_k_max_fraction: Maximum fraction of maskable slots zeroed
+                per sample in adversarial mode.
         """
         self._feature_index_map = feature_index_map
         self._start_ratios = start_ratios
@@ -100,26 +105,24 @@ class MaskingSchedule:
         self._transition_shape = transition_shape
         self._transition_midpoint_epoch = transition_midpoint_epoch
         self._total_epochs = total_epochs
-        self._k = k
-        self._always_visible_slots = set(always_visible_slots)
-        self._maskable_slots = [name for name in feature_index_map.keys() if name not in self._always_visible_slots]
-        self._slot_names = self._maskable_slots
+        self._random_k_min_fraction = random_k_min_fraction
+        self._random_k_max_fraction = random_k_max_fraction
+        self._adversarial_k_min_fraction = adversarial_k_min_fraction
+        self._adversarial_k_max_fraction = adversarial_k_max_fraction
+
+        # Derive always-visible and maskable slots positionally from the map.
+        all_slots: List[str] = list(feature_index_map.keys())
+        n_always = max(0, min(num_always_visible, len(all_slots)))
+        self._always_visible_slots: List[str] = all_slots[:n_always]
+        self._maskable_slots: List[str] = all_slots[n_always:]
+        self._M: int = len(self._maskable_slots)
 
     # ------------------------------------------------------------------
     # Curriculum schedule
     # ------------------------------------------------------------------
 
     def get_mode_probabilities(self, epoch: int) -> Tuple[float, float, float]:
-        """Return ``(p_random, p_adversarial, p_none)`` for the given epoch.
-
-        Delegates to ``sigmoid_crossover()`` defined in this module.
-
-        Args:
-            epoch: Current training epoch (0-indexed).
-
-        Returns:
-            Three-tuple of floats summing to 1.0.
-        """
+        """Return ``(p_random, p_adversarial, p_none)`` for the given epoch."""
         return sigmoid_crossover(
             epoch=epoch,
             total_epochs=self._total_epochs,
@@ -129,42 +132,50 @@ class MaskingSchedule:
         )
 
     def sample_mode(self, epoch: int) -> str:
-        """Draw a masking mode string for this mini-batch.
-
-        Samples from ``['random', 'adversarial', 'none']`` according to the
-        probabilities returned by ``get_mode_probabilities(epoch)``.
-
-        Args:
-            epoch: Current training epoch (0-indexed).
-
-        Returns:
-            One of ``'random'``, ``'adversarial'``, or ``'none'``.
-        """
+        """Draw a masking mode string for this mini-batch."""
         probs = np.array(self.get_mode_probabilities(epoch), dtype=np.float64)
         probs /= probs.sum()
         return str(np.random.choice(["random", "adversarial", "none"], p=probs))
+
+    # ------------------------------------------------------------------
+    # k sampling
+    # ------------------------------------------------------------------
+
+    def _sample_k(self, min_fraction: float, max_fraction: float) -> int:
+        """Draw an integer k from [lower, upper] for the configured fraction range.
+
+        Algorithm (DD §5 masking.py):
+            lower = floor(min_fraction * M)
+            upper = ceil(max_fraction * M)
+            lower = max(1, lower)
+            upper = min(M - 1, upper)
+            if lower > upper: lower = upper
+            return randint(lower, upper) inclusive
+        """
+        lower = math.floor(min_fraction * self._M)
+        upper = math.ceil(max_fraction * self._M)
+        lower = max(1, lower)
+        upper = min(self._M - 1, upper)
+        if lower > upper:
+            lower = upper
+        return random.randint(lower, upper)
 
     # ------------------------------------------------------------------
     # Masking operators
     # ------------------------------------------------------------------
 
     def apply_random_mask(self, X: torch.Tensor) -> torch.Tensor:
-        """Zero *k* randomly-selected feature slots per sample without replacement.
+        """Zero k randomly-selected maskable slots per sample without replacement.
 
-        Slot indices are drawn uniformly at random from the maskable entries in
-        ``feature_index_map`` (excluding always-visible slots).  The original
-        tensor is not modified in place — a clone is returned.
-
-        Args:
-            X: Input batch tensor of shape ``(batch_size, input_dim)``,
-               dtype float32.
-
-        Returns:
-            Cloned tensor of same shape with *k* slots zeroed per sample.
+        k is drawn independently per sample from the configured random fraction
+        range.  The original tensor is not modified — a clone is returned.
         """
+        if self._M == 0:
+            return X.clone()
         masked = X.clone()
         for i in range(X.shape[0]):
-            chosen = np.random.choice(self._slot_names, size=self._k, replace=False)
+            k = self._sample_k(self._random_k_min_fraction, self._random_k_max_fraction)
+            chosen = np.random.choice(self._maskable_slots, size=k, replace=False)
             for slot in chosen:
                 start, end = self._feature_index_map[slot]
                 masked[i, start:end] = 0.0
@@ -173,53 +184,35 @@ class MaskingSchedule:
     def apply_adversarial_mask(
         self, X: torch.Tensor, grad_X: torch.Tensor
     ) -> torch.Tensor:
-        """Zero the highest-L2-norm gradient slot per sample.
+        """Zero the top-k highest-RMS-gradient maskable slots per sample.
 
-        Importance score per slot: RMS (root mean square) gradient magnitude,
-        computed as L2 norm divided by sqrt(slot_dim). This normalises for slot
-        size so demographic_vec (8 dims) and embedding slots (768 dims) are
-        compared on equal footing.
-
-        The gradient ``∂L/∂X`` is computed by ``train.py`` via a first
-        forward/backward pass inside ``model.no_sync()`` before this method is
-        called (Detailed Design §7).  The original tensor is not modified in
-        place — a clone is returned.
-
-        Args:
-            X: Input batch tensor of shape ``(batch_size, input_dim)``,
-               dtype float32.
-            grad_X: Gradient ``∂L/∂X`` of shape ``(batch_size, input_dim)``,
-                dtype float32, accumulated from the first forward/backward pass
-                inside ``model.no_sync()``.
-
-        Returns:
-            Cloned tensor of same shape with the highest-norm slot zeroed per
-            sample.
+        k is drawn independently per sample from the configured adversarial
+        fraction range.  Importance score per slot: RMS gradient magnitude,
+        computed as L2 norm divided by sqrt(slot_dim), to normalise across
+        slots of different widths.  The original tensor is not modified — a
+        clone is returned.
         """
+        if self._M == 0:
+            return X.clone()
         masked = X.clone()
         for i in range(X.shape[0]):
-            max_norm = None
-            max_slot = None
+            k = self._sample_k(
+                self._adversarial_k_min_fraction, self._adversarial_k_max_fraction
+            )
+            # Compute RMS importance for every maskable slot.
+            importances: List[Tuple[float, str]] = []
             for slot in self._maskable_slots:
                 start, end = self._feature_index_map[slot]
                 slot_dim = end - start
-                norm = torch.linalg.norm(grad_X[i, start:end]) / (slot_dim ** 0.5)
-                if max_norm is None or norm > max_norm:
-                    max_norm = norm
-                    max_slot = slot
-            if max_slot is not None:
-                start, end = self._feature_index_map[max_slot]
+                norm = float(torch.linalg.norm(grad_X[i, start:end])) / (slot_dim ** 0.5)
+                importances.append((norm, slot))
+            # Sort descending by importance; zero the top k.
+            importances.sort(key=lambda pair: pair[0], reverse=True)
+            for _, slot in importances[:k]:
+                start, end = self._feature_index_map[slot]
                 masked[i, start:end] = 0.0
         return masked
 
     def apply_no_mask(self, X: torch.Tensor) -> torch.Tensor:
-        """Return *X* unchanged (no masking applied).
-
-        Args:
-            X: Input batch tensor of shape ``(batch_size, input_dim)``,
-               dtype float32.
-
-        Returns:
-            *X* unchanged (not cloned).
-        """
+        """Return X unchanged (no masking applied)."""
         return X

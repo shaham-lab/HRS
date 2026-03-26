@@ -222,9 +222,9 @@ class Mimic4DataLoader(DataLoader):
 
         return index_map
 
-    def _compute_pos_weights(self, label_table: pa.Table, train_rows: List[int]) -> Tuple[float, float]:
-        if self._config.POS_WEIGHT_Y1 is not None and self._config.POS_WEIGHT_Y2 is not None:
-            return float(self._config.POS_WEIGHT_Y1), float(self._config.POS_WEIGHT_Y2)
+    def _compute_pos_weights(self, label_table: pa.Table, train_rows: List[int]) -> List[float]:
+        if self._config.POS_WEIGHTS is not None:
+            return [float(w) for w in self._config.POS_WEIGHTS]
 
         labels_df = label_table.to_pandas()
         train_y_df = labels_df.iloc[train_rows].reset_index(drop=True)
@@ -243,7 +243,11 @@ class Mimic4DataLoader(DataLoader):
             raise SchemaError("y2_readmission must contain both positive and negative examples for survivors")
         pos_weight_y2 = neg_y2 / pos_y2
 
-        return float(pos_weight_y1), float(pos_weight_y2)
+        return [float(pos_weight_y1), float(pos_weight_y2)]
+
+    def _get_label_columns(self) -> List[str]:
+        """Return the MIMIC-IV label column names in target order."""
+        return ["y1_mortality", "y2_readmission"]
 
     @classmethod
     def _get_expected_columns(cls) -> List[str]:
