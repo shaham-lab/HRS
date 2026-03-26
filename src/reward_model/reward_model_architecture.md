@@ -258,6 +258,10 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `train.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
 
+#### Checkpoint manager and feature-index validation
+
+Checkpointing and resume logic is encapsulated behind a `CheckpointManager` helper. It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from the current `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
+
 ### 8.3 Multi-GPU Distributed Training
 
 Training uses PyTorch `DistributedDataParallel` (DDP) launched via `torchrun`. The number of GPUs is controlled by `NUM_GPUS` in `config/reward_model.yaml` (default: 2). `torchrun` spawns one process per GPU, each with a unique `rank`. Each process loads a full copy of the dataset and model. A `DistributedSampler` shards the training data across ranks so each GPU processes a non-overlapping subset of the mini-batch. Gradients are all-reduced across GPUs after each backward pass. Checkpointing, metric logging, and masking curriculum state are managed by rank 0 only to avoid duplicate writes.

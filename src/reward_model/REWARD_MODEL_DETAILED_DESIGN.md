@@ -406,6 +406,8 @@ For each sample and each of the 56 feature slots, the importance score is the L2
 - Feature index map snapshot
 - Full config snapshot serialised from the Pydantic model
 
+Checkpoint ownership is centralised in a `CheckpointManager` helper. It is the sole writer/loader of `epoch_<N>.pt` and `best_model.pt`, and it performs schema safety checks before a resume proceeds. `CheckpointManager.validate_feature_index_map(old_map, new_map)` compares the feature-index map stored inside the checkpoint against the freshly derived map from `Mimic4DataLoader`; if keys or index ranges differ, it raises and aborts the resume to prevent continuing with shifted feature boundaries after an upstream dataset change.
+
 The config snapshot inside the checkpoint is authoritative for architecture reconstruction. If `config/reward_model.yaml` is modified between a run and a resume, the resumed run uses the checkpoint's config to ensure no architecture mismatch. The current YAML is still loaded for non-architecture settings (paths, logging) but architecture keys are ignored in favour of the checkpoint snapshot.
 
 **Best model tracking:** `best_model.pt` is overwritten (via temp-file rename for atomicity) whenever dev loss improves. It always reflects the best epoch seen so far, not the most recent epoch.
