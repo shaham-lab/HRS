@@ -13,138 +13,137 @@ from src.reward_model.schema_error import SchemaError
 logger = logging.getLogger(__name__)
 
 
-_EXPECTED_COLUMNS: List[str] = [
-    "subject_id",
-    "hadm_id",
-    "split",
-    "y1_mortality",
-    "y2_readmission",
-    "demographic_vec",
-    "diag_history_embedding",
-    "discharge_history_embedding",
-    "triage_embedding",
-    "chief_complaint_embedding",
-    "lab_blood_gas_embedding",
-    "lab_blood_chemistry_embedding",
-    "lab_blood_hematology_embedding",
-    "lab_urine_chemistry_embedding",
-    "lab_urine_hematology_embedding",
-    "lab_other_body_fluid_chemistry_embedding",
-    "lab_other_body_fluid_hematology_embedding",
-    "lab_ascites_embedding",
-    "lab_pleural_embedding",
-    "lab_csf_embedding",
-    "lab_bone_marrow_embedding",
-    "lab_joint_fluid_embedding",
-    "lab_stool_embedding",
-    "radiology_embedding",
-    "micro_blood_culture_routine_embedding",
-    "micro_blood_bottle_gram_stain_embedding",
-    "micro_urine_culture_embedding",
-    "micro_urine_viral_embedding",
-    "micro_urinary_antigens_embedding",
-    "micro_respiratory_non_invasive_embedding",
-    "micro_respiratory_invasive_embedding",
-    "micro_respiratory_afb_embedding",
-    "micro_respiratory_viral_embedding",
-    "micro_respiratory_pcp_legionella_embedding",
-    "micro_gram_stain_respiratory_embedding",
-    "micro_gram_stain_wound_tissue_embedding",
-    "micro_gram_stain_csf_embedding",
-    "micro_wound_culture_embedding",
-    "micro_hardware_and_lines_culture_embedding",
-    "micro_pleural_culture_embedding",
-    "micro_peritoneal_culture_embedding",
-    "micro_joint_fluid_culture_embedding",
-    "micro_fluid_culture_embedding",
-    "micro_bone_marrow_culture_embedding",
-    "micro_csf_culture_embedding",
-    "micro_fungal_tissue_wound_embedding",
-    "micro_fungal_respiratory_embedding",
-    "micro_fungal_fluid_embedding",
-    "micro_mrsa_staph_screen_embedding",
-    "micro_resistance_screen_embedding",
-    "micro_cdiff_embedding",
-    "micro_stool_bacterial_embedding",
-    "micro_stool_parasitology_embedding",
-    "micro_herpesvirus_serology_embedding",
-    "micro_hepatitis_hiv_embedding",
-    "micro_syphilis_serology_embedding",
-    "micro_misc_serology_embedding",
-    "micro_herpesvirus_culture_antigen_embedding",
-    "micro_gc_chlamydia_sti_embedding",
-    "micro_vaginal_genital_flora_embedding",
-    "micro_throat_strep_embedding",
-]
-
-_HISTORY_TRIAGE_EMBEDDINGS = {
-    "diag_history_embedding",
-    "discharge_history_embedding",
-    "triage_embedding",
-    "chief_complaint_embedding",
-}
-
-_LAB_EMBEDDINGS = {
-    "lab_blood_gas_embedding",
-    "lab_blood_chemistry_embedding",
-    "lab_blood_hematology_embedding",
-    "lab_urine_chemistry_embedding",
-    "lab_urine_hematology_embedding",
-    "lab_other_body_fluid_chemistry_embedding",
-    "lab_other_body_fluid_hematology_embedding",
-    "lab_ascites_embedding",
-    "lab_pleural_embedding",
-    "lab_csf_embedding",
-    "lab_bone_marrow_embedding",
-    "lab_joint_fluid_embedding",
-    "lab_stool_embedding",
-}
-
-_RADIOLOGY_EMBEDDINGS = {"radiology_embedding"}
-
-_MICRO_EMBEDDINGS = {
-    "micro_blood_culture_routine_embedding",
-    "micro_blood_bottle_gram_stain_embedding",
-    "micro_urine_culture_embedding",
-    "micro_urine_viral_embedding",
-    "micro_urinary_antigens_embedding",
-    "micro_respiratory_non_invasive_embedding",
-    "micro_respiratory_invasive_embedding",
-    "micro_respiratory_afb_embedding",
-    "micro_respiratory_viral_embedding",
-    "micro_respiratory_pcp_legionella_embedding",
-    "micro_gram_stain_respiratory_embedding",
-    "micro_gram_stain_wound_tissue_embedding",
-    "micro_gram_stain_csf_embedding",
-    "micro_wound_culture_embedding",
-    "micro_hardware_and_lines_culture_embedding",
-    "micro_pleural_culture_embedding",
-    "micro_peritoneal_culture_embedding",
-    "micro_joint_fluid_culture_embedding",
-    "micro_fluid_culture_embedding",
-    "micro_bone_marrow_culture_embedding",
-    "micro_csf_culture_embedding",
-    "micro_fungal_tissue_wound_embedding",
-    "micro_fungal_respiratory_embedding",
-    "micro_fungal_fluid_embedding",
-    "micro_mrsa_staph_screen_embedding",
-    "micro_resistance_screen_embedding",
-    "micro_cdiff_embedding",
-    "micro_stool_bacterial_embedding",
-    "micro_stool_parasitology_embedding",
-    "micro_herpesvirus_serology_embedding",
-    "micro_hepatitis_hiv_embedding",
-    "micro_syphilis_serology_embedding",
-    "micro_misc_serology_embedding",
-    "micro_herpesvirus_culture_antigen_embedding",
-    "micro_gc_chlamydia_sti_embedding",
-    "micro_vaginal_genital_flora_embedding",
-    "micro_throat_strep_embedding",
-}
-
-
 class Mimic4DataLoader(DataLoader):
     """MIMIC-IV–specific dataset loader."""
+
+    _EXPECTED_COLUMNS: List[str] = [
+        "subject_id",
+        "hadm_id",
+        "split",
+        "y1_mortality",
+        "y2_readmission",
+        "demographic_vec",
+        "diag_history_embedding",
+        "discharge_history_embedding",
+        "triage_embedding",
+        "chief_complaint_embedding",
+        "lab_blood_gas_embedding",
+        "lab_blood_chemistry_embedding",
+        "lab_blood_hematology_embedding",
+        "lab_urine_chemistry_embedding",
+        "lab_urine_hematology_embedding",
+        "lab_other_body_fluid_chemistry_embedding",
+        "lab_other_body_fluid_hematology_embedding",
+        "lab_ascites_embedding",
+        "lab_pleural_embedding",
+        "lab_csf_embedding",
+        "lab_bone_marrow_embedding",
+        "lab_joint_fluid_embedding",
+        "lab_stool_embedding",
+        "radiology_embedding",
+        "micro_blood_culture_routine_embedding",
+        "micro_blood_bottle_gram_stain_embedding",
+        "micro_urine_culture_embedding",
+        "micro_urine_viral_embedding",
+        "micro_urinary_antigens_embedding",
+        "micro_respiratory_non_invasive_embedding",
+        "micro_respiratory_invasive_embedding",
+        "micro_respiratory_afb_embedding",
+        "micro_respiratory_viral_embedding",
+        "micro_respiratory_pcp_legionella_embedding",
+        "micro_gram_stain_respiratory_embedding",
+        "micro_gram_stain_wound_tissue_embedding",
+        "micro_gram_stain_csf_embedding",
+        "micro_wound_culture_embedding",
+        "micro_hardware_and_lines_culture_embedding",
+        "micro_pleural_culture_embedding",
+        "micro_peritoneal_culture_embedding",
+        "micro_joint_fluid_culture_embedding",
+        "micro_fluid_culture_embedding",
+        "micro_bone_marrow_culture_embedding",
+        "micro_csf_culture_embedding",
+        "micro_fungal_tissue_wound_embedding",
+        "micro_fungal_respiratory_embedding",
+        "micro_fungal_fluid_embedding",
+        "micro_mrsa_staph_screen_embedding",
+        "micro_resistance_screen_embedding",
+        "micro_cdiff_embedding",
+        "micro_stool_bacterial_embedding",
+        "micro_stool_parasitology_embedding",
+        "micro_herpesvirus_serology_embedding",
+        "micro_hepatitis_hiv_embedding",
+        "micro_syphilis_serology_embedding",
+        "micro_misc_serology_embedding",
+        "micro_herpesvirus_culture_antigen_embedding",
+        "micro_gc_chlamydia_sti_embedding",
+        "micro_vaginal_genital_flora_embedding",
+        "micro_throat_strep_embedding",
+    ]
+
+    _HISTORY_TRIAGE_EMBEDDINGS = {
+        "diag_history_embedding",
+        "discharge_history_embedding",
+        "triage_embedding",
+        "chief_complaint_embedding",
+    }
+
+    _LAB_EMBEDDINGS = {
+        "lab_blood_gas_embedding",
+        "lab_blood_chemistry_embedding",
+        "lab_blood_hematology_embedding",
+        "lab_urine_chemistry_embedding",
+        "lab_urine_hematology_embedding",
+        "lab_other_body_fluid_chemistry_embedding",
+        "lab_other_body_fluid_hematology_embedding",
+        "lab_ascites_embedding",
+        "lab_pleural_embedding",
+        "lab_csf_embedding",
+        "lab_bone_marrow_embedding",
+        "lab_joint_fluid_embedding",
+        "lab_stool_embedding",
+    }
+
+    _RADIOLOGY_EMBEDDINGS = {"radiology_embedding"}
+
+    _MICRO_EMBEDDINGS = {
+        "micro_blood_culture_routine_embedding",
+        "micro_blood_bottle_gram_stain_embedding",
+        "micro_urine_culture_embedding",
+        "micro_urine_viral_embedding",
+        "micro_urinary_antigens_embedding",
+        "micro_respiratory_non_invasive_embedding",
+        "micro_respiratory_invasive_embedding",
+        "micro_respiratory_afb_embedding",
+        "micro_respiratory_viral_embedding",
+        "micro_respiratory_pcp_legionella_embedding",
+        "micro_gram_stain_respiratory_embedding",
+        "micro_gram_stain_wound_tissue_embedding",
+        "micro_gram_stain_csf_embedding",
+        "micro_wound_culture_embedding",
+        "micro_hardware_and_lines_culture_embedding",
+        "micro_pleural_culture_embedding",
+        "micro_peritoneal_culture_embedding",
+        "micro_joint_fluid_culture_embedding",
+        "micro_fluid_culture_embedding",
+        "micro_bone_marrow_culture_embedding",
+        "micro_csf_culture_embedding",
+        "micro_fungal_tissue_wound_embedding",
+        "micro_fungal_respiratory_embedding",
+        "micro_fungal_fluid_embedding",
+        "micro_mrsa_staph_screen_embedding",
+        "micro_resistance_screen_embedding",
+        "micro_cdiff_embedding",
+        "micro_stool_bacterial_embedding",
+        "micro_stool_parasitology_embedding",
+        "micro_herpesvirus_serology_embedding",
+        "micro_hepatitis_hiv_embedding",
+        "micro_syphilis_serology_embedding",
+        "micro_misc_serology_embedding",
+        "micro_herpesvirus_culture_antigen_embedding",
+        "micro_gc_chlamydia_sti_embedding",
+        "micro_vaginal_genital_flora_embedding",
+        "micro_throat_strep_embedding",
+    }
 
     def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
         schema = parquet_file.schema_arrow
@@ -201,16 +200,16 @@ class Mimic4DataLoader(DataLoader):
             index_map[col] = (offset, offset + width)
             offset += width
 
-        missing_expected = set(_EXPECTED_COLUMNS) - set(columns)
+        missing_expected = set(self._EXPECTED_COLUMNS) - set(columns)
         if missing_expected:
             raise SchemaError(
                 f"Missing expected columns {sorted(missing_expected)} per PREPROCESSING_DATA_MODEL.md Section 3.12"
             )
 
-        history_count = len(set(embedding_columns) & _HISTORY_TRIAGE_EMBEDDINGS)
-        lab_count = len(set(embedding_columns) & _LAB_EMBEDDINGS)
-        radiology_count = len(set(embedding_columns) & _RADIOLOGY_EMBEDDINGS)
-        micro_count = len(set(embedding_columns) & _MICRO_EMBEDDINGS)
+        history_count = len(set(embedding_columns) & self._HISTORY_TRIAGE_EMBEDDINGS)
+        lab_count = len(set(embedding_columns) & self._LAB_EMBEDDINGS)
+        radiology_count = len(set(embedding_columns) & self._RADIOLOGY_EMBEDDINGS)
+        micro_count = len(set(embedding_columns) & self._MICRO_EMBEDDINGS)
 
         if len(embedding_columns) != 55 or (
             history_count != 4 or lab_count != 13 or radiology_count != 1 or micro_count != 37
@@ -246,10 +245,10 @@ class Mimic4DataLoader(DataLoader):
 
         return float(pos_weight_y1), float(pos_weight_y2)
 
-    @staticmethod
-    def _get_expected_columns() -> List[str]:
+    @classmethod
+    def _get_expected_columns(cls) -> List[str]:
         """Return the ordered list of expected dataset columns per PREPROCESSING_DATA_MODEL.md Section 3.12."""
-        return list(_EXPECTED_COLUMNS)
+        return list(cls._EXPECTED_COLUMNS)
 
     @staticmethod
     def _validate_column_order(schema: pa.Schema, expected_columns: List[str]) -> None:
