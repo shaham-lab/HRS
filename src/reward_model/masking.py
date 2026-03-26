@@ -114,7 +114,6 @@ class MaskingSchedule:
         all_slots: List[str] = list(feature_index_map.keys())
         self._always_visible_slots: List[str] = all_slots[:num_always_visible]
         self._maskable_slots: List[str] = all_slots[num_always_visible:]
-        self._slot_names: List[str] = self._maskable_slots
         self._M: int = len(self._maskable_slots)
 
     # ------------------------------------------------------------------
@@ -215,5 +214,5 @@ class MaskingSchedule:
         return masked
 
     def apply_no_mask(self, X: torch.Tensor) -> torch.Tensor:
-        """Return X unchanged (no masking applied)."""
-        return X
+        """Return a clone of X with no masking applied."""
+        return X.clone()

@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, Tuple
+from typing import Any, Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -65,7 +65,8 @@ def _load_model_from_checkpoint(
           byte-range in the flat input tensor).
         - *config_snapshot* — Raw ``Dict`` from ``config.model_dump()`` as
            saved by ``train.py``; authoritative for architecture keys
-           ``LAYER_WIDTHS``, ``DROPOUT_RATE``, and ``ACTIVATION``.
+           ``LAYER_WIDTHS``, ``DROPOUT_RATES``, ``ACTIVATION``, and
+           ``NUM_TARGETS``.
     """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
     config_snapshot: Dict = ckpt["config"]
@@ -75,8 +76,9 @@ def _load_model_from_checkpoint(
     model = RewardModel(
         input_dim=input_dim,
         layer_widths=config_snapshot["LAYER_WIDTHS"],
-        dropout_rate=config_snapshot["DROPOUT_RATE"],
+        dropout_rates=config_snapshot["DROPOUT_RATES"],
         activation=config_snapshot["ACTIVATION"],
+        num_targets=config_snapshot.get("NUM_TARGETS", 2),
     )
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
@@ -97,13 +99,13 @@ def _run_forward_pass(
     dataset: ParquetDataset,
     device: torch.device,
     batch_size: int,
-) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+) -> Tuple[List[np.ndarray], List[np.ndarray]]:
     """Run a full forward pass over *dataset* with ``torch.no_grad()``.
 
     Iterates the dataset in a ``DataLoader`` with ``num_workers=0`` (no worker
     processes) — calibration is single-pass on a single GPU and spawning
     workers adds overhead without benefit.  Accumulates raw (un-calibrated)
-    logits for both heads together with ground-truth labels.  No masking is
+    logits for all T heads together with ground-truth labels.  No masking is
     applied — the full feature vector is passed to the model.
 
     Args:
@@ -116,41 +118,31 @@ def _run_forward_pass(
             ``config.BATCH_SIZE_PER_GPU`` from ``run()``.
 
     Returns:
-        Four-tuple of flat NumPy arrays, each of shape ``(N,)`` where *N* is
-        the total number of rows in *dataset*:
+        Two-tuple of lists, each of length T (number of model heads):
 
-        - *logits_y1* — Raw logits for the mortality head (Y1), float32.
-        - *logits_y2* — Raw logits for the readmission head (Y2), float32.
-        - *y1* — Ground-truth mortality labels (int8, values 0 or 1).
-        - *y2* — Ground-truth readmission labels (float32, ``NaN`` for
-           deceased patients).
+        - *logits_list* — Raw logits per target, each a flat NumPy array of
+          shape ``(N,)``, float32.
+        - *labels_list* — Ground-truth labels per target, each a flat NumPy
+          array of shape ``(N,)``, float32, with NaN where a target is not
+          applicable for a sample.
     """
+    num_targets = len(model.heads)
     dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=False)
 
-    all_logits_y1 = []
-    all_logits_y2 = []
-    all_y1 = []
-    all_y2 = []
+    all_logits: List[List[np.ndarray]] = [[] for _ in range(num_targets)]
+    all_labels: List[List[np.ndarray]] = [[] for _ in range(num_targets)]
 
     with torch.no_grad():
-        for X, y1, y2 in dataloader:
-            X = X.to(device)
-            y1_t = y1.to(device)
-            y2_t = y2.to(device)
+        for batch in dataloader:
+            X = batch[0].to(device)
+            model_outputs = model(X)
+            for i in range(num_targets):
+                all_logits[i].append(model_outputs[i].detach().cpu().numpy().reshape(-1))
+                all_labels[i].append(batch[i + 1].numpy().reshape(-1))
 
-            logits_y1, logits_y2 = model(X)
-
-            all_logits_y1.append(logits_y1.detach().cpu().numpy().reshape(-1))
-            all_logits_y2.append(logits_y2.detach().cpu().numpy().reshape(-1))
-            all_y1.append(y1_t.detach().cpu().numpy().reshape(-1))
-            all_y2.append(y2_t.detach().cpu().numpy().reshape(-1))
-
-    logits_y1_np = np.concatenate(all_logits_y1, axis=0)
-    logits_y2_np = np.concatenate(all_logits_y2, axis=0)
-    y1_np = np.concatenate(all_y1, axis=0)
-    y2_np = np.concatenate(all_y2, axis=0)
-
-    return logits_y1_np, logits_y2_np, y1_np, y2_np
+    logits_list = [np.concatenate(all_logits[i], axis=0) for i in range(num_targets)]
+    labels_list = [np.concatenate(all_labels[i], axis=0) for i in range(num_targets)]
+    return logits_list, labels_list
 
 
 # ---------------------------------------------------------------------------
@@ -177,8 +169,9 @@ def _fit_temperature(
         labels: Binary ground-truth labels of shape ``(N,)`` with values in
             ``{0, 1}``.
         mask: Boolean array of shape ``(N,)`` selecting which samples to
-            include.  For Y1 this is all-True (full dev split); for Y2 this
-            is the survivor mask ``~np.isnan(y2)``.
+            include.  For targets without NaN labels this is all-True (full
+            dev split); for targets with NaN labels this is
+            ``~np.isnan(labels)``.
 
     Returns:
         Fitted scalar temperature ``T``, clamped to a minimum of
@@ -216,10 +209,10 @@ def _compute_ece_from_logits(
 ) -> float:
     """Compute Expected Calibration Error (ECE) after applying temperature *T*.
 
-    Uses equal-width probability binning (15 bins) on the masked subset of
-    samples.  Probabilities are clipped to ``[0, 1]`` before binning and the
-    rightmost bin is closed on both sides so that samples with probability
-    exactly ``1.0`` are not silently excluded.  Intended for logging pre- and
+    Uses equal-mass (adaptive) probability binning via ``np.percentile`` on
+    the masked subset of samples.  Bin edges are derived from the empirical
+    distribution of predicted probabilities, so each bin contains
+    approximately the same number of samples.  Intended for logging pre- and
     post-calibration ECE for audit; not used in the optimisation itself.
 
     Args:
@@ -232,23 +225,31 @@ def _compute_ece_from_logits(
             include in the ECE computation.
 
     Returns:
-        ECE as a float in ``[0, 1]``.
+        ECE as a float in ``[0, 1]``, or ``nan`` if ``mask`` selects no samples.
     """
+    if not np.any(mask):
+        return float("nan")
     masked_logits = logits[mask]
     masked_labels = labels[mask]
-
     probs = 1.0 / (1.0 + np.exp(-masked_logits / T))
 
-    bin_edges = np.linspace(0.0, 1.0, num=16)
+    n_bins = 10
+    bin_edges = np.percentile(probs, np.linspace(0, 100, n_bins + 1))
+    bin_edges[0] = 0.0
+    bin_edges[-1] = 1.0
+    bin_edges = np.unique(bin_edges)
+    inds = np.searchsorted(bin_edges[:-1], probs, side="right") - 1
+    inds = np.clip(inds, 0, len(bin_edges) - 2)
+
     ece = 0.0
+    total = len(probs)
     for i in range(len(bin_edges) - 1):
-        lower, upper = bin_edges[i], bin_edges[i + 1]
-        in_bin = (probs >= lower) & (probs < upper) if i < len(bin_edges) - 2 else (probs >= lower) & (probs <= upper)
+        in_bin = inds == i
         if not np.any(in_bin):
             continue
-        conf = probs[in_bin].mean()
-        acc = masked_labels[in_bin].mean()
-        ece += np.abs(conf - acc) * (np.sum(in_bin) / len(probs))
+        avg_conf = probs[in_bin].mean()
+        avg_acc = masked_labels[in_bin].mean()
+        ece += (np.sum(in_bin) / total) * abs(avg_conf - avg_acc)
     return float(ece)
 
 
@@ -267,12 +268,11 @@ def run(config: RewardModelConfig) -> None:
        checkpoint config snapshot (not the current YAML).
     2. Load the dev split from ``DATASET_PATH`` via ``Mimic4DataLoader(config).load()``.
     3. Run a full forward pass with ``torch.no_grad()`` to collect raw logits
-       for Y1 and Y2.
-    4. Fit ``T_y1`` on the full dev split via L-BFGS on NLL.
-    5. Fit ``T_y2`` on the survivor subset (``~isnan(y2)`` rows) via L-BFGS
-       on NLL.
-    6. Log pre- and post-calibration ECE for both heads for audit.
-    7. Write ``{'T_y1': float(T_y1), 'T_y2': float(T_y2)}`` to
+       for all T heads.
+    4. For each target i in range(T): construct the valid-sample mask
+       (``~np.isnan(labels_list[i])``), fit ``T_i`` via L-BFGS on NLL.
+    5. Log pre- and post-calibration ECE for all heads for audit.
+    6. Write ``{f"T_{i}": float(T_i) for i in range(T)}`` to
        ``CALIBRATION_PARAMS_PATH`` as JSON.
 
     Config keys used: ``CHECKPOINT_DIR``, ``DATASET_PATH``,
@@ -284,39 +284,31 @@ def run(config: RewardModelConfig) -> None:
     device = get_device(local_rank=0)
     checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
     model, feature_index_map, config_snapshot = _load_model_from_checkpoint(checkpoint_path, device)
+    num_targets = config_snapshot.get("NUM_TARGETS", 2)
 
     bundle = Mimic4DataLoader(config).load()
-    logits_y1, logits_y2, y1, y2 = _run_forward_pass(
+    logits_list, labels_list = _run_forward_pass(
         model,
         bundle.dev_dataset,
         device,
         config.BATCH_SIZE_PER_GPU,
     )
 
-    survivor_mask = ~np.isnan(y2)
-    full_mask = np.ones(len(y1), dtype=bool)
+    temperatures: List[float] = []
+    for i in range(num_targets):
+        mask_i = ~np.isnan(labels_list[i])
+        pre_ece = _compute_ece_from_logits(logits_list[i], labels_list[i], 1.0, mask_i)
+        logger.info("Pre-calibration ECE — target %d: %.6f", i, pre_ece)
+        T_i = _fit_temperature(logits_list[i], labels_list[i], mask_i)
+        temperatures.append(T_i)
+        post_ece = _compute_ece_from_logits(logits_list[i], labels_list[i], T_i, mask_i)
+        logger.info("Post-calibration ECE — target %d: %.6f (T=%.6f)", i, post_ece, T_i)
 
-    pre_ece_y1 = _compute_ece_from_logits(logits_y1, y1, 1.0, full_mask)
-    pre_ece_y2 = _compute_ece_from_logits(logits_y2, y2, 1.0, survivor_mask)
-    logger.info("Pre-calibration ECE — Y1: %.6f, Y2: %.6f", pre_ece_y1, pre_ece_y2)
-
-    T_y1 = _fit_temperature(logits_y1, y1, full_mask)
-    T_y2 = _fit_temperature(logits_y2, y2, survivor_mask)
-
-    post_ece_y1 = _compute_ece_from_logits(logits_y1, y1, T_y1, full_mask)
-    post_ece_y2 = _compute_ece_from_logits(logits_y2, y2, T_y2, survivor_mask)
-    logger.info("Post-calibration ECE — Y1: %.6f, Y2: %.6f", post_ece_y1, post_ece_y2)
-
-    params = {"T_y1": T_y1, "T_y2": T_y2}
+    params = {f"T_{i}": float(T_i) for i, T_i in enumerate(temperatures)}
     calibration_path = Path(config.CALIBRATION_PARAMS_PATH)
     calibration_path.parent.mkdir(parents=True, exist_ok=True)
     calibration_path.write_text(json.dumps(params))
-    logger.info(
-        "Wrote calibration parameters to %s (T_y1=%.6f, T_y2=%.6f)",
-        calibration_path,
-        T_y1,
-        T_y2,
-    )
+    logger.info("Wrote calibration parameters to %s: %s", calibration_path, params)
 
 
 def main() -> int:

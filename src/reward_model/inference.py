@@ -12,7 +12,7 @@ Usage::
         checkpoint_path="data/reward_model/frozen_model.pt",
         calibration_params_path="data/reward_model/calibration_params.json",
     )
-    p_mortality, p_readmission = inf.predict(X)
+    probs = inf.predict(X)
 
 See Detailed Design §5 (inference.py) and Architecture §8.7
 (Post-Training Calibration).
@@ -20,7 +20,7 @@ See Detailed Design §5 (inference.py) and Architecture §8.7
 
 import json
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import torch
 
@@ -37,7 +37,7 @@ class RewardModelInference:
     step.  No gradient computation ever occurs in this class.
 
     The constructor loads the frozen model weights, feature index map
-    snapshot, and calibration parameters ``T_y1`` and ``T_y2`` from disk.
+    snapshot, and calibration parameters ``T_0 … T_{T-1}`` from disk.
     It moves the model to the target device, calls ``model.eval()``, and
     calls ``requires_grad_(False)`` on all model parameters in
     ``__init__``, and uses ``torch.no_grad()`` in ``predict()`` to
@@ -61,15 +61,16 @@ class RewardModelInference:
         ``config/reward_model.yaml`` is required.
 
         If the exported artefact at ``checkpoint_path`` already embeds
-        calibration parameters, ``calibration_params_path`` is ignored and
-        the embedded values are used instead.
+        calibration parameters (detected by the presence of ``T_0``),
+        ``calibration_params_path`` is ignored and the embedded values are
+        used instead.
 
         Args:
             checkpoint_path: Path to ``best_model.pt`` written by
                 ``train.py``, or to the self-contained ``frozen_model.pt``
                 artefact written by ``export_model.py``.
             calibration_params_path: Path to ``calibration_params.json``
-                containing ``{'T_y1': float, 'T_y2': float}``.  Used only
+                containing ``{'T_0': float, 'T_1': float, ...}``.  Used only
                 when ``checkpoint_path`` does not embed calibration
                 parameters.
             device: Target device for the loaded model.  Defaults to
@@ -80,24 +81,35 @@ class RewardModelInference:
 
         ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
         self._feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
-        input_dim = ckpt.get("input_dim") or sum(end - start for start, end in self._feature_index_map.values())
+        input_dim = ckpt.get("input_dim") or sum(
+            end - start for start, end in self._feature_index_map.values()
+        )
 
-        if "T_y1" in ckpt and "T_y2" in ckpt:
-            self._T_y1 = max(float(ckpt["T_y1"]), 1e-8)
-            self._T_y2 = max(float(ckpt["T_y2"]), 1e-8)
+        if "T_0" in ckpt:
+            # Exported artefact format: calibration temperatures embedded directly.
             config_snapshot = ckpt["config_snapshot"]
+            num_targets = config_snapshot.get("NUM_TARGETS", 2)
+            self._temperatures: List[float] = [
+                max(float(ckpt[f"T_{i}"]), 1e-8)
+                for i in range(num_targets)
+            ]
         else:
+            # Train.py checkpoint format: separate calibration JSON.
             with open(calibration_params_path, "r") as f:
                 calib = json.load(f)
-            self._T_y1 = max(float(calib["T_y1"]), 1e-8)
-            self._T_y2 = max(float(calib["T_y2"]), 1e-8)
             config_snapshot = ckpt["config"]
+            num_targets = config_snapshot.get("NUM_TARGETS", 2)
+            self._temperatures = [
+                max(float(calib[f"T_{i}"]), 1e-8)
+                for i in range(num_targets)
+            ]
 
         model = RewardModel(
             input_dim=input_dim,
             layer_widths=config_snapshot["LAYER_WIDTHS"],
-            dropout_rate=config_snapshot["DROPOUT_RATE"],
+            dropout_rates=config_snapshot["DROPOUT_RATES"],
             activation=config_snapshot["ACTIVATION"],
+            num_targets=num_targets,
         )
         raw_state_dict = ckpt["model_state_dict"]
         if any(k.startswith("module.") for k in raw_state_dict.keys()):
@@ -113,7 +125,10 @@ class RewardModelInference:
         self._model = model
         self._device = device
 
-        logger.info("Loaded calibration temperatures: T_y1=%.6f, T_y2=%.6f", self._T_y1, self._T_y2)
+        logger.info(
+            "Loaded calibration temperatures: %s",
+            {f"T_{i}": t for i, t in enumerate(self._temperatures)},
+        )
 
     # ------------------------------------------------------------------
     # Public API
@@ -122,11 +137,11 @@ class RewardModelInference:
     def predict(
         self,
         X: torch.Tensor,
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
-        """Return calibrated mortality and readmission probabilities.
+    ) -> Tuple[torch.Tensor, ...]:
+        """Return calibrated probabilities for all T targets.
 
         Runs a forward pass under ``torch.no_grad()``.  Temperature scaling
-        is applied to both heads: ``p = sigmoid(logit / T)``.
+        is applied to each head: ``p = sigmoid(logit / T)``.
         ``T`` values are clamped to a minimum of ``1e-8`` before division
         to prevent numerical overflow.
 
@@ -136,19 +151,15 @@ class RewardModelInference:
                of unavailable feature slots) is the caller's responsibility.
 
         Returns:
-            Two-tuple of tensors, each of shape ``(N, 1)``:
-
-            - *p_mortality* — Calibrated ``P(in-hospital mortality)`` from
-              ``sigmoid(logit_y1 / T_y1)``.
-            - *p_readmission* — Calibrated
-              ``P(30-day readmission | survived)`` from
-              ``sigmoid(logit_y2 / T_y2)``.
+            Tuple of T tensors, each of shape ``(N, 1)``, one per target head.
+            ``p[i] = sigmoid(logit_i / T_i)``.
         """
         with torch.no_grad():
-            logits_y1, logits_y2 = self._model(X)
-            p_mortality = torch.sigmoid(logits_y1 / self._T_y1)
-            p_readmission = torch.sigmoid(logits_y2 / self._T_y2)
-        return p_mortality, p_readmission
+            model_output = self._model(X)
+            return tuple(
+                torch.sigmoid(logits / T)
+                for logits, T in zip(model_output, self._temperatures)
+            )
 
     def get_feature_index_map(self) -> Dict[str, Tuple[int, int]]:
         """Return the feature index map snapshot loaded from the checkpoint.

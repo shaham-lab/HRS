@@ -52,19 +52,18 @@ def _build_export_dict(
       dict keys, since no live model object is available at export time).
     - *feature_index_map* — ``Dict[str, Tuple[int, int]]`` snapshot from the
       checkpoint; maps feature column name to ``(start, end)`` index range.
-    - *T_y1* — Scalar calibration temperature for the mortality head (Y1).
-    - *T_y2* — Scalar calibration temperature for the readmission head (Y2).
+    - *T_0, T_1, …* — Scalar calibration temperature per target head.
     - *config_snapshot* — Architecture sub-dict containing only
-      ``LAYER_WIDTHS``, ``DROPOUT_RATE``, and ``ACTIVATION``.  Input
-      dimensionality is stored separately as its own top-level key in
-      the export dict.
+      ``LAYER_WIDTHS``, ``DROPOUT_RATES``, ``ACTIVATION``, and
+      ``NUM_TARGETS``.  Input dimensionality is stored separately as its own
+      top-level key in the export dict.
     - *input_dim* — Input dimensionality derived from the feature index map
       (sum of all slot widths).
 
     Args:
         checkpoint_path: Absolute path to ``best_model.pt``.
         calibration_params_path: Absolute path to ``calibration_params.json``
-            containing ``{'T_y1': float, 'T_y2': float}``.
+            containing ``{'T_0': float, 'T_1': float, ...}``.
 
     Returns:
         Dict ready to be written with ``torch.save``.
@@ -83,17 +82,23 @@ def _build_export_dict(
         model_state_dict = raw_state_dict
 
     config_snapshot = ckpt["config"]
+    num_targets = config_snapshot.get("NUM_TARGETS", 2)
     config_snapshot = {
         "LAYER_WIDTHS": config_snapshot["LAYER_WIDTHS"],
-        "DROPOUT_RATE": config_snapshot["DROPOUT_RATE"],
+        "DROPOUT_RATES": config_snapshot["DROPOUT_RATES"],
         "ACTIVATION": config_snapshot["ACTIVATION"],
+        "NUM_TARGETS": num_targets,
+    }
+
+    temperatures = {
+        f"T_{i}": float(calib[f"T_{i}"])
+        for i in range(num_targets)
     }
 
     return {
         "model_state_dict": model_state_dict,
         "feature_index_map": feature_index_map,
-        "T_y1": float(calib["T_y1"]),
-        "T_y2": float(calib["T_y2"]),
+        **temperatures,
         "config_snapshot": config_snapshot,
         "input_dim": input_dim,
     }

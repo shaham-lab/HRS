@@ -62,7 +62,7 @@ def compute_loss(
     component_losses: List[torch.Tensor] = []
 
     for logits, labels, pw, w in zip(logits_list, labels_list, pos_weights, loss_weights):
-        mask = ~torch.isnan(labels)
+        mask = ~torch.isnan(labels.view(-1))
         if not mask.any():
             loss_i = torch.tensor(0.0, device=device)
         else:
