@@ -9,18 +9,37 @@ applies the correct masking mode to each mini-batch.  Three modes:
   none        — return X unchanged
 
 The probability of each mode evolves via a sigmoid crossover schedule driven by
-sigmoid_crossover() in reward_model_utils.py.
+``sigmoid_crossover()`` defined in this module.
 
 See Detailed Design §5 (masking.py) and §6.3 (adversarial masking under DDP).
 """
 
 import logging
+import math
 from typing import Dict, Set, Tuple
 
 import numpy as np
 import torch
 
-from src.reward_model.reward_model_utils import sigmoid_crossover
+
+def sigmoid_crossover(
+    epoch: int,
+    total_epochs: int,
+    start_ratios: Dict[str, float],
+    end_ratios: Dict[str, float],
+    midpoint: float,
+) -> Tuple[float, float, float]:
+    """Compute masking probabilities for the given epoch using a sigmoid crossover."""
+    clamped_epoch = max(0, min(epoch, total_epochs))
+    scale = max(total_epochs * 0.1, 1.0)
+    progress = 1.0 / (1.0 + math.exp(-(clamped_epoch - midpoint) / scale))
+    probs = []
+    for key in ("random", "adversarial", "none"):
+        start = start_ratios[key]
+        end = end_ratios[key]
+        probs.append(start + (end - start) * progress)
+    return (probs[0], probs[1], probs[2])
+
 
 logger = logging.getLogger(__name__)
 

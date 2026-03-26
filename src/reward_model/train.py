@@ -41,13 +41,23 @@ from src.reward_model.reward_model_utils import (
     DatasetBundle,
     RewardModelConfig,
     RowGroupBlockSampler,
-    broadcast_tensor,
     get_device,
     load_and_validate_config,
-    unwrap_ddp,
 )
 
 logger = logging.getLogger(__name__)
+
+
+def broadcast_tensor(tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
+    """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        torch.distributed.broadcast(tensor, src=src_rank)
+    return tensor
+
+
+def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
+    """Unwrap a DDP-wrapped model to its underlying module."""
+    return model.module if hasattr(model, "module") else model
 
 
 # ---------------------------------------------------------------------------

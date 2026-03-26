@@ -124,12 +124,12 @@ The process group is initialised with the `nccl` backend at the start of `train.
 | Function / Class | Purpose |
 |------------------|---------|
 | `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
-| `build_feature_index_map(columns)` | Construct `{col_name: (start, end)}` from ordered column list; see Section 4 |
-| `compute_pos_weights(df_train)` | Compute `pos_weight_y1` and `pos_weight_y2` from training split; excludes deceased rows for Y2 |
-| `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
-| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly |
-| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group |
+| `build_feature_index_map(columns)` | Construct `{col_name: (start, end)}` from ordered column list; see Section 4 (implemented in `mimic4_data_loader.py`) |
+| `compute_pos_weights(df_train)` | Compute `pos_weight_y1` and `pos_weight_y2` from training split; excludes deceased rows for Y2 (implemented in `mimic4_data_loader.py`) |
+| `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
+| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `train.py`) |
+| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (implemented in `train.py`) |
 | **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
 | **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
 | **`DatasetBundle(NamedTuple)`** | Class-only module `dataset_bundle.py`. Bundles `train/dev/test` `ParquetDataset` instances plus metadata. Re-exported by `reward_model_utils.py`. |
@@ -207,7 +207,7 @@ Implements the `MaskingSchedule` class, which maintains the curriculum state and
 
 The constructor accepts the `feature_index_map`, curriculum schedule parameters (`start_ratios`, `end_ratios`, `transition_shape`, `transition_midpoint_epoch`, `total_epochs`), and `k` (features zeroed per sample in random mode, default 1).
 
-`get_mode_probabilities(epoch)` delegates to `sigmoid_crossover()` in `reward_model_utils.py` and returns the current `(p_random, p_adversarial, p_none)` tuple for the given epoch.
+`get_mode_probabilities(epoch)` delegates to `sigmoid_crossover()` defined in `masking.py` and returns the current `(p_random, p_adversarial, p_none)` tuple for the given epoch.
 
 `sample_mode(epoch)` draws a masking mode string — `'random'`, `'adversarial'`, or `'none'` — according to the current probabilities.
 
