@@ -5,8 +5,6 @@
 #SBATCH --cpus-per-task=4
 #SBATCH --mem=24G
 #SBATCH --time=04:00:00
-#SBATCH --output=logs/explore_%x_%j.out
-#SBATCH --error=logs/explore_%x_%j.err
 
 # SLURM job that executes a single exploration notebook on one A100 GPU.
 # Usage:
@@ -27,12 +25,13 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
+LOG_DIR="${REPO_ROOT}/logs"
 
 NOTEBOOK_ABS="$(realpath "$NOTEBOOK_PATH")"
 NOTEBOOK_NAME="$(basename "${NOTEBOOK_ABS}" .ipynb)"
 
 cd "${REPO_ROOT}"
-mkdir -p logs notebooks/mimic4/executed
+mkdir -p "${LOG_DIR}" notebooks/mimic4/executed
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate hrs
