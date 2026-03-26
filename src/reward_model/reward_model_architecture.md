@@ -260,7 +260,7 @@ At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_
 
 #### Checkpoint manager and feature-index validation
 
-Checkpointing and resume logic is encapsulated behind a `CheckpointManager` helper. It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from the current `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
+Checkpointing and resume logic is being encapsulated behind a `CheckpointManager` helper (a small refactor of the existing inline `_save_checkpoint()` / `_find_latest_checkpoint()` helpers in `train.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` wraps the current equality check between the checkpoint snapshot and the freshly derived map from `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
 
 ### 8.3 Multi-GPU Distributed Training
 
