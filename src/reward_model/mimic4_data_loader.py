@@ -143,80 +143,6 @@ _MICRO_EMBEDDINGS = {
 }
 
 
-def build_feature_index_map(columns: Iterable[str]) -> Dict[str, Tuple[int, int]]:
-    """Derive feature index ranges from ordered dataset columns."""
-    feature_columns: List[str] = []
-    for name in columns:
-        if name in {"subject_id", "hadm_id", "split", "y1_mortality", "y2_readmission"}:
-            continue
-        feature_columns.append(name)
-
-    if "demographic_vec" not in feature_columns:
-        raise SchemaError(
-            "demographic_vec column missing from dataset; expected per PREPROCESSING_DATA_MODEL.md Section 3.12"
-        )
-
-    offset = 0
-    index_map: Dict[str, Tuple[int, int]] = {}
-    embedding_columns: List[str] = []
-
-    for col in feature_columns:
-        if col == "demographic_vec":
-            width = 8
-        elif col.endswith("_embedding"):
-            width = 768
-            embedding_columns.append(col)
-        else:
-            raise SchemaError(
-                f"Unexpected feature column '{col}' encountered while building index map; "
-                "expected only demographic_vec and *_embedding columns per PREPROCESSING_DATA_MODEL.md Section 3.12"
-            )
-        index_map[col] = (offset, offset + width)
-        offset += width
-
-    missing_expected = set(_EXPECTED_COLUMNS) - set(columns)
-    if missing_expected:
-        raise SchemaError(
-            f"Missing expected columns {sorted(missing_expected)} per PREPROCESSING_DATA_MODEL.md Section 3.12"
-        )
-
-    history_count = len(set(embedding_columns) & _HISTORY_TRIAGE_EMBEDDINGS)
-    lab_count = len(set(embedding_columns) & _LAB_EMBEDDINGS)
-    radiology_count = len(set(embedding_columns) & _RADIOLOGY_EMBEDDINGS)
-    micro_count = len(set(embedding_columns) & _MICRO_EMBEDDINGS)
-
-    if len(embedding_columns) != 55 or (
-        history_count != 4 or lab_count != 13 or radiology_count != 1 or micro_count != 37
-    ):
-        raise SchemaError(
-            "Embedding column breakdown mismatch — expected 55 embedding columns with counts "
-            "(history/triage=4, lab=13, radiology=1, microbiology=37) as defined in "
-            "PREPROCESSING_DATA_MODEL.md Section 3.12"
-        )
-
-    return index_map
-
-
-def compute_pos_weights(df_train: pd.DataFrame) -> Tuple[float, float]:
-    """Compute positive class weights for Y1 (all) and Y2 (survivors)."""
-    y1 = df_train["y1_mortality"].astype(float)
-    pos_y1 = float((y1 == 1).sum())
-    neg_y1 = float((y1 == 0).sum())
-    if pos_y1 == 0 or neg_y1 == 0:
-        raise SchemaError("y1_mortality must contain both positive and negative examples")
-    pos_weight_y1 = neg_y1 / pos_y1
-
-    survivors = df_train[df_train["y1_mortality"] == 0]
-    y2 = survivors["y2_readmission"].astype(float)
-    pos_y2 = float((y2 == 1).sum())
-    neg_y2 = float((y2 == 0).sum())
-    if pos_y2 == 0 or neg_y2 == 0:
-        raise SchemaError("y2_readmission must contain both positive and negative examples for survivors")
-    pos_weight_y2 = neg_y2 / pos_y2
-
-    return float(pos_weight_y1), float(pos_weight_y2)
-
-
 def _validate_column_order(schema: pa.Schema, expected_columns: List[str]) -> None:
     names = schema.names
     if names != expected_columns:
@@ -271,17 +197,6 @@ def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> N
             raise SchemaError(f"Null values found in {col} produced by {producer}")
 
 
-def validate_schema(parquet_file: pq.ParquetFile) -> None:
-    """Validate dataset schema, dtypes, and null counts against the contract."""
-    schema = parquet_file.schema_arrow
-    expected_columns = get_expected_columns()
-    _validate_column_order(schema, expected_columns)
-    _validate_label_columns(schema)
-    _validate_demographic_vec(schema)
-    _validate_embedding_columns(schema)
-    _validate_null_counts(parquet_file, ["y1_mortality"])
-
-
 def get_expected_columns() -> List[str]:
     """Return the ordered list of expected dataset columns per PREPROCESSING_DATA_MODEL.md Section 3.12."""
     return list(_EXPECTED_COLUMNS)
@@ -290,34 +205,82 @@ def get_expected_columns() -> List[str]:
 class Mimic4DataLoader(DataLoader):
     """MIMIC-IV–specific dataset loader."""
 
-    @staticmethod
-    def _validate_y2_alignment(y_table: pa.Table) -> None:
-        df = y_table.to_pandas()
+    def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
+        schema = parquet_file.schema_arrow
+        expected_columns = get_expected_columns()
+        _validate_column_order(schema, expected_columns)
+        _validate_label_columns(schema)
+        _validate_demographic_vec(schema)
+        _validate_embedding_columns(schema)
+        _validate_null_counts(parquet_file, ["y1_mortality"])
+
+    def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:
+        return parquet_file.read(columns=["y1_mortality", "y2_readmission"])
+
+    def _validate_labels(self, label_table: pa.Table) -> None:
+        df = label_table.to_pandas()
         mortality = df["y1_mortality"].astype(float)
         readmit = df["y2_readmission"].astype(float)
         deceased_mask = mortality == 1.0
         survivor_mask = mortality == 0.0
 
         if readmit[deceased_mask].notna().any():
-            raise SchemaError(
-                "y2_readmission must be NaN for deceased rows; produced by extract_y_data.py"
-            )
+            raise SchemaError("y2_readmission must be NaN for deceased rows; produced by extract_y_data.py")
         if survivor_mask.any() and readmit[survivor_mask].isna().any():
-            raise SchemaError(
-                "y2_readmission must be non-null for survivors; produced by extract_y_data.py"
-            )
-
-    def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
-        validate_schema(parquet_file)
-
-    def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:
-        return parquet_file.read(columns=["y1_mortality", "y2_readmission"])
-
-    def _validate_labels(self, label_table: pa.Table) -> None:
-        self._validate_y2_alignment(label_table)
+            raise SchemaError("y2_readmission must be non-null for survivors; produced by extract_y_data.py")
 
     def _build_feature_index_map(self, parquet_file: pq.ParquetFile) -> Dict[str, Tuple[int, int]]:
-        return build_feature_index_map(parquet_file.schema_arrow.names)
+        columns = parquet_file.schema_arrow.names
+        feature_columns: List[str] = []
+        for name in columns:
+            if name in {"subject_id", "hadm_id", "split", "y1_mortality", "y2_readmission"}:
+                continue
+            feature_columns.append(name)
+
+        if "demographic_vec" not in feature_columns:
+            raise SchemaError(
+                "demographic_vec column missing from dataset; expected per PREPROCESSING_DATA_MODEL.md Section 3.12"
+            )
+
+        offset = 0
+        index_map: Dict[str, Tuple[int, int]] = {}
+        embedding_columns: List[str] = []
+
+        for col in feature_columns:
+            if col == "demographic_vec":
+                width = 8
+            elif col.endswith("_embedding"):
+                width = 768
+                embedding_columns.append(col)
+            else:
+                raise SchemaError(
+                    f"Unexpected feature column '{col}' encountered while building index map; "
+                    "expected only demographic_vec and *_embedding columns per PREPROCESSING_DATA_MODEL.md Section 3.12"
+                )
+            index_map[col] = (offset, offset + width)
+            offset += width
+
+        missing_expected = set(_EXPECTED_COLUMNS) - set(columns)
+        if missing_expected:
+            raise SchemaError(
+                f"Missing expected columns {sorted(missing_expected)} per PREPROCESSING_DATA_MODEL.md Section 3.12"
+            )
+
+        history_count = len(set(embedding_columns) & _HISTORY_TRIAGE_EMBEDDINGS)
+        lab_count = len(set(embedding_columns) & _LAB_EMBEDDINGS)
+        radiology_count = len(set(embedding_columns) & _RADIOLOGY_EMBEDDINGS)
+        micro_count = len(set(embedding_columns) & _MICRO_EMBEDDINGS)
+
+        if len(embedding_columns) != 55 or (
+            history_count != 4 or lab_count != 13 or radiology_count != 1 or micro_count != 37
+        ):
+            raise SchemaError(
+                "Embedding column breakdown mismatch — expected 55 embedding columns with counts "
+                "(history/triage=4, lab=13, radiology=1, microbiology=37) as defined in "
+                "PREPROCESSING_DATA_MODEL.md Section 3.12"
+            )
+
+        return index_map
 
     def _compute_pos_weights(self, label_table: pa.Table, train_rows: List[int]) -> Tuple[float, float]:
         if self._config.POS_WEIGHT_Y1 is not None and self._config.POS_WEIGHT_Y2 is not None:
@@ -325,4 +288,19 @@ class Mimic4DataLoader(DataLoader):
 
         labels_df = label_table.to_pandas()
         train_y_df = labels_df.iloc[train_rows].reset_index(drop=True)
-        return compute_pos_weights(train_y_df)
+        y1 = train_y_df["y1_mortality"].astype(float)
+        pos_y1 = float((y1 == 1).sum())
+        neg_y1 = float((y1 == 0).sum())
+        if pos_y1 == 0 or neg_y1 == 0:
+            raise SchemaError("y1_mortality must contain both positive and negative examples")
+        pos_weight_y1 = neg_y1 / pos_y1
+
+        survivors = train_y_df[train_y_df["y1_mortality"] == 0]
+        y2 = survivors["y2_readmission"].astype(float)
+        pos_y2 = float((y2 == 1).sum())
+        neg_y2 = float((y2 == 0).sum())
+        if pos_y2 == 0 or neg_y2 == 0:
+            raise SchemaError("y2_readmission must contain both positive and negative examples for survivors")
+        pos_weight_y2 = neg_y2 / pos_y2
+
+        return float(pos_weight_y1), float(pos_weight_y2)

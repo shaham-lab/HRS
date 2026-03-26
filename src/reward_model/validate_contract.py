@@ -5,13 +5,13 @@ from typing import List, Tuple
 
 import pyarrow.parquet as pq
 
-from src.reward_model.mimic4_data_loader import validate_schema
+from src.reward_model.mimic4_data_loader import Mimic4DataLoader
 from src.reward_model.reward_model_utils import load_and_validate_config
 
 logger = logging.getLogger(__name__)
 
 
-def _run_assertions(parquet_file: pq.ParquetFile) -> List[Tuple[str, str, str]]:
+def _run_assertions(parquet_file: pq.ParquetFile, config) -> List[Tuple[str, str, str]]:
     results: List[Tuple[str, str, str]] = []
 
     def _skip_y2_alignment() -> None:
@@ -19,8 +19,9 @@ def _run_assertions(parquet_file: pq.ParquetFile) -> List[Tuple[str, str, str]]:
             "SKIPPED — full Y2 alignment requires row-level read; run Mimic4DataLoader.load() for complete validation"
         )
 
+    loader = Mimic4DataLoader(config)
     checks = [
-        ("Schema validation", lambda: validate_schema(parquet_file)),
+        ("Schema validation", lambda: loader._validate_schema(parquet_file)),
         ("y2_readmission alignment", _skip_y2_alignment),
     ]
 
@@ -46,7 +47,7 @@ def main() -> int:
     logger.info("Opening dataset: %s", config.DATASET_PATH)
     parquet_file = pq.ParquetFile(config.DATASET_PATH)
 
-    results = _run_assertions(parquet_file)
+    results = _run_assertions(parquet_file, config)
     failed = False
     for name, status, message in results:
         print(f"{status}: {name} - {message}")

@@ -125,8 +125,6 @@ The process group is initialised with the `nccl` backend at the start of `train.
 |------------------|---------|
 | `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
-| `build_feature_index_map(columns)` | Construct `{col_name: (start, end)}` from ordered column list; see Section 4 (implemented in `mimic4_data_loader.py`) |
-| `compute_pos_weights(df_train)` | Compute `pos_weight_y1` and `pos_weight_y2` from training split; excludes deceased rows for Y2 (implemented in `mimic4_data_loader.py`) |
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
 | `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `train.py`) |
 | `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (implemented in `train.py`) |
@@ -151,7 +149,7 @@ The algorithm expects to find exactly **56 feature columns**: 1 structured vecto
 - **1 radiology embedding** — `radiology_embedding` (F19)
 - **37 microbiology panel embeddings** — `micro_blood_culture_routine_embedding` through `micro_throat_strep_embedding` (F20–F56)
 
-If the count of `*_embedding` columns in the dataset does not equal exactly 55, or if the count within any of the four groups above does not match (4 + 13 + 1 + 37), `build_feature_index_map()` raises a `SchemaError` referencing `PREPROCESSING_DATA_MODEL.md` Section 3.12. This guards against silent miscounting if the upstream dataset schema changes.
+If the count of `*_embedding` columns in the dataset does not equal exactly 55, or if the count within any of the four groups above does not match (4 + 13 + 1 + 37), `Mimic4DataLoader._build_feature_index_map()` raises a `SchemaError` referencing `PREPROCESSING_DATA_MODEL.md` Section 3.12. This guards against silent miscounting if the upstream dataset schema changes.
 
 The map is constructed once by `Mimic4DataLoader`, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
 
@@ -169,11 +167,11 @@ Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `Data
 
 **Algorithm (Mimic4DataLoader implementation):**
 1. Read `final_cdss_dataset.parquet` from `DATASET_PATH` using `pyarrow`. Do not use `fastparquet` — the fastparquet/pyarrow serialisation incompatibility observed in the preprocessing pipeline applies here.
-2. Validate column presence and order via `validate_schema()` (`mimic4_data_loader.py`); assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12.
-3. Validate labels: `y1_mortality` dtype int8/float32 and non-null; `y2_readmission` dtype float32 with NaN for deceased rows and non-null for survivors (`_validate_y2_alignment`).
-4. Build the feature index map via `build_feature_index_map()` from `mimic4_data_loader.py`. This also validates the 55-embedding count and per-group breakdown — see Section 4.
+2. Validate column presence and order via `Mimic4DataLoader._validate_schema()`; assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12.
+3. Validate labels: `y1_mortality` dtype int8/float32 and non-null; `y2_readmission` dtype float32 with NaN for deceased rows and non-null for survivors (checked inside `_validate_labels`).
+4. Build the feature index map via `Mimic4DataLoader._build_feature_index_map()`. This also validates the 55-embedding count and per-group breakdown — see Section 4.
 5. Read the `split` column only (lightweight — metadata column) to determine row indices for each split. Produce three lists of row indices: `train_indices`, `dev_indices`, `test_indices`.
-6. Compute `pos_weight_y1` and `pos_weight_y2` from the training split rows via `compute_pos_weights()` unless overridden by `POS_WEIGHT_Y1`/`POS_WEIGHT_Y2` in config.
+6. Compute `pos_weight_y1` and `pos_weight_y2` from the training split rows via `Mimic4DataLoader._compute_pos_weights()` unless overridden by `POS_WEIGHT_Y1`/`POS_WEIGHT_Y2` in config.
 7. Instantiate three `ParquetDataset` objects (class-only module `parquet_dataset.py`, re-exported by `reward_model_utils.py`) — one per split — passing the open PyArrow file handle, the split's row index list, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Each `ParquetDataset` holds only the file handle and index metadata in memory. No feature data is read at this step.
 8. Return a `DatasetBundle` named tuple (class-only module `dataset_bundle.py`, re-exported by `reward_model_utils.py`): `train_dataset`, `dev_dataset`, `test_dataset` (each a `ParquetDataset`), `feature_index_map`, `pos_weight_y1`, `pos_weight_y2`.
 
