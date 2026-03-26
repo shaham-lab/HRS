@@ -1,7 +1,7 @@
 """MIMIC-IV specific dataset loader and helpers."""
 
 import logging
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 import pandas as pd
 import pyarrow as pa
@@ -143,76 +143,17 @@ _MICRO_EMBEDDINGS = {
 }
 
 
-def _validate_column_order(schema: pa.Schema, expected_columns: List[str]) -> None:
-    names = schema.names
-    if names != expected_columns:
-        raise SchemaError(
-            "Column order mismatch; expected canonical order from PREPROCESSING_DATA_MODEL.md Section 3.12. "
-            "Re-run preprocessing to regenerate final_cdss_dataset.parquet"
-        )
-
-
-def _validate_label_columns(schema: pa.Schema) -> None:
-    for name in ("y1_mortality", "y2_readmission"):
-        field = schema.field(name)
-        if not pa.types.is_float32(field.type):
-            raise SchemaError(f"{name} dtype mismatch; expected float32 produced by extract_y_data.py")
-        if field.type != pa.float32():
-            raise SchemaError(f"{name} type mismatch; expected float32 produced by extract_y_data.py")
-
-
-def _validate_embedding_columns(schema: pa.Schema) -> None:
-    embedding_columns = [name for name in schema.names if name.endswith("_embedding")]
-    for name in embedding_columns:
-        field = schema.field(name)
-        if not (pa.types.is_fixed_size_list(field.type) and pa.types.is_float32(field.type.value_type)):
-            raise SchemaError(f"{name} type mismatch; expected float32[768] produced by combine_dataset.py")
-        if field.type.list_size != 768:
-            raise SchemaError(f"{name} length mismatch; expected fixed_size_list[768] produced by combine_dataset.py")
-
-
-def _validate_demographic_vec(schema: pa.Schema) -> None:
-    field = schema.field("demographic_vec")
-    if not (pa.types.is_fixed_size_list(field.type) and pa.types.is_float32(field.type.value_type)):
-        raise SchemaError("demographic_vec type mismatch; expected float32[8] produced by combine_dataset.py")
-    if field.type.list_size != 8:
-        raise SchemaError("demographic_vec length mismatch; expected fixed_size_list[8] produced by combine_dataset.py")
-
-
-def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> None:
-    for col in columns:
-        nulls = 0
-        idx = parquet_file.schema_arrow.get_field_index(col)
-        for rg in range(parquet_file.metadata.num_row_groups):
-            stats = parquet_file.metadata.row_group(rg).column(idx).statistics
-            if stats is None or not stats.has_null_count:
-                raise SchemaError(
-                    f"Missing null-count statistics for column {col}; "
-                    "cannot validate null counts — re-run preprocessing "
-                    "to regenerate statistics"
-                )
-            nulls += stats.null_count
-        if nulls != 0:
-            producer = "combine_dataset.py" if col.endswith("_embedding") else "extract_y_data.py"
-            raise SchemaError(f"Null values found in {col} produced by {producer}")
-
-
-def get_expected_columns() -> List[str]:
-    """Return the ordered list of expected dataset columns per PREPROCESSING_DATA_MODEL.md Section 3.12."""
-    return list(_EXPECTED_COLUMNS)
-
-
 class Mimic4DataLoader(DataLoader):
     """MIMIC-IV–specific dataset loader."""
 
     def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
         schema = parquet_file.schema_arrow
-        expected_columns = get_expected_columns()
-        _validate_column_order(schema, expected_columns)
-        _validate_label_columns(schema)
-        _validate_demographic_vec(schema)
-        _validate_embedding_columns(schema)
-        _validate_null_counts(parquet_file, ["y1_mortality"])
+        expected_columns = self._get_expected_columns()
+        self._validate_column_order(schema, expected_columns)
+        self._validate_label_columns(schema)
+        self._validate_demographic_vec(schema)
+        self._validate_embedding_columns(schema)
+        self._validate_null_counts(parquet_file, ["y1_mortality"])
 
     def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:
         return parquet_file.read(columns=["y1_mortality", "y2_readmission"])
@@ -304,3 +245,62 @@ class Mimic4DataLoader(DataLoader):
         pos_weight_y2 = neg_y2 / pos_y2
 
         return float(pos_weight_y1), float(pos_weight_y2)
+
+    @staticmethod
+    def _get_expected_columns() -> List[str]:
+        """Return the ordered list of expected dataset columns per PREPROCESSING_DATA_MODEL.md Section 3.12."""
+        return list(_EXPECTED_COLUMNS)
+
+    @staticmethod
+    def _validate_column_order(schema: pa.Schema, expected_columns: List[str]) -> None:
+        names = schema.names
+        if names != expected_columns:
+            raise SchemaError(
+                "Column order mismatch; expected canonical order from PREPROCESSING_DATA_MODEL.md Section 3.12. "
+                "Re-run preprocessing to regenerate final_cdss_dataset.parquet"
+            )
+
+    @staticmethod
+    def _validate_label_columns(schema: pa.Schema) -> None:
+        for name in ("y1_mortality", "y2_readmission"):
+            field = schema.field(name)
+            if not pa.types.is_float32(field.type):
+                raise SchemaError(f"{name} dtype mismatch; expected float32 produced by extract_y_data.py")
+            if field.type != pa.float32():
+                raise SchemaError(f"{name} type mismatch; expected float32 produced by extract_y_data.py")
+
+    @staticmethod
+    def _validate_embedding_columns(schema: pa.Schema) -> None:
+        embedding_columns = [name for name in schema.names if name.endswith("_embedding")]
+        for name in embedding_columns:
+            field = schema.field(name)
+            if not (pa.types.is_fixed_size_list(field.type) and pa.types.is_float32(field.type.value_type)):
+                raise SchemaError(f"{name} type mismatch; expected float32[768] produced by combine_dataset.py")
+            if field.type.list_size != 768:
+                raise SchemaError(f"{name} length mismatch; expected fixed_size_list[768] produced by combine_dataset.py")
+
+    @staticmethod
+    def _validate_demographic_vec(schema: pa.Schema) -> None:
+        field = schema.field("demographic_vec")
+        if not (pa.types.is_fixed_size_list(field.type) and pa.types.is_float32(field.type.value_type)):
+            raise SchemaError("demographic_vec type mismatch; expected float32[8] produced by combine_dataset.py")
+        if field.type.list_size != 8:
+            raise SchemaError("demographic_vec length mismatch; expected fixed_size_list[8] produced by combine_dataset.py")
+
+    @staticmethod
+    def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> None:
+        for col in columns:
+            nulls = 0
+            idx = parquet_file.schema_arrow.get_field_index(col)
+            for rg in range(parquet_file.metadata.num_row_groups):
+                stats = parquet_file.metadata.row_group(rg).column(idx).statistics
+                if stats is None or not stats.has_null_count:
+                    raise SchemaError(
+                        f"Missing null-count statistics for column {col}; "
+                        "cannot validate null counts — re-run preprocessing "
+                        "to regenerate statistics"
+                    )
+                nulls += stats.null_count
+            if nulls != 0:
+                producer = "combine_dataset.py" if col.endswith("_embedding") else "extract_y_data.py"
+                raise SchemaError(f"Null values found in {col} produced by {producer}")
