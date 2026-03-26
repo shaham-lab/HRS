@@ -39,7 +39,7 @@ jupyter nbconvert --to notebook --execute notebooks/mimic4/mimic4_data_explorati
 ## SLURM (A100, one GPU per notebook)
 
 Scripts (in `notebooks/mimic4/`):
-- `exploration_job.sh`: runs one notebook on 1× A100 via `nbconvert`, saves executed copy to `notebooks/mimic4/executed/`, logs to `logs/`.
+- `exploration_job.sh`: runs one notebook on 1× A100 via `nbconvert`, saves executed copy alongside the source notebook, logs to `logs/`.
 - `submit_exploration.sh`: CLI wrapper to submit one job per requested notebook.
 
 ### Run all exploration notebooks
@@ -62,7 +62,7 @@ Each job:
 - Resources: `--gres=gpu:1`, `--cpus-per-task=4`, `--mem=24G`, `--time=4:00:00`
 - Job name: `explore_<notebook_basename>`
 - Logs: `${REPO_ROOT}/logs/explore_<job>.out/err`
-- Executed notebook: `notebooks/mimic4/executed/<name>_executed.ipynb`
+- Executed notebook: `<notebook_dir>/<name>_executed.ipynb`
 
 Monitor:
 ```bash

@@ -39,8 +39,6 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-LOG_DIR="${REPO_ROOT}/logs"
-mkdir -p "${LOG_DIR}"
 
 declare -a REQUESTED
 
@@ -91,6 +89,8 @@ resolve_notebook() {
 
 echo "Submitting exploration notebooks..."
 
+cd "${REPO_ROOT}"
+
 for nb in "${REQUESTED[@]}"; do
     if ! resolved=$(resolve_notebook "$nb"); then
         echo "Skip (not found): $nb" >&2
@@ -98,12 +98,7 @@ for nb in "${REQUESTED[@]}"; do
     fi
     base="$(basename "$resolved" .ipynb)"
     job_name="explore_${base}"
-    job_id=$(sbatch \
-        --parsable \
-        --job-name="$job_name" \
-        --output="${LOG_DIR}/explore_%x_%j.out" \
-        --error="${LOG_DIR}/explore_%x_%j.err" \
-        "${SCRIPT_DIR}/exploration_job.sh" "$resolved")
+    job_id=$(sbatch --parsable --job-name="$job_name" "${SCRIPT_DIR}/exploration_job.sh" "$resolved")
     echo "  [${job_id}] $resolved (job-name: $job_name)"
 done
 

@@ -1,5 +1,7 @@
 #!/bin/bash
 #SBATCH --job-name=hrs_explore
+#SBATCH --output=logs/explore_%x_%j.out
+#SBATCH --error=logs/explore_%x_%j.err
 #SBATCH --partition=A100-4h
 #SBATCH --gres=gpu:1
 #SBATCH --cpus-per-task=4
@@ -25,18 +27,16 @@ fi
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
-LOG_DIR="${REPO_ROOT}/logs"
 
 NOTEBOOK_ABS="$(realpath "$NOTEBOOK_PATH")"
 NOTEBOOK_NAME="$(basename "${NOTEBOOK_ABS}" .ipynb)"
+OUTPUT_DIR="$(dirname "${NOTEBOOK_ABS}")"
 
 cd "${REPO_ROOT}"
-mkdir -p "${LOG_DIR}" notebooks/mimic4/executed
 
 source "$(conda info --base)/etc/profile.d/conda.sh"
 conda activate hrs
 
-OUTPUT_DIR="notebooks/mimic4/executed"
 OUTPUT_NAME="${NOTEBOOK_NAME}_executed.ipynb"
 
 echo "Host: $(hostname)"
