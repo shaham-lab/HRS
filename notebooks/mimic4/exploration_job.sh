@@ -34,8 +34,28 @@ OUTPUT_DIR="$(dirname "${NOTEBOOK_ABS}")"
 
 cd "${REPO_ROOT}"
 
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate hrs
+# Robustly source conda (supports cluster installs where /usr/etc/profile.d/conda.sh is missing).
+if [[ -z "${CONDA_EXE:-}" ]]; then
+    # Try standard etc/profile.d location first.
+    if [[ -f "/etc/profile.d/conda.sh" ]]; then
+        source "/etc/profile.d/conda.sh"
+    else
+        # Fallback to conda info --base, suppressing errors.
+        if BASE_PATH="$(conda info --base 2>/dev/null)"; then
+            if [[ -f "${BASE_PATH}/etc/profile.d/conda.sh" ]]; then
+                source "${BASE_PATH}/etc/profile.d/conda.sh"
+            fi
+        fi
+    fi
+fi
+
+# Only attempt activation if conda was successfully sourced.
+if command -v conda >/dev/null 2>&1; then
+    conda activate hrs
+else
+    echo "conda not found; ensure conda is available on compute node" >&2
+    exit 1
+fi
 
 OUTPUT_NAME="${NOTEBOOK_NAME}_executed.ipynb"
 
