@@ -1,3 +1,9 @@
+"""Shared helpers and backward-compatibility re-exports for the reward model.
+
+This module re-exports class-only modules (ParquetDataset, DatasetBundle, etc.)
+so legacy import paths keep working after refactors. Keep the re-exports in
+place until all downstream users migrate to direct imports.
+"""
 import logging
 from typing import Dict, List, Optional, Tuple
 

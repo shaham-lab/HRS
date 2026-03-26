@@ -207,7 +207,7 @@ Implements the `MaskingSchedule` class, which maintains the curriculum state and
 
 The constructor accepts the `feature_index_map`, curriculum schedule parameters (`start_ratios`, `end_ratios`, `transition_shape`, `transition_midpoint_epoch`, `total_epochs`), and `k` (features zeroed per sample in random mode, default 1).
 
-`get_mode_probabilities(epoch)` delegates to `sigmoid_crossover()` defined in `masking.py` and returns the current `(p_random, p_adversarial, p_none)` tuple for the given epoch.
+`get_mode_probabilities(epoch)` delegates to the module-local `sigmoid_crossover()` helper defined in `masking.py` and returns the current `(p_random, p_adversarial, p_none)` tuple for the given epoch.
 
 `sample_mode(epoch)` draws a masking mode string — `'random'`, `'adversarial'`, or `'none'` — according to the current probabilities.
 
