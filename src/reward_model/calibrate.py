@@ -30,7 +30,7 @@ from src.reward_model.reward_model_utils import (
     get_device,
     load_and_validate_config,
 )
-from src.reward_model.data_loader import Mimic4DataLoader
+from src.reward_model.mimic4_data_loader import Mimic4DataLoader
 
 logger = logging.getLogger(__name__)
 

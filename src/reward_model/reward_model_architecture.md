@@ -144,7 +144,7 @@ HRS/src/preprocessing
                     │
                     ▼
         ┌──────────────────────────────────────┐
-        │   data_loader.py                     │  read parquet, validate schema,
+        │   mimic4_data_loader.py              │  read parquet, validate schema,
         │                                       │  derive feature index map,
         │                                       │  build train/dev/test tensors
         └──────────────┬───────────────────────┘
@@ -191,9 +191,9 @@ HRS/src/preprocessing
 
 | # | Module | Output | Notes |
 |---|--------|--------|-------|
-| 1 | `data_loader.py` | `DatasetBundle` + feature index map | Generic `DataLoader` base with `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
+| 1 | `data_loader.py` / `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `DataLoader` base with `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
 | 2 | `model.py` | `RewardModel` class | MLP definition only — no training logic; wrapped in `DistributedDataParallel` by `train.py` |
-| 3 | `masking.py` | Masked input tensors | Reads feature index map from `data_loader.py`; implements random, adversarial, and no-mask modes |
+| 3 | `masking.py` | Masked input tensors | Reads feature index map from `mimic4_data_loader.py`; implements random, adversarial, and no-mask modes |
 | 4 | `loss.py` | Scalar loss tensor | Dynamic NaN masking for `y2_readmission`; weighted BCE per head |
 | 5 | `train.py` | Checkpoint files | DDP entry point via `torchrun`; masking curriculum; AdamW + cosine LR; early stopping; metric logging on rank 0 |
 | 6 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split; single GPU |
@@ -382,7 +382,7 @@ HRS/
 │       ├── reward_model_architecture.md     # this document
 │       ├── REWARD_MODEL_DETAILED_DESIGN.md  # per-module implementation details
 │       │
-│       ├── data_loader.py                  # step 1 — load, validate schema, derive feature index map
+│       ├── mimic4_data_loader.py           # step 1 — load, validate schema, derive feature index map
 │       ├── model.py                         # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
 │       ├── loss.py                          # step 4 — weighted BCE + dynamic NaN masking for Y2

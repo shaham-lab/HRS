@@ -50,13 +50,14 @@ The reward model does not perform any identifier linkage. All identifier resolut
 
 ### Module boundaries
 
-Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `data_loader.py` (via `Mimic4DataLoader`, a subclass of the generic `DataLoader` base).
+Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `mimic4_data_loader.py` (via `Mimic4DataLoader`, a subclass of the generic `DataLoader` base).
 
 ### Class vs plain script
 
 | Module | Pattern | Reason |
 |--------|---------|--------|
-| `data_loader.py` | **Classes** (`DataLoader`, `Mimic4DataLoader`) | Generic base plus MIMIC-IV implementation; validates schema and constructs `DatasetBundle`; single instantiation per run |
+| `data_loader.py` | **Class** (`DataLoader`) | Generic base (no dataset-specific logic); single instantiation per run |
+| `mimic4_data_loader.py` | **Class** (`Mimic4DataLoader`) | MIMIC-IV implementation; validates schema, constructs `DatasetBundle`; single instantiation per run |
 | `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `loss.py` | Plain functions | Stateless transformations; `compute_loss(logits_y1, logits_y2, y1, y2, weights)` |
@@ -162,15 +163,15 @@ The map is never written to a standalone config or YAML file — a separate file
 
 ---
 
-### `data_loader.py`
+### `mimic4_data_loader.py`
 
-Houses the generic `DataLoader` template and the concrete `Mimic4DataLoader` implementation. `DataLoader.load()` orchestrates open/validate/read/bundle steps via template hooks; dataset-specific logic lives in subclasses. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
+Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `DataLoader` template. `DataLoader.load()` orchestrates open/validate/read/bundle steps via template hooks; dataset-specific logic lives in subclasses. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
 
 **Algorithm (Mimic4DataLoader implementation):**
 1. Read `final_cdss_dataset.parquet` from `DATASET_PATH` using `pyarrow`. Do not use `fastparquet` — the fastparquet/pyarrow serialisation incompatibility observed in the preprocessing pipeline applies here.
-2. Validate column presence and order via `validate_schema()` (`reward_model_utils.py`); assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12.
+2. Validate column presence and order via `validate_schema()` (`mimic4_data_loader.py`); assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12.
 3. Validate labels: `y1_mortality` dtype int8/float32 and non-null; `y2_readmission` dtype float32 with NaN for deceased rows and non-null for survivors (`_validate_y2_alignment`).
-4. Build the feature index map via `build_feature_index_map()` from `reward_model_utils.py`. This also validates the 55-embedding count and per-group breakdown — see Section 4.
+4. Build the feature index map via `build_feature_index_map()` from `mimic4_data_loader.py`. This also validates the 55-embedding count and per-group breakdown — see Section 4.
 5. Read the `split` column only (lightweight — metadata column) to determine row indices for each split. Produce three lists of row indices: `train_indices`, `dev_indices`, `test_indices`.
 6. Compute `pos_weight_y1` and `pos_weight_y2` from the training split rows via `compute_pos_weights()` unless overridden by `POS_WEIGHT_Y1`/`POS_WEIGHT_Y2` in config.
 7. Instantiate three `ParquetDataset` objects (class-only module `parquet_dataset.py`, re-exported by `reward_model_utils.py`) — one per split — passing the open PyArrow file handle, the split's row index list, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Each `ParquetDataset` holds only the file handle and index metadata in memory. No feature data is read at this step.
@@ -473,14 +474,14 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
 | `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `parquet_dataset.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
 
 ### Paths
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
 | `CHECKPOINT_DIR` | `data/reward_model/checkpoints` | `train.py`, `calibrate.py`, `export_model.py` | Checkpoint directory |
 | `METRICS_PATH` | `data/reward_model/training_metrics.parquet` | `train.py` | Per-epoch metrics output |
 | `CALIBRATION_PARAMS_PATH` | `data/reward_model/calibration_params.json` | `calibrate.py`, `inference.py` | Temperature scaling output |

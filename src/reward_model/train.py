@@ -33,7 +33,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from src.reward_model.loss import compute_loss, compute_metrics
-from src.reward_model.data_loader import Mimic4DataLoader
+from src.reward_model.mimic4_data_loader import Mimic4DataLoader
 from src.reward_model.masking import MaskingSchedule
 from src.reward_model.model import RewardModel
 from src.reward_model.reward_model_utils import (
