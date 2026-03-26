@@ -112,7 +112,7 @@ class MaskingSchedule:
     def get_mode_probabilities(self, epoch: int) -> Tuple[float, float, float]:
         """Return ``(p_random, p_adversarial, p_none)`` for the given epoch.
 
-        Delegates to ``sigmoid_crossover()`` in ``reward_model_utils.py``.
+        Delegates to ``sigmoid_crossover()`` defined in this module.
 
         Args:
             epoch: Current training epoch (0-indexed).
