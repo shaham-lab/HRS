@@ -32,27 +32,27 @@ class DataLoader(ABC):
     def _open_parquet(self) -> pq.ParquetFile:
         return pq.ParquetFile(self._config.DATASET_PATH)
 
-    # pragma: no cover - abstract hook
+    # pragma: no cover  # abstract hook
     @abstractmethod
     def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
         """Validate dataset-level schema/columns; raise ``SchemaError`` on violation."""
 
-    # pragma: no cover - abstract hook
+    # pragma: no cover  # abstract hook
     @abstractmethod
     def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:
         """Read the label columns into a ``pyarrow.Table`` for downstream validation/weights."""
 
-    # pragma: no cover - abstract hook
+    # pragma: no cover  # abstract hook
     @abstractmethod
     def _validate_labels(self, label_table: pa.Table) -> None:
         """Validate label consistency (dtypes, NaN rules) and raise ``SchemaError`` on failure."""
 
-    # pragma: no cover - abstract hook
+    # pragma: no cover  # abstract hook
     @abstractmethod
     def _build_feature_index_map(self, parquet_file: pq.ParquetFile) -> Dict[str, Tuple[int, int]]:
         """Construct the feature index map defining (start, end) for each feature column."""
 
-    # pragma: no cover - abstract hook
+    # pragma: no cover  # abstract hook
     @abstractmethod
     def _compute_pos_weights(self, label_table: pa.Table, train_rows: List[int]) -> Tuple[float, float]:
         """Compute positive class weights from the training split (or use config overrides)."""
