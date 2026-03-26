@@ -521,6 +521,147 @@ def _eval_dev(
     return metrics
 
 
+def _train_epochs(
+    *,
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    masking_schedule: MaskingSchedule,
+    train_loader: Optional[DataLoader],
+    dev_dataset: torch.utils.data.Dataset,
+    checkpoint_manager: CheckpointManager,
+    feature_index_map: Optional[Dict[str, Tuple[int, int]]],
+    config: RewardModelConfig,
+    device: torch.device,
+    pos_weight_y1: float,
+    pos_weight_y2: float,
+    start_epoch: int,
+    best_dev_loss: float,
+    rank: int,
+    is_ddp: bool,
+    metrics_path: Path,
+) -> Tuple[int, float]:
+    """Run the epoch loop and return the last completed epoch and best dev loss."""
+    epochs_without_improve = 0
+    last_epoch_completed = start_epoch - 1
+
+    for epoch in range(start_epoch, config.MAX_EPOCHS):
+        if train_loader is None:
+            break
+
+        if hasattr(train_loader.sampler, "set_epoch"):
+            train_loader.sampler.set_epoch(epoch)
+
+        epoch_start = time.time()
+
+        for X, y1, y2 in train_loader:
+            X = X.to(device, non_blocking=True)
+            y1 = y1.to(device, non_blocking=True)
+            y2 = y2.to(device, non_blocking=True)
+
+            total, l1, l2 = _run_train_batch(
+                model,
+                X,
+                y1,
+                y2,
+                masking_schedule,
+                optimizer,
+                pos_weight_y1,
+                pos_weight_y2,
+                config,
+                epoch,
+                is_ddp,
+            )
+            scheduler.step()
+
+        if is_ddp:
+            dist.barrier()
+
+        if rank == 0:
+            probs = masking_schedule.get_mode_probabilities(epoch)
+            dev_metrics = _eval_dev(model, dev_dataset, pos_weight_y1, pos_weight_y2, config, device)
+            model.train()
+
+            row = {
+                "epoch": epoch,
+                "wall_time_s": float(time.time() - epoch_start),
+                "masking_random_pct": probs[0] * 100.0,
+                "masking_adversarial_pct": probs[1] * 100.0,
+                "masking_none_pct": probs[2] * 100.0,
+                "loss_total": dev_metrics["loss_total"],
+                "loss_y1": dev_metrics["loss_y1"],
+                "loss_y2": dev_metrics["loss_y2"],
+                "auroc_y1": dev_metrics["auroc_y1"],
+                "auprc_y1": dev_metrics["auprc_y1"],
+                "ece_y1": dev_metrics["ece_y1"],
+                "auroc_y2": dev_metrics["auroc_y2"],
+                "auprc_y2": dev_metrics["auprc_y2"],
+                "ece_y2": dev_metrics["ece_y2"],
+            }
+            _append_metrics_row(metrics_path, row)
+
+            current_dev_loss = dev_metrics["loss_total"]
+            improved = current_dev_loss < best_dev_loss
+            if improved:
+                best_dev_loss = current_dev_loss
+                epochs_without_improve = 0
+                checkpoint_manager.save_epoch_checkpoint(
+                    model,
+                    optimizer,
+                    scheduler,
+                    epoch,
+                    best_dev_loss,
+                    feature_index_map if feature_index_map is not None else {},
+                    config,
+                    ALWAYS_VISIBLE_SLOTS,
+                )
+                checkpoint_manager.save_best_model(
+                    model,
+                    epoch,
+                    best_dev_loss,
+                    feature_index_map if feature_index_map is not None else {},
+                    config,
+                )
+                checkpoint_manager.prune_old_checkpoints()
+            else:
+                epochs_without_improve += 1
+
+            should_stop = epochs_without_improve >= config.EARLY_STOPPING_PATIENCE
+        else:
+            should_stop = False
+
+        if is_ddp:
+            stop_tensor = torch.tensor(1 if should_stop else 0, device=device)
+            broadcast_tensor(stop_tensor, src_rank=0)
+            should_stop = bool(stop_tensor.item())
+
+        if should_stop:
+            break
+
+        if is_ddp:
+            dist.barrier()
+
+        last_epoch_completed = epoch
+
+    if is_ddp:
+        dist.barrier()
+    if rank == 0:
+        checkpoint_manager.save_epoch_checkpoint(
+            model,
+            optimizer,
+            scheduler,
+            last_epoch_completed if last_epoch_completed >= 0 else 0,
+            best_dev_loss,
+            feature_index_map if feature_index_map is not None else {},
+            config,
+            ALWAYS_VISIBLE_SLOTS,
+        )
+    if is_ddp:
+        dist.barrier()
+
+    return last_epoch_completed, best_dev_loss
+
+
 # ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
@@ -693,133 +834,27 @@ def main() -> None:
         optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
         scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
 
-    epochs_without_improve = 0
-
-    last_epoch_completed = start_epoch - 1
-
-    for epoch in range(start_epoch, config.MAX_EPOCHS):
-        if train_loader is None:
-            break
-
-        if hasattr(train_loader.sampler, "set_epoch"):
-            train_loader.sampler.set_epoch(epoch)
-
-        epoch_loss_total = 0.0
-        epoch_loss_y1 = 0.0
-        epoch_loss_y2 = 0.0
-        batches = 0
-
-        epoch_start = time.time()
-
-        for X, y1, y2 in train_loader:
-            X = X.to(device, non_blocking=True)
-            y1 = y1.to(device, non_blocking=True)
-            y2 = y2.to(device, non_blocking=True)
-
-            total, l1, l2 = _run_train_batch(
-                model,
-                X,
-                y1,
-                y2,
-                masking_schedule,
-                optimizer,
-                pos_weight_y1,
-                pos_weight_y2,
-                config,
-                epoch,
-                is_ddp,
-            )
-            scheduler.step()
-
-            epoch_loss_total += total
-            epoch_loss_y1 += l1
-            epoch_loss_y2 += l2
-            batches += 1
-
-        if is_ddp:
-            dist.barrier()
-
-        if rank == 0:
-            probs = masking_schedule.get_mode_probabilities(epoch)
-            dev_metrics = _eval_dev(model, dev_dataset, pos_weight_y1, pos_weight_y2, config, device)
-            model.train()
-
-            row = {
-                "epoch": epoch,
-                "wall_time_s": float(time.time() - epoch_start),
-                "masking_random_pct": probs[0] * 100.0,
-                "masking_adversarial_pct": probs[1] * 100.0,
-                "masking_none_pct": probs[2] * 100.0,
-                "loss_total": dev_metrics["loss_total"],
-                "loss_y1": dev_metrics["loss_y1"],
-                "loss_y2": dev_metrics["loss_y2"],
-                "auroc_y1": dev_metrics["auroc_y1"],
-                "auprc_y1": dev_metrics["auprc_y1"],
-                "ece_y1": dev_metrics["ece_y1"],
-                "auroc_y2": dev_metrics["auroc_y2"],
-                "auprc_y2": dev_metrics["auprc_y2"],
-                "ece_y2": dev_metrics["ece_y2"],
-            }
-            _append_metrics_row(metrics_path, row)
-
-            current_dev_loss = dev_metrics["loss_total"]
-            improved = current_dev_loss < best_dev_loss
-            if improved:
-                best_dev_loss = current_dev_loss
-                epochs_without_improve = 0
-                checkpoint_manager.save_epoch_checkpoint(
-                    model,
-                    optimizer,
-                    scheduler,
-                    epoch,
-                    best_dev_loss,
-                    feature_index_map if feature_index_map is not None else {},
-                    config,
-                    ALWAYS_VISIBLE_SLOTS,
-                )
-                checkpoint_manager.save_best_model(
-                    model,
-                    epoch,
-                    best_dev_loss,
-                    feature_index_map if feature_index_map is not None else {},
-                    config,
-                )
-                checkpoint_manager.prune_old_checkpoints()
-            else:
-                epochs_without_improve += 1
-
-            should_stop = epochs_without_improve >= config.EARLY_STOPPING_PATIENCE
-        else:
-            should_stop = False
-
-        if is_ddp:
-            stop_tensor = torch.tensor(1 if should_stop else 0, device=device)
-            broadcast_tensor(stop_tensor, src_rank=0)
-            should_stop = bool(stop_tensor.item())
-
-        if should_stop:
-            break
-
-        if is_ddp:
-            dist.barrier()
-
-        last_epoch_completed = epoch
+    last_epoch_completed, best_dev_loss = _train_epochs(
+        model=model,
+        optimizer=optimizer,
+        scheduler=scheduler,
+        masking_schedule=masking_schedule,
+        train_loader=train_loader,
+        dev_dataset=dev_dataset,
+        checkpoint_manager=checkpoint_manager,
+        feature_index_map=feature_index_map,
+        config=config,
+        device=device,
+        pos_weight_y1=pos_weight_y1,
+        pos_weight_y2=pos_weight_y2,
+        start_epoch=start_epoch,
+        best_dev_loss=best_dev_loss,
+        rank=rank,
+        is_ddp=is_ddp,
+        metrics_path=metrics_path,
+    )
 
     if is_ddp:
-        dist.barrier()
-    if rank == 0:
-        checkpoint_manager.save_epoch_checkpoint(
-            model,
-            optimizer,
-            scheduler,
-            last_epoch_completed if last_epoch_completed >= 0 else 0,
-            best_dev_loss,
-            feature_index_map if feature_index_map is not None else {},
-            config,
-            ALWAYS_VISIBLE_SLOTS,
-        )
-    if is_ddp:
-        dist.barrier()
         dist.destroy_process_group()
 
 
