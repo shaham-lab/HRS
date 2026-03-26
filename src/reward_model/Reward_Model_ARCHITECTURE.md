@@ -38,7 +38,7 @@ See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING
 | Y1 — In-hospital mortality | `y1_mortality` | `admissions.hospital_expire_flag = 1` | All admissions | ~8–10% |
 | Y2 — 30-day readmission | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors only (`y1_mortality = 0`) | ~20% |
 
-**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `load_dataset.py` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement.
+**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `Mimic4DataLoader` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement.
 
 ---
 
@@ -67,7 +67,7 @@ See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING
 
 ## 4. Feature Set
 
-The input vector X is constructed by concatenating all feature columns from `final_cdss_dataset.parquet` in the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions (8 for `demographic_vec`, 768 for all `*_embedding` columns). The derived index map is held in memory by `load_dataset.py` and passed to `masking.py` and `train.py`.
+The input vector X is constructed by concatenating all feature columns from `final_cdss_dataset.parquet` in the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions (8 for `demographic_vec`, 768 for all `*_embedding` columns). The derived index map is held in memory by the `Mimic4DataLoader` (a dataset-specific subclass of the generic `DataLoader` base) and passed to `masking.py` and `train.py`.
 
 **Total input dimensionality:** 8 + (55 × 768) = **42,248 dimensions**
 
@@ -144,7 +144,7 @@ HRS/src/preprocessing
                     │
                     ▼
         ┌──────────────────────────────────────┐
-        │   load_dataset.py                     │  read parquet, validate schema,
+        │   mimic4_data_loader.py              │  read parquet, validate schema,
         │                                       │  derive feature index map,
         │                                       │  build train/dev/test tensors
         └──────────────┬───────────────────────┘
@@ -173,7 +173,7 @@ HRS/src/preprocessing
 
 **Dependency rules:**
 - `HRS/src/preprocessing` must have produced `final_cdss_dataset.parquet` before any reward model job runs.
-- `load_dataset.py` must pass all schema assertions before `train.py` starts.
+- `Mimic4DataLoader` must pass all schema assertions before `train.py` starts.
 - `calibrate.py` requires `best_model.pt` from a completed training run.
 - The reward model never writes to `HRS/data/preprocessing/` — that directory is read-only from this module's perspective.
 
@@ -191,13 +191,33 @@ HRS/src/preprocessing
 
 | # | Module | Output | Notes |
 |---|--------|--------|-------|
-| 1 | `load_dataset.py` | In-memory train/dev/test tensors + feature index map | Enforces upstream data contract; raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
+| 1 | `data_loader.py` / `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `DataLoader` base with `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
 | 2 | `model.py` | `RewardModel` class | MLP definition only — no training logic; wrapped in `DistributedDataParallel` by `train.py` |
-| 3 | `masking.py` | Masked input tensors | Reads feature index map from `load_dataset.py`; implements random, adversarial, and no-mask modes |
+| 3 | `masking.py` | Masked input tensors | Reads feature index map from `mimic4_data_loader.py`; implements random, adversarial, and no-mask modes |
 | 4 | `loss.py` | Scalar loss tensor | Dynamic NaN masking for `y2_readmission`; weighted BCE per head |
 | 5 | `train.py` | Checkpoint files | DDP entry point via `torchrun`; masking curriculum; AdamW + cosine LR; early stopping; metric logging on rank 0 |
 | 6 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split; single GPU |
 | 7 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
+
+### Dependency diagram (modules and classes)
+
+```mermaid
+graph TD
+  Train[train.py] --> CheckpointManager
+  Train --> MaskingSchedule
+  Train --> RewardModel
+  Train --> Mimic4DataLoader
+  Train --> LossFns[loss.py functions]
+  Train --> RewardModelConfig
+  Mimic4DataLoader --> ParquetDataset
+  Mimic4DataLoader --> RowGroupBlockSampler
+  ParquetDataset --> FeatureIndexMap
+  MaskingSchedule --> FeatureIndexMap
+  CheckpointManager -->|validates| FeatureIndexMap
+  CheckpointManager -->|persists state dicts from| RewardModel
+```
+
+Edges show module-level dependencies (train orchestrates all) and class-level dependencies (e.g., `CheckpointManager` validates the feature index map produced by `Mimic4DataLoader` and persisted with `RewardModel` state).
 
 Supporting scripts (not in the training pipeline): `validate_contract.py` (standalone schema assertion runner without training), `export_model.py` (serialise frozen model for RL consumption).
 
@@ -246,7 +266,7 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### 8.1 Upstream Data Contract
 
-`load_dataset.py` enforces the following assertions at startup. All failures raise with a descriptive error message referencing `PREPROCESSING_DATA_MODEL.md` and the producing module.
+`Mimic4DataLoader` enforces the following assertions at startup. All failures raise with a descriptive error message referencing `PREPROCESSING_DATA_MODEL.md` and the producing module.
 
 **`y2_readmission` must be float32 with mathematical NaN for all deceased patients (`y1_mortality = 1`).** If a deceased patient carries `0.0` instead of NaN, the survivor mask `~torch.isnan(y2)` silently includes that patient in the readmission loss, corrupting `P(readmitted | survived)` without any visible error.
 
@@ -256,27 +276,37 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### 8.2 Feature Index Map Derivation
 
-At load time, `load_dataset.py` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `train.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
+At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `train.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
+
+#### Checkpoint manager and feature-index validation
+
+Checkpointing and resume logic is encapsulated in `CheckpointManager` (`checkpoint_manager.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
 
 ### 8.3 Multi-GPU Distributed Training
 
-Training uses PyTorch `DistributedDataParallel` (DDP) launched via `torchrun`. The number of GPUs is controlled by `NUM_GPUS` in `config/reward_model.yaml` (default: 2). `torchrun` spawns one process per GPU, each with a unique `rank`. Each process loads a full copy of the dataset and model. A `DistributedSampler` shards the training data across ranks so each GPU processes a non-overlapping subset of the mini-batch. Gradients are all-reduced across GPUs after each backward pass. Checkpointing, metric logging, and masking curriculum state are managed by rank 0 only to avoid duplicate writes.
+Training uses PyTorch `DistributedDataParallel` (DDP) launched via `torchrun`. The number of GPUs is controlled by `NUM_GPUS` in `config/reward_model.yaml` (default: 2). `torchrun` spawns one process per GPU, each with a unique `rank`. Each process loads a full copy of the model. A `RowGroupBlockSampler` shards the training data across ranks at the row-group level — shuffling row groups rather than individual row indices — to preserve Parquet row-group locality and prevent I/O thrashing on the `ParquetDataset` LRU cache. Gradients are all-reduced across GPUs after each backward pass. Checkpointing, metric logging, and masking curriculum state are managed by rank 0 only to avoid duplicate writes.
 
 The `nccl` backend is used for GPU-to-GPU communication, consistent with best practice for PyTorch DDP on CUDA hardware. If only 1 GPU is available, training runs in single-process mode without DDP wrapping.
 
-Adversarial masking under DDP requires attention: the first forward/backward pass (to compute gradient norms) must be performed with `model.no_sync()` to suppress premature all-reduce, since only the second pass should trigger gradient synchronisation across GPUs.
+Adversarial masking under DDP requires attention: the first forward/backward pass (to compute gradient norms for adversarial slot selection) must be performed with `model.no_sync()` to suppress premature all-reduce, since only the second pass should trigger gradient synchronisation across GPUs.
 
 ### 8.4 Masking Strategy and Curriculum
 
 Three masking modes are applied externally to the network before each forward pass. The network receives a fixed-length 42,248-dim float32 tensor with no awareness of which slots are masked.
 
-**Random masking** zeroes one or more feature slots selected uniformly at random per sample (default k=1, configurable). **Adversarial masking** implements Shaham et al. (2016) robust optimisation adapted for discrete feature-slot masking: a first forward pass with `model.no_sync()` computes per-feature gradient L2 norms by aggregating `∂L/∂x` over each slot's index range; the slot with the highest norm per sample is zeroed; a second forward/backward pass (with DDP all-reduce) updates weights. This doubles the cost of adversarial batches. **No masking** passes the full vector unchanged.
+**Always-visible slots:** The first `NUM_ALWAYS_VISIBLE_FEATURES` slots (default 5 — F1–F5) are never candidates for masking. These correspond to information available at episode start. The remaining M = 51 slots are maskable. This is a positional convention: always-visible slots are always the leading slots in the feature index map, enforced by the preprocessing pipeline column order.
 
-The probability of each mode evolves via a configurable sigmoid crossover schedule. Default: 100% random at epoch 0, transitioning to 33%/33%/33% by the final epoch. All schedule parameters (`masking_start_ratios`, `masking_end_ratios`, `transition_shape`, `transition_midpoint_epoch`) are in `config/reward_model.yaml`.
+**Random masking** zeroes k feature slots selected uniformly at random per sample, where k is drawn independently per sample from `Uniform(floor(min_fraction × M), ceil(max_fraction × M))` with the configured random k fraction range (default [0.5, 1.0)). The lower bound is clamped to ≥ 1 and the upper bound to ≤ M−1, with a final safety guard setting lower = upper if they still invert after clamping.
+
+**Adversarial masking** implements Shaham et al. (2016) robust optimisation adapted for discrete feature-slot masking: a first forward pass with `model.no_sync()` computes per-slot RMS gradient magnitude by aggregating `∂L/∂x` over each slot's index range and dividing by the square root of slot dimension (for dimensionality-invariant comparison across slots of different widths). Slots are sorted by importance descending and the top k are zeroed per sample, where k is drawn from the configured adversarial k fraction range (default [0.3, 0.7]). A second forward/backward pass (with DDP all-reduce) updates weights. This doubles the cost of adversarial batches.
+
+**No masking** passes the full vector unchanged.
+
+The probability of each mode evolves via a configurable sigmoid crossover schedule. Default: 100% random at epoch 0, transitioning to 33%/33%/33% by the final epoch. All schedule parameters are in `config/reward_model.yaml`.
 
 ### 8.5 Loss Function and Class Imbalance
 
-Total loss: `L = w1 * L_Y1 + w2 * L_Y2`. `L_Y1` uses `BCEWithLogitsLoss` with `pos_weight_y1 ≈ 9.0` (computed from training rows). `L_Y2` applies a dynamic per-batch NaN mask before `BCEWithLogitsLoss` with `pos_weight_y2 ≈ 4.0` (computed from training survivors only). The all-deceased-batch edge case sets `L_Y2 = 0.0` explicitly. Both `pos_weight` values are computed once from `split = 'train'` rows on rank 0 and broadcast to all ranks before training begins.
+Total loss: `L = w1 * L_Y1 + w2 * L_Y2`. Weights `w1` and `w2` are normalised to sum to 1.0 (validated by `RewardModelConfig` at startup), keeping total loss magnitude invariant across different weight distributions. Default: `w1 = 0.75`, `w2 = 0.25` (3:1 ratio favouring mortality given its lower positive rate). `L_Y1` uses `BCEWithLogitsLoss` with `pos_weight_y1 ≈ 9.0` (computed from training rows). `L_Y2` applies a dynamic per-batch NaN mask before `BCEWithLogitsLoss` with `pos_weight_y2 ≈ 4.0` (computed from training survivors only). The all-deceased-batch edge case sets `L_Y2 = 0.0` explicitly. Both `pos_weight` values are computed once from `split = 'train'` rows on rank 0 and broadcast to all ranks before training begins.
 
 ### 8.6 Neural Network Architecture
 
@@ -309,8 +339,12 @@ Temperature scaling is applied on the dev split after training converges, on a s
 |---|---|---|
 | Epoch metadata | `epoch`, `wall_time_s`, `masking_random_pct`, `masking_adversarial_pct`, `masking_none_pct` | int / float32 |
 | Loss | `loss_total`, `loss_y1`, `loss_y2` | float32 |
-| Y1 performance | `auroc_y1`, `auprc_y1`, `ece_y1` | float32 |
-| Y2 performance | `auroc_y2`, `auprc_y2`, `ece_y2` | float32 |
+| Y1 performance (unmasked — dev) | `auroc_y1`, `auprc_y1`, `ece_y1` | float32 |
+| Y2 performance (unmasked — dev) | `auroc_y2`, `auprc_y2`, `ece_y2` | float32 |
+| Y1 performance (masked — train diagnostic) | `auroc_y1_masked`, `auprc_y1_masked` | float32 |
+| Y2 performance (masked — train diagnostic) | `auroc_y2_masked`, `auprc_y2_masked` | float32 |
+
+Dev metrics (unmasked) are the primary signals for early stopping and progress monitoring. Training masked metrics are diagnostic — they track the gap between masked and unmasked AUROC as the curriculum evolves, confirming that robustness is being built without sacrificing full-feature discriminative ability.
 
 ---
 
@@ -348,7 +382,7 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **No leakage across splits.** All statistics derived from data — `pos_weight_y1`, `pos_weight_y2`, temperature scaling parameters — are computed from `split = 'train'` rows only, computed on rank 0, broadcast to all ranks, and frozen for the training run. The split assignment is read from the upstream dataset; this module never re-splits data.
 
-**Hard contracts, hard failures.** Upstream schema violations raise immediately at `load_dataset.py` with descriptive error messages referencing `PREPROCESSING_DATA_MODEL.md` by section and the producing module by name.
+**Hard contracts, hard failures.** Upstream schema violations raise immediately in `Mimic4DataLoader` with descriptive error messages referencing `PREPROCESSING_DATA_MODEL.md` by section and the producing module by name.
 
 **No hardcoded values.** Every hyperparameter, architectural dimension, schedule parameter, file path, and GPU count is defined in `config/reward_model.yaml` and validated by Pydantic on startup. Input dimensionality is derived at runtime from the dataset column schema.
 
@@ -357,6 +391,8 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 **Masking is external to the network.** The network receives a flat float32 tensor and has no awareness of masked slots. All masking logic lives in `masking.py`, entirely decoupled from `model.py`.
 
 **Feature boundaries are derived, not declared.** The feature index map is constructed at load time from the canonical column order in `PREPROCESSING_DATA_MODEL.md` Section 3.12. No separate index map config file exists.
+
+**One class per file.** Each class definition lives in its own `*.py` module (for example, `RewardModelConfig` in `reward_model_config.py`, `ParquetDataset` in `parquet_dataset.py`). Shared helpers and constants (for example, `ALWAYS_VISIBLE_SLOTS`, `get_device()`) live in `reward_model_utils.py` alongside the backward-compatibility re-exports for the class modules.
 
 **Rank 0 owns all I/O.** Under DDP, only rank 0 writes checkpoints, metrics, and logs. All ranks participate in forward/backward passes and gradient all-reduce. This prevents duplicate writes and ensures a consistent checkpoint state.
 
@@ -378,15 +414,22 @@ HRS/
 │   │
 │   └── reward_model/
 │       ├── reward_model_architecture.md     # this document
-│       ├── REWARD_MODEL_DETAILED_DESIGN.md  # per-module implementation details (to be written)
+│       ├── REWARD_MODEL_DETAILED_DESIGN.md  # per-module implementation details
 │       │
-│       ├── load_dataset.py                  # step 1 — load, validate schema, derive feature index map
+│       ├── mimic4_data_loader.py           # step 1 — load, validate schema, derive feature index map
 │       ├── model.py                         # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
 │       ├── loss.py                          # step 4 — weighted BCE + dynamic NaN masking for Y2
 │       ├── train.py                         # step 5 — DDP training loop, curriculum, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
+│       │
+│       ├── schema_error.py                  # shared SchemaError exception (class-only file)
+│       ├── reward_model_config.py           # Pydantic RewardModelConfig + loader (class-only file)
+│       ├── parquet_dataset.py               # ParquetDataset class (lazy Parquet reader)
+│       ├── row_group_block_sampler.py       # RowGroupBlockSampler class (row-group-aware sampler)
+│       ├── dataset_bundle.py                # DatasetBundle NamedTuple (train/dev/test bundle)
+│       ├── reward_model_utils.py            # shared helpers + re-exports (no class definitions)
 │       │
 │       ├── reward_job.sh                    # SLURM: training job (2× GPU, 64G)
 │       ├── calibrate_job.sh                 # SLURM: calibration job (1× GPU, 32G)
@@ -467,7 +510,7 @@ torchrun --nproc_per_node=2 src/reward_model/train.py \
 
 ### Resume Guarantee
 
-Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each worker loads the latest checkpoint from `data/reward_model/checkpoints/`, restores optimizer state and curriculum schedule, and continues from the saved epoch. Schema validation via `load_dataset.py` runs on every start regardless of resume status. Only rank 0 reads and writes the checkpoint — rank 1 receives the loaded state via DDP process group initialisation.
+Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each worker loads the latest checkpoint from `data/reward_model/checkpoints/`, restores optimizer state and curriculum schedule, and continues from the saved epoch. Schema validation via `Mimic4DataLoader` runs on every start regardless of resume status. Only rank 0 reads and writes the checkpoint — rank 1 receives the loaded state via DDP process group initialisation.
 
 ---
 

@@ -17,7 +17,7 @@
    - [3.4 Shared Utilities (`reward_model_utils.py`)](#34-shared-utilities-reward_model_utilspy)
 4. [Feature Index Map](#4-feature-index-map)
 5. [Module Implementation](#5-module-implementation)
-   - [load_dataset.py](#load_datasetpy)
+   - [data_loader.py](#data_loaderpy)
    - [model.py](#modelpy)
    - [masking.py](#maskingpy)
    - [loss.py](#losspy)
@@ -50,13 +50,30 @@ The reward model does not perform any identifier linkage. All identifier resolut
 
 ### Module boundaries
 
-Each Python file corresponds to one pipeline concern. A module may import from `reward_model_utils.py` (shared utilities) but never imports from a sibling module. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `load_dataset.py`.
+Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `mimic4_data_loader.py` (via `Mimic4DataLoader`, a subclass of the generic `DataLoader` base).
+
+### Class inventory (one class per file)
+
+| File | Class | Role |
+|------|-------|------|
+| `data_loader.py` | `DataLoader` | Abstract base for dataset loaders. |
+| `mimic4_data_loader.py` | `Mimic4DataLoader` | MIMIC-IV implementation of `DataLoader`. |
+| `parquet_dataset.py` | `ParquetDataset` | `torch.utils.data.Dataset` backed by a Parquet file and feature index map. |
+| `row_group_block_sampler.py` | `RowGroupBlockSampler` | Sampler that shards row groups round-robin across DDP ranks. |
+| `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, and pos-weights. |
+| `schema_error.py` | `SchemaError` | Custom exception for schema validation failures. |
+| `model.py` | `RewardModel` | Feedforward MLP with two output heads. |
+| `masking.py` | `MaskingSchedule` | Masking curriculum with random/adversarial/none modes. |
+| `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
+| `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
+| `inference.py` | `RewardModelInference` | Frozen inference wrapper with calibration parameters. |
 
 ### Class vs plain script
 
 | Module | Pattern | Reason |
 |--------|---------|--------|
-| `load_dataset.py` | Plain script, `run(config)` | Single top-to-bottom load; no shared state needed after return |
+| `data_loader.py` | **Class** (`DataLoader`) | Generic base (no dataset-specific logic); single instantiation per run |
+| `mimic4_data_loader.py` | **Class** (`Mimic4DataLoader`) | MIMIC-IV implementation; validates schema, constructs `DatasetBundle`; single instantiation per run |
 | `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `loss.py` | Plain functions | Stateless transformations; `compute_loss(logits_y1, logits_y2, y1, y2, weights)` |
@@ -72,7 +89,7 @@ All helper functions are module-private (prefixed `_`). The public interface of 
 
 ### File naming conventions
 
-`*.py` for pipeline step modules, `reward_model_utils.py` for shared helpers, `*_job.sh` for SLURM scripts, `submit_*.sh` for submission orchestrators. All names use `snake_case`.
+`*.py` for pipeline step modules, class-only modules for each class, `reward_model_utils.py` for shared helpers/re-exports, `*_job.sh` for SLURM scripts, `submit_*.sh` for submission orchestrators. All names use `snake_case`.
 
 ---
 
@@ -82,7 +99,7 @@ All helper functions are module-private (prefixed `_`). The public interface of 
 
 ### 3.1 Configuration Loading
 
-`config/reward_model.yaml` is the single source of truth for all parameters. It is loaded and validated by any CLI entry point using a Pydantic model class defined in `reward_model_utils.py`. The Pydantic model enforces types, required vs optional fields, and value constraints at startup — a misconfigured schedule or invalid path raises before any computation begins.
+`config/reward_model.yaml` is the single source of truth for all parameters. It is loaded and validated by any CLI entry point using the Pydantic model defined in `reward_model_config.py` (re-exported by `reward_model_utils.py`). The Pydantic model enforces types, required vs optional fields, and value constraints at startup — a misconfigured schedule or invalid path raises before any computation begins.
 
 All path values are expanded with `os.path.expanduser` and resolved to absolute paths before being stored in the config object. No module calls `yaml.safe_load` directly. Config keys use `SCREAMING_SNAKE_CASE`. Boolean flags use YAML native `true`/`false`. Path keys end in `_DIR`, `_PATH`, or `_FILE`.
 
@@ -122,22 +139,22 @@ The process group is initialised with the `nccl` backend at the start of `train.
 
 | Function / Class | Purpose |
 |------------------|---------|
-| `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object |
-| `build_feature_index_map(columns)` | Construct `{col_name: (start, end)}` from ordered column list; see Section 4 |
-| `compute_pos_weights(df_train)` | Compute `pos_weight_y1` and `pos_weight_y2` from training split; excludes deceased rows for Y2 |
-| `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch |
+| `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
-| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly |
-| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group |
-| **`ParquetDataset(Dataset)`** | `torch.utils.data.Dataset` subclass for lazy row-group reads from `final_cdss_dataset.parquet`. Constructor accepts the open PyArrow file handle, a list of row indices for the split, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Used by `load_dataset.py`, `calibrate.py`, and `validate_contract.py`. |
+| `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
+| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `train.py`) |
+| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (implemented in `train.py`) |
+| **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
+| **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
+| **`DatasetBundle(NamedTuple)`** | Class-only module `dataset_bundle.py`. Bundles `train/dev/test` `ParquetDataset` instances plus metadata. Re-exported by `reward_model_utils.py`. |
 
-A function or class belongs in `reward_model_utils.py` if and only if it is used by two or more modules and has no module-specific state. Functions used only once remain private to their module with a `_` prefix.
+A helper function belongs in `reward_model_utils.py` if and only if it is used by two or more modules and has no module-specific state. Shared classes sit in class-only modules and are re-exported by `reward_model_utils.py`. Functions used only once remain private to their module with a `_` prefix.
 
 ---
 
 ## 4. Feature Index Map
 
-The feature index map defines the start and end index within the flat 42,248-dim input tensor for each feature slot. It is derived at load time by `load_dataset.py` from the ordered list of feature columns in `final_cdss_dataset.parquet`, following the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12.
+The feature index map defines the start and end index within the flat 42,248-dim input tensor for each feature slot. It is derived at load time by `Mimic4DataLoader` from the ordered list of feature columns in `final_cdss_dataset.parquet`, following the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12.
 
 The derivation algorithm iterates the ordered column list, skips the three metadata columns (`subject_id`, `hadm_id`, `split`) and the two label columns (`y1_mortality`, `y2_readmission`), and for each remaining column assigns a start index equal to the running offset and an end index equal to start plus the column's declared dimension — 8 for `demographic_vec` and 768 for all `*_embedding` columns. The result is a dict mapping column name to a `(start, end)` tuple.
 
@@ -148,9 +165,9 @@ The algorithm expects to find exactly **56 feature columns**: 1 structured vecto
 - **1 radiology embedding** — `radiology_embedding` (F19)
 - **37 microbiology panel embeddings** — `micro_blood_culture_routine_embedding` through `micro_throat_strep_embedding` (F20–F56)
 
-If the count of `*_embedding` columns in the dataset does not equal exactly 55, or if the count within any of the four groups above does not match (4 + 13 + 1 + 37), `build_feature_index_map()` raises a `SchemaError` referencing `PREPROCESSING_DATA_MODEL.md` Section 3.12. This guards against silent miscounting if the upstream dataset schema changes.
+If the count of `*_embedding` columns in the dataset does not equal exactly 55, or if the count within any of the four groups above does not match (4 + 13 + 1 + 37), `Mimic4DataLoader._build_feature_index_map()` raises a `SchemaError` referencing `PREPROCESSING_DATA_MODEL.md` Section 3.12. This guards against silent miscounting if the upstream dataset schema changes.
 
-The map is constructed once by `load_dataset.py`, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
+The map is constructed once by `Mimic4DataLoader`, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
 
 The map is never written to a standalone config or YAML file — a separate file would duplicate `PREPROCESSING_DATA_MODEL.md` Section 3.12 and create a consistency risk.
 
@@ -160,21 +177,40 @@ The map is never written to a standalone config or YAML file — a separate file
 
 ---
 
-### `load_dataset.py`
+### `data_loader.py`
 
-Loads `final_cdss_dataset.parquet`, validates the upstream data contract, constructs the feature index map, and returns lazy `ParquetDataset` objects per split plus metadata. Plain script with `run(config)` entry point. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
+Defines the `DataLoader` abstract base class that establishes the contract for all dataset-specific loaders. Provides a `load(config)` template method that orchestrates the open → validate → build index map → split → bundle sequence via abstract hooks. Concrete subclasses implement the dataset-specific hooks; the template method ensures consistent ordering and error handling.
 
-**Algorithm:**
+Public interface: `load(config) -> DatasetBundle`. All other methods are abstract or private.
+
+---
+
+### `checkpoint_manager.py`
+
+Centralises all checkpoint read/write operations. `CheckpointManager` is the sole class permitted to write `epoch_<N>.pt` and `best_model.pt`, and the sole class that performs schema safety checks before a resume proceeds.
+
+**Key responsibilities:**
+- `save(epoch, model, optimizer, scheduler, masking_state, feature_index_map, config, dev_loss)` — writes the checkpoint dict to `CHECKPOINT_DIR/epoch_<N>.pt` and atomically updates `best_model.pt` if dev_loss improved. Prunes old epoch checkpoints keeping only `CHECKPOINT_KEEP_N` most recent.
+- `load_latest() -> dict` — identifies the most recent checkpoint by epoch number (not mtime) and returns the checkpoint dict.
+- `validate_feature_index_map(old_map, new_map)` — compares the feature index map stored in the checkpoint against the freshly derived map from `Mimic4DataLoader`. If keys or index ranges differ, raises `SchemaError` with a descriptive message to abort the resume and prevent training with shifted feature boundaries after an upstream dataset change.
+
+The config snapshot inside the checkpoint is authoritative for architecture reconstruction — see Section 8.
+
+---
+
+### `mimic4_data_loader.py`
+
+Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `DataLoader` template. `DataLoader.load()` orchestrates open/validate/read/bundle steps via template hooks; dataset-specific logic lives in subclasses. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
+
+**Algorithm (Mimic4DataLoader implementation):**
 1. Read `final_cdss_dataset.parquet` from `DATASET_PATH` using `pyarrow`. Do not use `fastparquet` — the fastparquet/pyarrow serialisation incompatibility observed in the preprocessing pipeline applies here.
-2. Validate column presence: assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12. Raise `SchemaError` referencing the data model doc if any column is missing or out of order.
-3. Validate `y1_mortality`: assert dtype is int8 or float32, assert no null values. Error message references `extract_y_data.py` as the producing module.
-4. Validate `y2_readmission`: assert dtype is float32. Assert all rows where `y1_mortality = 1` carry NaN. Assert all rows where `y1_mortality = 0` are non-null. Error message references `PREPROCESSING_DATA_MODEL.md` Section 3.12 and `extract_y_data.py`.
-5. Validate all `*_embedding` columns: assert dtype is float32 and no null values exist in any embedding column. Error message references `combine_dataset.py`.
-6. Build the feature index map via `build_feature_index_map()` from `reward_model_utils.py`. This step also validates the 55-embedding count and per-group breakdown — see Section 4.
-7. Read the `split` column only (lightweight — metadata column) to determine row indices for each split. Produce three lists of row indices: `train_indices`, `dev_indices`, `test_indices`.
-8. Compute `pos_weight_y1` and `pos_weight_y2` from the training split rows only via `compute_pos_weights()`. This reads only `y1_mortality` and `y2_readmission` columns for the training rows — not the full feature data. These values will be broadcast to non-rank-0 processes by `train.py`.
-9. Instantiate three `ParquetDataset` objects from `reward_model_utils.py` — one per split — passing the open PyArrow file handle, the split's row index list, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Each `ParquetDataset` holds only the file handle and index metadata in memory. No feature data is read at this step.
-10. Return a `DatasetBundle` named tuple: `train_dataset`, `dev_dataset`, `test_dataset` (each a `ParquetDataset`), `feature_index_map`, `pos_weight_y1`, `pos_weight_y2`.
+2. Validate column presence and order via `Mimic4DataLoader._validate_schema()`; assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12.
+3. Validate labels: `y1_mortality` dtype int8/float32 and non-null; `y2_readmission` dtype float32 with NaN for deceased rows and non-null for survivors (checked inside `_validate_labels`).
+4. Build the feature index map via `Mimic4DataLoader._build_feature_index_map()`. This also validates the 55-embedding count and per-group breakdown — see Section 4.
+5. Read the `split` column only (lightweight — metadata column) to determine row indices for each split. Produce three lists of row indices: `train_indices`, `dev_indices`, `test_indices`.
+6. Compute `pos_weight_y1` and `pos_weight_y2` from the training split rows via `Mimic4DataLoader._compute_pos_weights()` unless overridden by `POS_WEIGHT_Y1`/`POS_WEIGHT_Y2` in config.
+7. Instantiate three `ParquetDataset` objects (class-only module `parquet_dataset.py`, re-exported by `reward_model_utils.py`) — one per split — passing the open PyArrow file handle, the split's row index list, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Each `ParquetDataset` holds only the file handle and index metadata in memory. No feature data is read at this step.
+8. Return a `DatasetBundle` named tuple (class-only module `dataset_bundle.py`, re-exported by `reward_model_utils.py`): `train_dataset`, `dev_dataset`, `test_dataset` (each a `ParquetDataset`), `feature_index_map`, `pos_weight_y1`, `pos_weight_y2`.
 
 **Config keys used:** `DATASET_PATH`, `FEATURES_DIM` (assertion only — must equal D as derived from the column schema), `DATASET_ROW_GROUP_CACHE_SIZE`.
 
@@ -204,19 +240,21 @@ Implements the `MaskingSchedule` class, which maintains the curriculum state and
 
 **Class: `MaskingSchedule`**
 
-The constructor accepts the `feature_index_map`, curriculum schedule parameters (`start_ratios`, `end_ratios`, `transition_shape`, `transition_midpoint_epoch`, `total_epochs`), and `k` (features zeroed per sample in random mode, default 1).
+The constructor accepts the `feature_index_map`, `num_always_visible` (integer — the first `num_always_visible` slots in the index map are never candidates for masking), curriculum schedule parameters (`start_ratios`, `end_ratios`, `transition_shape`, `transition_midpoint_epoch`, `total_epochs`), and the four k-range fraction parameters (`random_k_min_fraction`, `random_k_max_fraction`, `adversarial_k_min_fraction`, `adversarial_k_max_fraction`). The constructor partitions the feature index map into `_always_visible_slots` (first `num_always_visible` entries) and `_maskable_slots` (all remaining entries). M denotes the count of maskable slots.
 
-`get_mode_probabilities(epoch)` delegates to `sigmoid_crossover()` in `reward_model_utils.py` and returns the current `(p_random, p_adversarial, p_none)` tuple for the given epoch.
+`get_mode_probabilities(epoch)` delegates to the module-local `sigmoid_crossover()` helper and returns the current `(p_random, p_adversarial, p_none)` tuple for the given epoch.
 
-`sample_mode(epoch)` draws a masking mode string — `'random'`, `'adversarial'`, or `'none'` — according to the current probabilities.
+`sample_mode(epoch)` draws a masking mode string — `'random'`, `'adversarial'`, or `'none'` — according to the current probabilities, with explicit normalisation to guard against floating-point drift.
 
-`apply_random_mask(X)` selects `k` feature slots uniformly at random per sample without replacement, then zeros the corresponding index ranges to 0.0. Returns the masked tensor.
+`_sample_k(min_fraction, max_fraction)` draws an integer k independently per sample from `Uniform(floor(min_fraction × M), ceil(max_fraction × M))`. After rounding, the lower bound is clamped to at least 1 and the upper bound to at most M−1. If lower still exceeds upper after clamping (possible only when M is very small and the fraction range is tight), lower is set equal to upper as a final safety guard.
 
-`apply_adversarial_mask(X, grad_X)` receives the input tensor and the gradient `∂L/∂X` from the first forward/backward pass. For each sample it computes the L2 norm of the gradient over each feature slot's index range, identifies the highest-norm slot, and zeros that slot. Returns the adversarially masked tensor. The gradient computation is the responsibility of `train.py` — see Section 7.
+`apply_random_mask(X)` draws k independently per sample via `_sample_k(random_k_min_fraction, random_k_max_fraction)`, selects k maskable slots uniformly at random per sample without replacement, then zeros the corresponding index ranges to 0.0. Returns a cloned masked tensor — the original is not modified.
 
-`apply_no_mask(X)` returns `X` unchanged.
+`apply_adversarial_mask(X, grad_X)` draws k independently per sample via `_sample_k(adversarial_k_min_fraction, adversarial_k_max_fraction)`. For each sample it computes the RMS gradient magnitude per maskable slot: `importance[i, f] = ||grad_X[i, start_f:end_f]||_2 / sqrt(slot_dim_f)`. Dividing by the square root of slot dimension normalises for slot size, making `demographic_vec` (8 dims) and embedding slots (768 dims) directly comparable. Sorts all maskable slots by importance score descending and zeros the top k slots per sample. Returns a cloned masked tensor. The gradient computation is the responsibility of `train.py` — see Section 7.
 
-**Config keys used:** `MASKING_START_RATIOS`, `MASKING_END_RATIOS`, `MASKING_TRANSITION_SHAPE`, `MASKING_TRANSITION_MIDPOINT_EPOCH`, `MASKING_K`.
+`apply_no_mask(X)` returns `X` unchanged (no clone needed).
+
+**Config keys used:** `MASKING_START_RATIOS`, `MASKING_END_RATIOS`, `MASKING_TRANSITION_SHAPE`, `MASKING_TRANSITION_MIDPOINT_EPOCH`, `MASKING_RANDOM_K_MIN_FRACTION`, `MASKING_RANDOM_K_MAX_FRACTION`, `MASKING_ADVERSARIAL_K_MIN_FRACTION`, `MASKING_ADVERSARIAL_K_MAX_FRACTION`, `NUM_ALWAYS_VISIBLE_FEATURES`.
 
 ---
 
@@ -224,15 +262,15 @@ The constructor accepts the `feature_index_map`, curriculum schedule parameters 
 
 Plain module-level functions. No class, no state.
 
-`compute_loss(logits_y1, logits_y2, y1, y2, pos_weight_y1, pos_weight_y2, w1, w2)` computes the total weighted loss.
+`compute_loss(logits_y1, logits_y2, y1, y2, pos_weight_y1, pos_weight_y2, w1, w2)` computes the total weighted loss. `w1` and `w2` are normalised weights summing to 1.0 — normalisation is applied by `RewardModelConfig` at config load time so that callers always receive weights that already sum to 1.0.
 
 For `L_Y1`: apply `BCEWithLogitsLoss` with `pos_weight = pos_weight_y1` over the full batch. `y1` is always fully populated — no masking required.
 
 For `L_Y2`: construct the survivor mask `~torch.isnan(y2)`. If the mask is all-false (entire batch is deceased), set `L_Y2 = torch.tensor(0.0)` on the correct device to prevent NaN propagation. Otherwise apply `BCEWithLogitsLoss` with `pos_weight = pos_weight_y2` over the masked subset `logits_y2[mask]` against `y2[mask]`.
 
-Total loss: `L = w1 * L_Y1 + w2 * L_Y2`. Returns the scalar total loss plus the two component losses separately for epoch logging.
+Total loss: `L = w1 * L_Y1 + w2 * L_Y2`. Because weights sum to 1.0, the total loss magnitude is invariant to how weight is distributed across heads. Returns the scalar total loss plus the two component losses separately for epoch logging.
 
-`compute_metrics(logits_y1, logits_y2, y1, y2)` applies sigmoid to both logit tensors, constructs the survivor mask, and computes AUROC, AUPRC, and ECE for Y1 (full batch) and Y2 (survivors only) using scikit-learn. Called on the dev split by rank 0 at epoch end.
+`compute_metrics(logits_y1, logits_y2, y1, y2, masked=False)` applies sigmoid to both logit tensors, constructs the survivor mask, and computes AUROC, AUPRC, and ECE for Y1 (full batch) and Y2 (survivors only) using scikit-learn. The `masked` flag is included in the returned metrics dict as a tag so callers can distinguish masked-input metrics from unmasked-input metrics in the epoch log. ECE uses equal-mass binning (adaptive bin edges via `np.percentile`) rather than equal-width binning, to produce reliable calibration estimates under the class imbalance present in both Y1 (~8–10% positive) and Y2 (~20% positive among survivors). Called on the dev split by rank 0 at epoch end using unmasked inputs. Also called on training batches for diagnostic AUROC tracking — see Section 6.4.
 
 **Config keys used:** `LOSS_WEIGHT_Y1`, `LOSS_WEIGHT_Y2`.
 
@@ -244,18 +282,19 @@ DDP entry point. Launched by `torchrun`. Plain script with `main()` entry point.
 
 **Algorithm:**
 1. Parse CLI arguments: `--config`, `--resume`.
-2. Load and validate config via `load_and_validate_config()`.
+2. Load and validate config via `load_and_validate_config()`. Verify that `LOSS_WEIGHT_Y1 + LOSS_WEIGHT_Y2 = 1.0` (normalisation is applied by `RewardModelConfig` at load time).
 3. Initialise the DDP process group with `nccl` backend using environment variables set by `torchrun`. If only one GPU is available, skip DDP initialisation and proceed in single-process mode (logged at `WARNING`).
-4. On rank 0 only: call `load_dataset.run(config)` to load data and compute `pos_weight` values. Broadcast `pos_weight_y1` and `pos_weight_y2` to all ranks via `broadcast_tensor()`. Non-rank-0 processes wait at the broadcast and receive the scalar values without loading the dataset.
+4. On rank 0 only: call `Mimic4DataLoader(config).load()` to load data and compute `pos_weight` values. Broadcast `pos_weight_y1` and `pos_weight_y2` to all ranks via `broadcast_tensor()` and share the `DatasetBundle` via `broadcast_object_list()`. Non-rank-0 processes wait at the broadcast and receive the bundle and scalar values without touching disk.
 5. Instantiate `RewardModel` with `input_dim` from the feature index map. Move to `get_device(local_rank)`. Wrap in `DistributedDataParallel` if multi-GPU.
-6. Instantiate `MaskingSchedule` with config parameters.
+6. Instantiate `MaskingSchedule` with config parameters including `num_always_visible = NUM_ALWAYS_VISIBLE_FEATURES` and all four k-range fraction parameters.
 7. Instantiate `AdamW` with `LEARNING_RATE` and `WEIGHT_DECAY`. Instantiate cosine annealing scheduler with linear warmup over `LR_WARMUP_EPOCHS`.
 8. If `--resume`: load latest checkpoint via the mechanism in Section 8. Restore model weights, optimiser state, scheduler state, epoch, and masking schedule state. Broadcast model weights from rank 0 to all ranks. Barrier after broadcast.
-9. Construct `DistributedSampler` over the training dataset (rank 0 only holds data — see Section 6.2). Wrap in `DataLoader` with `batch_size = BATCH_SIZE_PER_GPU`.
+9. Construct `RowGroupBlockSampler` over the training dataset. Wrap in `DataLoader` with `batch_size = BATCH_SIZE_PER_GPU` and `num_workers = DATALOADER_NUM_WORKERS`.
 10. For each epoch from the current epoch to `MAX_EPOCHS`:
     - Call `sampler.set_epoch(epoch)` to reshuffle per epoch.
-    - For each mini-batch: sample masking mode from `MaskingSchedule`; apply the appropriate mask — adversarial mode requires two forward/backward passes using `model.no_sync()` for the first pass (see Section 6.3 and 7); compute loss via `loss.compute_loss()`; call `optimizer.step()`; `scheduler.step()`.
-    - On rank 0 at epoch end: run dev evaluation via `loss.compute_metrics()` on the full dev split (no DDP); log metrics to `INFO`; append epoch row to `training_metrics.parquet`; check early stopping criterion.
+    - For each mini-batch: sample masking mode from `MaskingSchedule`; apply the appropriate mask — adversarial mode requires two forward/backward passes using `model.no_sync()` for the first pass (see Section 6.3 and 7), with k drawn per sample from the configured adversarial k range; random mode draws k per sample from the random k range; compute loss via `loss.compute_loss()`; call `optimizer.step()`; `scheduler.step()`.
+    - After each masked forward pass, run a second `torch.no_grad()` forward pass on the original unmasked batch to compute unmasked AUROC and AUPRC. Log both masked and unmasked AUROC per batch at `DEBUG` level; aggregate per epoch at `INFO` level.
+    - On rank 0 at epoch end: run dev evaluation on the full dev split using **unmasked inputs only** — no masking mode is applied during dev evaluation. This ensures dev loss and dev metrics are directly comparable across all epochs regardless of curriculum state. Call `loss.compute_metrics()` with `masked=False`. Log all metrics to `INFO`; append epoch row to `training_metrics.parquet`; check early stopping criterion.
     - If dev loss improved: write checkpoint (rank 0 only, see Section 8); update `best_model.pt`.
     - Broadcast early stopping signal from rank 0 to all ranks via `broadcast_tensor()`. All ranks break the training loop simultaneously on a `True` stop signal.
 11. On rank 0: write final checkpoint. Call `dist.destroy_process_group()`.
@@ -273,8 +312,8 @@ Applies temperature scaling to the best trained model. Plain script with `run(co
 2. Instantiate `RewardModel` from the checkpoint config snapshot. Load state dict. Move to device. Call `model.eval()`.
 3. Load the dev split from `final_cdss_dataset.parquet`.
 4. Run a full forward pass on the dev split with `torch.no_grad()` to collect raw logits for Y1 and Y2.
-5. For Y1: optimise scalar temperature `T_y1` by minimising negative log-likelihood on the full dev split using L-BFGS. The calibrated probability is `sigmoid(logit / T_y1)`.
-6. For Y2: apply the survivor mask, then optimise `T_y2` on the survivor subset using L-BFGS.
+5. For Y1: optimise scalar temperature `T_y1` in log-space — define `log_T = torch.nn.Parameter(torch.zeros(1))` and recover `T = exp(log_T)` inside the closure. This guarantees T > 0 throughout optimisation, avoiding erratic gradients at the clamp boundary that occur with direct optimisation of T. Minimise negative log-likelihood on the full dev split using L-BFGS. Return `max(exp(log_T).item(), 1e-8)` as the fitted temperature.
+6. For Y2: apply the survivor mask, then optimise `T_y2` on the survivor subset using the same log-space L-BFGS procedure.
 7. Log pre- and post-calibration ECE for both heads for audit.
 8. Write `{'T_y1': float(T_y1), 'T_y2': float(T_y2)}` to `CALIBRATION_PARAMS_PATH` as JSON.
 
@@ -300,7 +339,7 @@ The constructor accepts `checkpoint_path` and `calibration_params_path` (or the 
 
 ### `validate_contract.py`
 
-Standalone CLI tool. Runs only the schema assertions from `load_dataset.py` steps 2–5 without constructing tensors or loading data into memory. Intended to be run before submitting a training job.
+Standalone CLI tool. Runs only the schema assertions from `Mimic4DataLoader.load()` steps 2–5 without constructing tensors or loading data into memory. Intended to be run before submitting a training job.
 
 **Algorithm:**
 1. Load config from `--config` argument.
@@ -344,9 +383,9 @@ The `nccl` backend is used for all GPU-to-GPU communication. `nccl` is the only 
 
 ### 6.2 Data Sharding
 
-Only rank 0 loads the dataset from `final_cdss_dataset.parquet`. Rank 0 calls `load_dataset.run(config)`, which returns three `ParquetDataset` objects — one per split. These are lightweight wrappers holding a PyArrow file handle and row index lists; no feature data is materialised at load time. Non-rank-0 processes do not call `load_dataset` at all — they receive only the broadcast `pos_weight` scalars from rank 0 and wait at a barrier while rank 0 loads.
+Only rank 0 loads the dataset from `final_cdss_dataset.parquet`. Rank 0 calls `Mimic4DataLoader(config).load()`, which returns three `ParquetDataset` objects — one per split. These are lightweight wrappers holding a PyArrow file handle and row index lists; no feature data is materialised at load time. Non-rank-0 processes do not touch disk — they receive the `DatasetBundle` object and broadcast `pos_weight` scalars from rank 0 and wait at a barrier while rank 0 loads.
 
-Training data is sharded across GPUs via `DistributedSampler`. The sampler operates on row indices from the `train_dataset` `ParquetDataset`. For each epoch it assigns a non-overlapping subset of indices to each rank. Each rank's `DataLoader` calls `ParquetDataset.__getitem__` for its assigned indices, which reads the corresponding row groups lazily from disk via the LRU cache and materialises individual batch tensors on demand. With 2 GPUs and `BATCH_SIZE_PER_GPU = 256`, each GPU materialises 256 samples per step and the effective batch size is 512.
+Training data is sharded across GPUs via `RowGroupBlockSampler`. The sampler shuffles at the row group level rather than globally across individual row indices, preserving Parquet row-group locality and preventing I/O thrashing on the `ParquetDataset` LRU cache. Row groups are partitioned round-robin across DDP ranks, ensuring each rank processes a non-overlapping subset of admissions per epoch. Each rank's `DataLoader` calls `ParquetDataset.__getitem__` for its assigned indices, which reads the corresponding row groups lazily from disk via the LRU cache and materialises individual batch tensors on demand. With 2 GPUs and `BATCH_SIZE_PER_GPU = 256`, each GPU materialises 256 samples per step and the effective batch size is 512.
 
 Dev evaluation runs on rank 0 only, iterating the full `dev_dataset` without a `DistributedSampler`, ensuring metrics reflect the complete dev set rather than a shard. The dev split is also accessed lazily via `ParquetDataset` — the full dev tensor is never held in RAM simultaneously.
 
@@ -384,11 +423,13 @@ The gradient computation step in `train.py` feeds `masking.py apply_adversarial_
 
 Before the first forward pass in an adversarial batch, `train.py` clones the batch input tensor and calls `requires_grad_(True)` on the clone. This ensures the original data tensor in the `DataLoader` is not modified. The first forward pass runs on this clone. The resulting loss is computed via `loss.compute_loss()`. `loss.backward()` is called inside `model.no_sync()` to suppress DDP all-reduce. After the backward pass, the clone's `.grad` attribute holds `∂L/∂X` of shape `(batch_size, D)`.
 
-**Importance scoring per feature slot:**
+**Importance scoring per feature slot (RMS normalisation):**
 
-For each sample and each of the 56 feature slots, the importance score is the L2 norm of the gradient over the slot's index range: `importance[i, f] = ||grad[i, start_f : end_f]||_2`. This is computed by iterating the feature index map and slicing `grad` accordingly. The slot with the highest importance score per sample is passed to `apply_adversarial_mask()`, which zeros the corresponding index range.
+For each sample and each maskable feature slot, the importance score is the RMS gradient magnitude: `importance[i, f] = ||grad[i, start_f : end_f]||_2 / sqrt(slot_dim_f)`. Dividing by the square root of slot dimension normalises for slot size — `demographic_vec` has 8 dimensions while all embedding slots have 768. Without this normalisation, the L2 norm of a 768-dim gradient vector would almost always exceed an 8-dim vector regardless of actual feature importance, biasing adversarial selection toward embedding slots.
 
-**Why L2 norm rather than raw gradient maximum:** The L2 norm aggregates all dimensions within a slot into a single scalar, making slots of different sizes comparable — `demographic_vec` has 8 dimensions while all embedding slots have 768. A raw per-dimension maximum would be dominated by the single largest gradient element regardless of which slot it belongs to, which could bias mask selection toward embedding slots even when their overall contribution is small.
+**Top-k slot selection:**
+
+After computing importance scores for all maskable slots, sort them descending. Zero the top k slots per sample, where k is drawn independently per sample via `_sample_k(adversarial_k_min_fraction, adversarial_k_max_fraction)`. This replaces the earlier single-slot argmax with a sorted selection over the configured fraction range.
 
 **Gradient cleanup:** After the first pass, the clone tensor is discarded. `optimizer.zero_grad()` is called before the second forward pass to clear any accumulated gradients. The second pass uses the original (non-clone) batch input tensor, which has `requires_grad = False`.
 
@@ -406,6 +447,8 @@ For each sample and each of the 56 feature slots, the importance score is the L2
 - Best dev loss seen so far
 - Feature index map snapshot
 - Full config snapshot serialised from the Pydantic model
+
+Checkpoint ownership is centralised in a dedicated `CheckpointManager` class (own file: `checkpoint_manager.py`). It is the sole writer/loader of `epoch_<N>.pt` and `best_model.pt`, and it performs schema safety checks before a resume proceeds. `CheckpointManager.validate_feature_index_map(old_map, new_map)` compares the feature-index map stored inside the checkpoint against the freshly derived map from `Mimic4DataLoader`; if keys or index ranges differ, it raises and aborts the resume to prevent continuing with shifted feature boundaries after an upstream dataset change.
 
 The config snapshot inside the checkpoint is authoritative for architecture reconstruction. If `config/reward_model.yaml` is modified between a run and a resume, the resumed run uses the checkpoint's config to ensure no architecture mismatch. The current YAML is still loaded for non-architecture settings (paths, logging) but architecture keys are ignored in favour of the checkpoint snapshot.
 
@@ -429,7 +472,7 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `INPUT_DIM` | (derived) | `load_dataset.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup |
+| `INPUT_DIM` | (derived) | `data_loader.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup |
 | `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | `model.py` | Hidden layer output sizes; length determines depth |
 | `★ DROPOUT_RATE` | `0.3` | `model.py` | Dropout probability per hidden layer |
 | `ACTIVATION` | `relu` | `model.py` | Activation function; supports `relu`, `leaky_relu` |
@@ -454,8 +497,8 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `LOSS_WEIGHT_Y1` | `1.0` | `loss.py` | Head weight `w1` |
-| `LOSS_WEIGHT_Y2` | `1.0` | `loss.py` | Head weight `w2` |
+| `LOSS_WEIGHT_Y1` | `0.75` | `loss.py` | Normalised head weight w1; `RewardModelConfig` validates that `LOSS_WEIGHT_Y1 + LOSS_WEIGHT_Y2 = 1.0` at startup |
+| `LOSS_WEIGHT_Y2` | `0.25` | `loss.py` | Normalised head weight w2 |
 | `POS_WEIGHT_Y1` | (computed) | `loss.py` | Positive class weight for Y1; computed from training split if omitted |
 | `POS_WEIGHT_Y2` | (computed) | `loss.py` | Positive class weight for Y2; computed from survivors in training split if omitted |
 
@@ -467,20 +510,24 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 | `MASKING_END_RATIOS` | `{random: 0.33, adversarial: 0.33, none: 0.34}` | `masking.py` | Mode probabilities at final epoch |
 | `★ MASKING_TRANSITION_MIDPOINT_EPOCH` | `50` | `masking.py` | Epoch at sigmoid crossover inflection point |
 | `MASKING_TRANSITION_SHAPE` | `sigmoid` | `masking.py` | Crossover curve shape |
-| `MASKING_K` | `1` | `masking.py` | Feature slots zeroed per sample in random mode |
+| `MASKING_RANDOM_K_MIN_FRACTION` | `0.5` | `masking.py` | Minimum fraction of maskable slots zeroed per sample in random mode |
+| `MASKING_RANDOM_K_MAX_FRACTION` | `1.0` | `masking.py` | Maximum fraction of maskable slots zeroed per sample in random mode (upper bound is M−1) |
+| `MASKING_ADVERSARIAL_K_MIN_FRACTION` | `0.3` | `masking.py` | Minimum fraction of maskable slots zeroed per sample in adversarial mode |
+| `MASKING_ADVERSARIAL_K_MAX_FRACTION` | `0.7` | `masking.py` | Maximum fraction of maskable slots zeroed per sample in adversarial mode |
+| `NUM_ALWAYS_VISIBLE_FEATURES` | `5` | `masking.py` | Number of leading feature slots that are never masked (positional — must be the first N slots in the feature index map) |
 
 ### Dataset loading
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `load_dataset.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
-| `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `reward_model_utils.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
+| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `parquet_dataset.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
 
 ### Paths
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `load_dataset.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
 | `CHECKPOINT_DIR` | `data/reward_model/checkpoints` | `train.py`, `calibrate.py`, `export_model.py` | Checkpoint directory |
 | `METRICS_PATH` | `data/reward_model/training_metrics.parquet` | `train.py` | Per-epoch metrics output |
 | `CALIBRATION_PARAMS_PATH` | `data/reward_model/calibration_params.json` | `calibrate.py`, `inference.py` | Temperature scaling output |
