@@ -1,5 +1,6 @@
 """Dataset loader infrastructure for the reward model."""
 
+from abc import ABC, abstractmethod
 import logging
 from typing import Dict, List, Tuple
 
@@ -15,7 +16,7 @@ from src.reward_model.schema_error import SchemaError
 logger = logging.getLogger(__name__)
 
 
-class DataLoader:
+class DataLoader(ABC):
     """Generic dataset loader template.
 
     Subclasses provide dataset-specific schema validation, label handling, and
@@ -31,20 +32,25 @@ class DataLoader:
     def _open_parquet(self) -> pq.ParquetFile:
         return pq.ParquetFile(self._config.DATASET_PATH)
 
+    @abstractmethod
     def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:  # pragma: no cover - abstract hook
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _read_label_table(self, parquet_file: pq.ParquetFile) -> pa.Table:  # pragma: no cover - abstract hook
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _validate_labels(self, label_table: pa.Table) -> None:  # pragma: no cover - abstract hook
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _build_feature_index_map(self, parquet_file: pq.ParquetFile) -> Dict[str, Tuple[int, int]]:  # pragma: no cover - abstract hook
-        raise NotImplementedError
+        ...
 
+    @abstractmethod
     def _compute_pos_weights(self, label_table, train_rows: List[int]) -> Tuple[float, float]:  # pragma: no cover - abstract hook
-        raise NotImplementedError
+        ...
 
     # ---------------------------- #
     # Shared helpers / defaults    #
@@ -139,4 +145,3 @@ class Mimic4DataLoader(DataLoader):
         labels_df = label_table.to_pandas()
         train_y_df = labels_df.iloc[train_rows].reset_index(drop=True)
         return compute_pos_weights(train_y_df)
-

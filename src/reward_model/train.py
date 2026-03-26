@@ -104,7 +104,7 @@ def _load_and_broadcast_dataset(
     rank: int,
     device: torch.device,
     is_ddp: bool,
-) -> Tuple[Optional[DatasetBundle], float, float]:
+) -> Tuple[DatasetBundle, float, float]:
     """Load dataset on rank 0 and broadcast pos_weight scalars to all ranks.
 
     Rank 0 calls ``Mimic4DataLoader(config).load()`` to load and validate the Parquet
@@ -124,8 +124,7 @@ def _load_and_broadcast_dataset(
             performed.
 
     Returns:
-        Tuple of ``(bundle, pos_weight_y1, pos_weight_y2)``.  ``bundle`` is
-        ``None`` on non-rank-0 processes.
+        Tuple of ``(bundle, pos_weight_y1, pos_weight_y2)``.
     """
     bundle: Optional[DatasetBundle] = None
     if rank == 0:
@@ -839,7 +838,7 @@ def main() -> None:
         train_loader = None
 
     steps_per_epoch = len(train_loader) if train_loader is not None else 1
-    start_step = 0 if args.resume else start_epoch * steps_per_epoch
+    start_step = start_epoch * steps_per_epoch
     scheduler = _build_lr_scheduler(optimizer, config, steps_per_epoch, start_step)
 
     if ckpt_state is not None:
