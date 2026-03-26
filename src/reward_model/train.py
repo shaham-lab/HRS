@@ -521,6 +521,160 @@ def _eval_dev(
     return metrics
 
 
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the CDSS-ML reward model")
+    parser.add_argument("--config", required=True, help="Path to reward_model.yaml")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    return parser.parse_args()
+
+
+def _setup_logging(initial_rank: int) -> None:
+    if initial_rank == 0:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+            stream=sys.stdout,
+        )
+    else:
+        logging.basicConfig(level=logging.ERROR)
+
+
+def _init_runtime(config: RewardModelConfig) -> Tuple[int, int, int, bool, torch.device]:
+    rank, local_rank, world_size, is_ddp = _init_ddp(config.NUM_GPUS)
+    device = get_device(local_rank)
+    return rank, local_rank, world_size, is_ddp, device
+
+
+def _load_datasets_and_weights(
+    config: RewardModelConfig, rank: int, device: torch.device, is_ddp: bool
+) -> Tuple[DatasetBundle, float, float]:
+    bundle, pos_weight_y1, pos_weight_y2 = _load_and_broadcast_dataset(config, rank, device, is_ddp)
+    if bundle is None:
+        raise RuntimeError("Dataset must be available on all ranks after broadcast")
+    return bundle, pos_weight_y1, pos_weight_y2
+
+
+def _resume_from_checkpoint(
+    args: argparse.Namespace,
+    checkpoint_manager: CheckpointManager,
+    feature_index_map: Dict[str, Tuple[int, int]],
+    config: RewardModelConfig,
+    rank: int,
+    is_ddp: bool,
+) -> Tuple[Optional[dict], int, float]:
+    start_epoch = 0
+    best_dev_loss = float("inf")
+    ckpt_state: Optional[dict] = None
+
+    if args.resume:
+        latest = checkpoint_manager.find_latest()
+        if latest is None:
+            raise RuntimeError("Resume requested but no checkpoint found")
+        if rank == 0:
+            ckpt_state = checkpoint_manager.load(latest, feature_index_map)
+        if is_ddp:
+            obj_state: list = [ckpt_state]
+            dist.broadcast_object_list(obj_state, src=0)
+            ckpt_state = obj_state[0]
+            dist.barrier()
+        if ckpt_state is None:
+            raise RuntimeError("Checkpoint state could not be loaded")
+        start_epoch = ckpt_state["epoch"] + 1
+        best_dev_loss = ckpt_state.get("best_dev_loss", best_dev_loss)
+
+    return ckpt_state, start_epoch, best_dev_loss
+
+
+def _build_masking_schedule(
+    config: RewardModelConfig, feature_index_map: Dict[str, Tuple[int, int]], ckpt_state: Optional[dict]
+) -> MaskingSchedule:
+    if ckpt_state is not None:
+        ms = ckpt_state["masking_schedule_state"]
+        return MaskingSchedule(
+            feature_index_map=feature_index_map,
+            start_ratios=ms["start_ratios"],
+            end_ratios=ms["end_ratios"],
+            transition_shape=ms["transition_shape"],
+            transition_midpoint_epoch=ms["transition_midpoint_epoch"],
+            total_epochs=ms["total_epochs"],
+            k=ms["k"],
+            always_visible_slots=ms.get("always_visible_slots", ALWAYS_VISIBLE_SLOTS),
+        )
+
+    return MaskingSchedule(
+        feature_index_map=feature_index_map,
+        start_ratios=config.MASKING_START_RATIOS,
+        end_ratios=config.MASKING_END_RATIOS,
+        transition_shape=config.MASKING_TRANSITION_SHAPE,
+        transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
+        total_epochs=config.MAX_EPOCHS,
+        k=config.MASKING_K,
+        always_visible_slots=ALWAYS_VISIBLE_SLOTS,
+    )
+
+
+def _build_train_loader(
+    train_dataset: Optional[torch.utils.data.Dataset],
+    config: RewardModelConfig,
+    rank: int,
+    world_size: int,
+    is_ddp: bool,
+) -> Optional[DataLoader]:
+    if train_dataset is None:
+        return None
+
+    sampler = RowGroupBlockSampler(
+        dataset=train_dataset,
+        rank=rank,
+        world_size=world_size if is_ddp else 1,
+        shuffle=True,
+        seed=0,
+    )
+    return DataLoader(
+        train_dataset,
+        batch_size=config.BATCH_SIZE_PER_GPU,
+        sampler=sampler,
+        num_workers=config.DATALOADER_NUM_WORKERS,
+        pin_memory=torch.cuda.is_available(),
+    )
+
+
+def _build_model(
+    input_dim: int, config: RewardModelConfig, device: torch.device, local_rank: int, is_ddp: bool
+) -> torch.nn.Module:
+    model = RewardModel(
+        input_dim=input_dim,
+        layer_widths=config.LAYER_WIDTHS,
+        dropout_rate=config.DROPOUT_RATE,
+        activation=config.ACTIVATION,
+    ).to(device)
+    if is_ddp:
+        model = DistributedDataParallel(model, device_ids=[local_rank])
+    return model
+
+
+def _build_optimizer(model: torch.nn.Module, config: RewardModelConfig) -> torch.optim.Optimizer:
+    return torch.optim.AdamW(
+        model.parameters(),
+        lr=config.LEARNING_RATE,
+        weight_decay=config.WEIGHT_DECAY,
+        betas=(config.ADAM_BETA1, config.ADAM_BETA2),
+    )
+
+
+def _maybe_load_states(
+    model: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    scheduler: torch.optim.lr_scheduler.LRScheduler,
+    ckpt_state: Optional[dict],
+) -> None:
+    if ckpt_state is None:
+        return
+    unwrap_ddp(model).load_state_dict(ckpt_state["model_state_dict"])
+    optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+    scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+
+
 def _train_epochs(
     *,
     model: torch.nn.Module,
@@ -710,131 +864,45 @@ def main() -> None:
             g. ``dist.barrier()`` (all ranks resume next epoch together).
       11. Rank 0: write final checkpoint.  ``dist.destroy_process_group()``.
     """
-    parser = argparse.ArgumentParser(description="Train the CDSS-ML reward model")
-    parser.add_argument("--config", required=True, help="Path to reward_model.yaml")
-    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
-    args = parser.parse_args()
-
+    args = _parse_args()
     config = load_and_validate_config(args.config)
 
     initial_rank = int(os.environ.get("RANK", "0"))
-    if initial_rank == 0:
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
-            stream=sys.stdout,
-        )
-    else:
-        logging.basicConfig(level=logging.ERROR)
+    _setup_logging(initial_rank)
 
-    rank, local_rank, world_size, is_ddp = _init_ddp(config.NUM_GPUS)
-    device = get_device(local_rank)
+    rank, local_rank, world_size, is_ddp, device = _init_runtime(config)
 
-    bundle, pos_weight_y1, pos_weight_y2 = _load_and_broadcast_dataset(config, rank, device, is_ddp)
-
-    feature_index_map: Optional[Dict[str, Tuple[int, int]]] = bundle.feature_index_map if bundle else None
-    input_dim: Optional[int] = bundle.input_dim if bundle else None
-    train_dataset = bundle.train_dataset if bundle else None
-    dev_dataset = bundle.dev_dataset if bundle else None
+    bundle, pos_weight_y1, pos_weight_y2 = _load_datasets_and_weights(config, rank, device, is_ddp)
+    feature_index_map: Dict[str, Tuple[int, int]] = bundle.feature_index_map
+    input_dim: int = bundle.input_dim
+    train_dataset = bundle.train_dataset
+    dev_dataset = bundle.dev_dataset
 
     checkpoint_dir = Path(config.CHECKPOINT_DIR)
     metrics_path = Path(config.METRICS_PATH)
     checkpoint_manager = CheckpointManager(checkpoint_dir, config.CHECKPOINT_KEEP_N)
 
-    if feature_index_map is None or input_dim is None or train_dataset is None or dev_dataset is None:
-        raise RuntimeError("Dataset must be available on all ranks after broadcast")
-
-    start_epoch = 0
-    best_dev_loss = float("inf")
-    ckpt_state: Optional[dict] = None
-
-    if args.resume:
-        latest = checkpoint_manager.find_latest()
-        if latest is None:
-            raise RuntimeError("Resume requested but no checkpoint found")
-        if rank == 0:
-            ckpt_state = checkpoint_manager.load(latest, feature_index_map if feature_index_map is not None else {})
-        if is_ddp:
-            obj_state: list = [ckpt_state]
-            dist.broadcast_object_list(obj_state, src=0)
-            ckpt_state = obj_state[0]
-            dist.barrier()
-        if ckpt_state is None:
-            raise RuntimeError("Checkpoint state could not be loaded")
-        start_epoch = ckpt_state["epoch"] + 1
-        best_dev_loss = ckpt_state.get("best_dev_loss", best_dev_loss)
-
-    model = RewardModel(
-        input_dim=input_dim,
-        layer_widths=config.LAYER_WIDTHS,
-        dropout_rate=config.DROPOUT_RATE,
-        activation=config.ACTIVATION,
-    ).to(device)
-    if is_ddp:
-        model = DistributedDataParallel(model, device_ids=[local_rank])
-
-    optimizer = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.LEARNING_RATE,
-        weight_decay=config.WEIGHT_DECAY,
-        betas=(config.ADAM_BETA1, config.ADAM_BETA2),
+    ckpt_state, start_epoch, best_dev_loss = _resume_from_checkpoint(
+        args, checkpoint_manager, feature_index_map, config, rank, is_ddp
     )
 
-    if ckpt_state is not None:
-        ms = ckpt_state["masking_schedule_state"]
-        masking_schedule = MaskingSchedule(
-            feature_index_map=feature_index_map if feature_index_map is not None else {},
-            start_ratios=ms["start_ratios"],
-            end_ratios=ms["end_ratios"],
-            transition_shape=ms["transition_shape"],
-            transition_midpoint_epoch=ms["transition_midpoint_epoch"],
-            total_epochs=ms["total_epochs"],
-            k=ms["k"],
-            always_visible_slots=ms.get("always_visible_slots", ALWAYS_VISIBLE_SLOTS),
-        )
-    else:
-        masking_schedule = MaskingSchedule(
-            feature_index_map=feature_index_map if feature_index_map is not None else {},
-            start_ratios=config.MASKING_START_RATIOS,
-            end_ratios=config.MASKING_END_RATIOS,
-            transition_shape=config.MASKING_TRANSITION_SHAPE,
-            transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
-            total_epochs=config.MAX_EPOCHS,
-            k=config.MASKING_K,
-            always_visible_slots=ALWAYS_VISIBLE_SLOTS,
-        )
+    model = _build_model(input_dim, config, device, local_rank, is_ddp)
+    optimizer = _build_optimizer(model, config)
 
-    if is_ddp and train_dataset is None:
+    masking_schedule = _build_masking_schedule(config, feature_index_map, ckpt_state)
+
+    train_loader = _build_train_loader(train_dataset, config, rank, world_size, is_ddp)
+
+    if is_ddp and train_loader is None:
         raise RuntimeError("Train dataset unavailable for DDP training")
-
-    if train_dataset is not None:
-        sampler = RowGroupBlockSampler(
-            dataset=train_dataset,
-            rank=rank,
-            world_size=world_size if is_ddp else 1,
-            shuffle=True,
-            seed=0,
-        )
-        train_loader = DataLoader(
-            train_dataset,
-            batch_size=config.BATCH_SIZE_PER_GPU,
-            sampler=sampler,
-            num_workers=config.DATALOADER_NUM_WORKERS,
-            pin_memory=torch.cuda.is_available(),
-        )
-    else:
-        train_loader = None
 
     steps_per_epoch = len(train_loader) if train_loader is not None else 1
     start_step = start_epoch * steps_per_epoch
     scheduler = _build_lr_scheduler(optimizer, config, steps_per_epoch, start_step)
 
-    if ckpt_state is not None:
-        unwrap_ddp(model).load_state_dict(ckpt_state["model_state_dict"])
-        optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
-        scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+    _maybe_load_states(model, optimizer, scheduler, ckpt_state)
 
-    last_epoch_completed, best_dev_loss = _train_epochs(
+    _train_epochs(
         model=model,
         optimizer=optimizer,
         scheduler=scheduler,
