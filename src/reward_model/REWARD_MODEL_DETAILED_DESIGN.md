@@ -157,22 +157,15 @@ A helper function belongs in `reward_model_utils.py` if and only if it is used b
 
 ## 4. Feature Index Map
 
-The feature index map defines the start and end index within the flat 42,248-dim input tensor for each feature slot. It is derived at load time by `Mimic4DataLoader` from the ordered list of feature columns in `final_cdss_dataset.parquet`, following the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12.
+The feature index map defines the start and end index within the flat D-dimensional input tensor for each feature slot. It is derived at load time by the dataset-specific data loader from the ordered list of feature columns in the dataset file. The derivation algorithm iterates the ordered column list, skips metadata columns (e.g. primary key, split column) and label columns, and for each remaining feature column assigns a start index equal to the running offset and an end index equal to start plus the column's declared dimension. The result is a dict mapping column name to a `(start, end)` tuple.
 
-The derivation algorithm iterates the ordered column list, skips the three metadata columns (`subject_id`, `hadm_id`, `split`) and the two label columns (`y1_mortality`, `y2_readmission`), and for each remaining column assigns a start index equal to the running offset and an end index equal to start plus the column's declared dimension — 8 for `demographic_vec` and 768 for all `*_embedding` columns. The result is a dict mapping column name to a `(start, end)` tuple.
+The number and breakdown of feature slots, their column names, and their declared dimensions are dataset-specific. For the MIMIC-IV deployment (56 slots, 1 structured vector at 8 dims, 55 BERT embeddings at 768 dims each, D=42,248) see `mimic4_feature_set.md` and Section 11.2 of this document.
 
-The algorithm expects to find exactly **56 feature columns**: 1 structured vector (`demographic_vec`) and **55 embedding columns** broken down as follows:
+The dataset-specific data loader validates the expected slot count and per-group breakdown and raises `SchemaError` referencing the upstream data model document if any count does not match. This guards against silent miscounting if the upstream dataset schema changes.
 
-- **4 history and triage embeddings** — `diag_history_embedding`, `discharge_history_embedding`, `triage_embedding`, `chief_complaint_embedding` (F2–F5)
-- **13 lab group embeddings** — `lab_blood_gas_embedding` through `lab_stool_embedding` (F6–F18)
-- **1 radiology embedding** — `radiology_embedding` (F19)
-- **37 microbiology panel embeddings** — `micro_blood_culture_routine_embedding` through `micro_throat_strep_embedding` (F20–F56)
+The map is constructed once by the data loader, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
 
-If the count of `*_embedding` columns in the dataset does not equal exactly 55, or if the count within any of the four groups above does not match (4 + 13 + 1 + 37), `Mimic4DataLoader._build_feature_index_map()` raises a `SchemaError` referencing `PREPROCESSING_DATA_MODEL.md` Section 3.12. This guards against silent miscounting if the upstream dataset schema changes.
-
-The map is constructed once by `Mimic4DataLoader`, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
-
-The map is never written to a standalone config or YAML file — a separate file would duplicate `PREPROCESSING_DATA_MODEL.md` Section 3.12 and create a consistency risk.
+The map is never written to a standalone config or YAML file — a separate file would duplicate the upstream data model document and create a consistency risk.
 
 ---
 
@@ -271,7 +264,7 @@ For each target i: construct the valid-sample mask `~torch.isnan(labels_list[i])
 
 `compute_metrics(logits_list, labels_list, masked=False)` applies sigmoid to each logits tensor, constructs per-target valid-sample masks, and computes AUROC, AUPRC, and ECE for each target using scikit-learn. Returns a dict keyed by target index: `{0: {'auroc': ..., 'auprc': ..., 'ece': ...}, 1: {...}, ...}`. The `masked` flag is included in the returned dict as a tag so callers can distinguish masked-input metrics from unmasked-input metrics in the epoch log. ECE uses equal-mass binning (adaptive bin edges via `np.percentile`) rather than equal-width binning, to produce reliable calibration estimates under class imbalance. Called on the dev split by rank 0 at epoch end using unmasked inputs. Also called on training batches for diagnostic AUROC tracking — see Section 6.4.
 
-**Config keys used:** `LOSS_WEIGHT_Y1`, `LOSS_WEIGHT_Y2` (generalises to one key per target).
+**Config keys used:** `LOSS_WEIGHTS` (list of T normalised weights), `POS_WEIGHTS` (list of T positive class weights).
 
 ---
 
@@ -281,7 +274,7 @@ DDP entry point. Launched by `torchrun`. Plain script with `main()` entry point.
 
 **Algorithm:**
 1. Parse CLI arguments: `--config`, `--resume`.
-2. Load and validate config via `load_and_validate_config()`. Verify that `LOSS_WEIGHT_Y1 + LOSS_WEIGHT_Y2 = 1.0` (normalisation is applied by `RewardModelConfig` at load time).
+2. Load and validate config via `load_and_validate_config()`. Verify that all `LOSS_WEIGHTS` sum to 1.0 (normalisation is applied by `RewardModelConfig` at load time).
 3. Initialise the DDP process group with `nccl` backend using environment variables set by `torchrun`. If only one GPU is available, skip DDP initialisation and proceed in single-process mode (logged at `WARNING`).
 4. On rank 0 only: call `Mimic4DataLoader(config).load()` to load data and compute `pos_weight` values. Broadcast `pos_weight_y1` and `pos_weight_y2` to all ranks via `broadcast_tensor()` and share the `DatasetBundle` via `broadcast_object_list()`. Non-rank-0 processes wait at the broadcast and receive the bundle and scalar values without touching disk.
 5. Instantiate `RewardModel` with `input_dim` from the feature index map. Move to `get_device(local_rank)`. Wrap in `DistributedDataParallel` if multi-GPU.
@@ -310,11 +303,12 @@ Applies temperature scaling to the best trained model. Plain script with `run(co
 1. Load `best_model.pt` from `CHECKPOINT_DIR`. Extract model state dict and the config snapshot from the checkpoint (not the current `config/reward_model.yaml` — the checkpoint config is authoritative for architecture).
 2. Instantiate `RewardModel` from the checkpoint config snapshot. Load state dict. Move to device. Call `model.eval()`.
 3. Load the dev split from `final_cdss_dataset.parquet`.
-4. Run a full forward pass on the dev split with `torch.no_grad()` to collect raw logits for Y1 and Y2.
-5. For Y1: optimise scalar temperature `T_y1` in log-space — define `log_T = torch.nn.Parameter(torch.zeros(1))` and recover `T = exp(log_T)` inside the closure. This guarantees T > 0 throughout optimisation, avoiding erratic gradients at the clamp boundary that occur with direct optimisation of T. Minimise negative log-likelihood on the full dev split using L-BFGS. Return `max(exp(log_T).item(), 1e-8)` as the fitted temperature.
-6. For Y2: apply the survivor mask, then optimise `T_y2` on the survivor subset using the same log-space L-BFGS procedure.
+4. Run a full forward pass on the dev split with `torch.no_grad()` to collect raw logits for all T targets.
+5. For each target i: construct the valid-sample mask `~torch.isnan(labels_i)`. Optimise scalar temperature `T_i` in log-space — define `log_T = torch.nn.Parameter(torch.zeros(1))` and recover `T = exp(log_T)` inside the closure. This guarantees T > 0 throughout optimisation, avoiding erratic gradients at the clamp boundary that occur with direct optimisation of T. Minimise negative log-likelihood on the valid-sample subset using L-BFGS. Return `max(exp(log_T).item(), 1e-8)` as the fitted temperature for target i.
+6. Log pre- and post-calibration ECE for all T heads for audit.
+7. Write `{'T_0': float, 'T_1': float, ..., 'T_{T-1}': float}` to `CALIBRATION_PARAMS_PATH` as JSON.
 7. Log pre- and post-calibration ECE for both heads for audit.
-8. Write `{'T_y1': float(T_y1), 'T_y2': float(T_y2)}` to `CALIBRATION_PARAMS_PATH` as JSON.
+8. Log the calibration parameters and export path.
 
 **Config keys used:** `CHECKPOINT_DIR`, `DATASET_PATH`, `CALIBRATION_PARAMS_PATH`.
 
@@ -326,9 +320,9 @@ Provides the `RewardModelInference` class consumed by the RL agent. Loaded once 
 
 **Class: `RewardModelInference`**
 
-The constructor accepts `checkpoint_path` and `calibration_params_path` (or the exported artefact path from `export_model.py`). It loads the frozen model weights, feature index map snapshot, and calibration parameters `T_y1` and `T_y2`. It moves the model to the target device, calls `model.eval()`, and freezes all parameters. No gradient computation ever occurs in this class.
+The constructor accepts `checkpoint_path` and `calibration_params_path` (or the exported artefact path from `export_model.py`). It loads the frozen model weights, feature index map snapshot, and T calibration temperature values (one per target). It moves the model to the target device, calls `model.eval()`, and freezes all parameters. No gradient computation ever occurs in this class.
 
-`predict(X)` accepts a float32 tensor of shape `(N, input_dim)`. Under `torch.no_grad()`, it runs a forward pass and returns `(p_mortality, p_readmission)` — two tensors of shape `(N, 1)` containing calibrated probabilities from `sigmoid(logit_y1 / T_y1)` and `sigmoid(logit_y2 / T_y2)` respectively.
+`predict(X)` accepts a float32 tensor of shape `(N, input_dim)`. Under `torch.no_grad()`, it runs a forward pass and returns a tuple of T tensors, each of shape `(N, 1)`, containing calibrated probabilities from `sigmoid(logit_i / T_i)` for each target i. Temperature values are clamped to a minimum of 1e-8 at load time to prevent division by zero.
 
 `get_feature_index_map()` returns the feature index map snapshot so the RL agent can construct correctly masked input tensors for each episode step without needing access to `final_cdss_dataset.parquet`.
 
@@ -358,7 +352,7 @@ Standalone CLI tool. Produces a self-contained artefact that `inference.py` can 
 **Algorithm:**
 1. Load `best_model.pt` from `CHECKPOINT_DIR`.
 2. Load `calibration_params.json` from `CALIBRATION_PARAMS_PATH`.
-3. Construct an export dict: model state dict (unwrapped from DDP if needed via `unwrap_ddp()`), feature index map snapshot, calibration parameters `T_y1` and `T_y2`, model architecture config (layer widths, dropout), and input dimensionality.
+3. Construct an export dict: model state dict (unwrapped from DDP if needed via `unwrap_ddp()`), feature index map snapshot, T calibration temperature values (one per target), model architecture config (layer widths, dropout), and input dimensionality.
 4. Write to `EXPORT_PATH` as a PyTorch `.pt` file.
 5. Log the export path and total model parameter count.
 
@@ -497,10 +491,8 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `LOSS_WEIGHT_Y1` | `0.75` | `loss.py` | Normalised head weight w1; `RewardModelConfig` validates that `LOSS_WEIGHT_Y1 + LOSS_WEIGHT_Y2 = 1.0` at startup |
-| `LOSS_WEIGHT_Y2` | `0.25` | `loss.py` | Normalised head weight w2 |
-| `POS_WEIGHT_Y1` | (computed) | `loss.py` | Positive class weight for Y1; computed from training split if omitted |
-| `POS_WEIGHT_Y2` | (computed) | `loss.py` | Positive class weight for Y2; computed from survivors in training split if omitted |
+| `LOSS_WEIGHTS` | `[0.75, 0.25]` (MIMIC-IV) | `loss.py` | List of T normalised weights, one per target; `RewardModelConfig` validates they sum to 1.0 at startup |
+| `POS_WEIGHTS` | (computed) | `loss.py` | List of T positive class weights; each computed from the applicable (non-NaN) training rows for that target if omitted |
 
 ### Masking curriculum
 
@@ -537,7 +529,7 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 ## 10. Memory Requirements
 
-Variables: **A** = total admissions (~546k). **B** = `BATCH_SIZE_PER_GPU`. **D** = input dimensionality (42,248 at full BERT embeddings). **P** = total model parameters (~364M at default widths). **C** = `DATASET_ROW_GROUP_CACHE_SIZE`. **R** = Parquet row group size (rows per group, typically ~400 at default PyArrow settings).
+Variables: **A** = total samples (e.g. ~546k admissions for MIMIC-IV). **B** = `BATCH_SIZE_PER_GPU`. **D** = input dimensionality (42,248 at full BERT embeddings for MIMIC-IV; varies by dataset). **P** = total model parameters (~364M at default widths with D=42,248). **C** = `DATASET_ROW_GROUP_CACHE_SIZE`. **R** = Parquet row group size (rows per group, typically ~400 at default PyArrow settings).
 
 ### Dataset RAM (rank 0 only)
 

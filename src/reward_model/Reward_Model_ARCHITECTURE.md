@@ -34,12 +34,9 @@ The current implementation is deployed on MIMIC-IV clinical data with T=2 target
 
 ## 2. Prediction Targets
 
-| Target | Column | Definition | Population | Positive rate |
-|--------|--------|------------|------------|---------------|
-| Y1 — In-hospital mortality | `y1_mortality` | `admissions.hospital_expire_flag = 1` | All admissions | ~8–10% |
-| Y2 — 30-day readmission | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors only (`y1_mortality = 0`) | ~20% |
+The reward model supports T configurable binary classification targets (1 ≤ T ≤ 5). Each target is a float32 label column with values 0, 1, or NaN. A NaN value for a given sample and target indicates that the classification is not applicable for that sample — the reward model excludes that sample from the loss for that target dynamically per batch without removing it from the dataset.
 
-**NaN rule:** `y2_readmission` is `NaN` (float32) for all admissions where `y1_mortality = 1`. This is guaranteed by `extract_y_data.py` upstream and validated by `Mimic4DataLoader` at load time. The readmission head learns `P(readmitted | survived)` — deceased patients contribute zero gradient to Y2. See Section 8.1 for runtime contract enforcement. For full MIMIC-IV target definitions see Section 15.
+Target definitions — including column names, population scope, and NaN assignment rules — are dataset-specific and are validated by the dataset-specific data loader at startup. For the MIMIC-IV deployment (T=2) see `mimic4_feature_set.md` and Section 15.
 
 ---
 
@@ -47,91 +44,38 @@ The current implementation is deployed on MIMIC-IV clinical data with T=2 target
 
 **Source:** `HRS/data/preprocessing/classifications/final_cdss_dataset.parquet` — produced by `combine_dataset.py` (Step 11 of the preprocessing pipeline). The reward model reads this file directly and does not query MIMIC-IV or any intermediate preprocessing artefacts.
 
-**Schema reference:** `PREPROCESSING_DATA_MODEL.md` Section 3.12. The reward model depends on the following columns being present and correctly typed:
+**Schema reference:** The reward model depends on the following columns being present and correctly typed in the dataset file:
 
-- `hadm_id` (int64, non-null) — primary key
+- A primary key column (e.g. `hadm_id`, int64, non-null)
 - `split` (varchar: `train` / `dev` / `test`) — pre-assigned by the preprocessing pipeline
-- `y1_mortality` (int8, non-null)
-- `y2_readmission` (float32, nullable — NaN for deceased)
-- `demographic_vec` (float32[8], non-null)
-- All 55 `*_embedding` columns (float32[768], non-null — zero vector for missing features)
+- T target label columns (float32, nullable — NaN where a target is not applicable for a sample)
+- N feature columns (float32, non-null — zero vector for missing features)
+
+The exact column names, target count T, and feature count N are dataset-specific and are validated by the dataset-specific data loader. For the MIMIC-IV schema see `mimic4_feature_set.md`.
 
 **Split strategy:** Patient-level splitting (`subject_id`) is applied upstream by the preprocessing pipeline. The reward model reads the `split` column directly — it does not re-split the data. All statistics derived from data (class weights, temperature scaling parameters) are computed from `split = 'train'` rows only.
 
 | Split | Fraction | Stratification |
 |-------|----------|----------------|
-| Train | 80% | Y1 (patient-level mortality rate), seed 42 |
-| Dev | 10% | Y1 |
-| Test | 10% | Y1 |
+| Train | 80% | Primary target (patient-level), seed 42 |
+| Dev | 10% | Primary target |
+| Test | 10% | Primary target |
 
 ---
 
 ## 4. Feature Set
 
-The input vector X is constructed by concatenating all feature columns from `final_cdss_dataset.parquet` in the canonical column order defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions (8 for `demographic_vec`, 768 for all `*_embedding` columns). The derived index map is held in memory by the `Mimic4DataLoader` (a dataset-specific subclass of the generic `DataLoader` base) and passed to `masking.py` and `train.py`.
+The input vector X is constructed by concatenating all feature columns from the dataset file in the canonical column order defined by the upstream preprocessing pipeline. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions. The derived index map is held in memory by the dataset-specific data loader (a subclass of the generic `DataLoader` base) and passed to `masking.py` and `train.py`.
 
-**Total input dimensionality:** 8 + (55 × 768) = **42,248 dimensions**
+**Feature slot structure:** The input vector consists of N feature slots concatenated in a fixed order. Each slot has a declared width (number of float32 dimensions). The total input dimensionality D is the sum of all slot widths.
 
-| ID | Column name | Dim | RL visibility |
-|----|------------|-----|---------------|
-| F1 | `demographic_vec` | 8 | Always visible |
-| F2 | `diag_history_embedding` | 768 | Always visible |
-| F3 | `discharge_history_embedding` | 768 | Always visible |
-| F4 | `triage_embedding` | 768 | Always visible |
-| F5 | `chief_complaint_embedding` | 768 | Always visible |
-| F6 | `lab_blood_gas_embedding` | 768 | Maskable |
-| F7 | `lab_blood_chemistry_embedding` | 768 | Maskable |
-| F8 | `lab_blood_hematology_embedding` | 768 | Maskable |
-| F9 | `lab_urine_chemistry_embedding` | 768 | Maskable |
-| F10 | `lab_urine_hematology_embedding` | 768 | Maskable |
-| F11 | `lab_other_body_fluid_chemistry_embedding` | 768 | Maskable |
-| F12 | `lab_other_body_fluid_hematology_embedding` | 768 | Maskable |
-| F13 | `lab_ascites_embedding` | 768 | Maskable |
-| F14 | `lab_pleural_embedding` | 768 | Maskable |
-| F15 | `lab_csf_embedding` | 768 | Maskable |
-| F16 | `lab_bone_marrow_embedding` | 768 | Maskable |
-| F17 | `lab_joint_fluid_embedding` | 768 | Maskable |
-| F18 | `lab_stool_embedding` | 768 | Maskable |
-| F19 | `radiology_embedding` | 768 | Maskable |
-| F20 | `micro_blood_culture_routine_embedding` | 768 | Maskable |
-| F21 | `micro_blood_bottle_gram_stain_embedding` | 768 | Maskable |
-| F22 | `micro_urine_culture_embedding` | 768 | Maskable |
-| F23 | `micro_urine_viral_embedding` | 768 | Maskable |
-| F24 | `micro_urinary_antigens_embedding` | 768 | Maskable |
-| F25 | `micro_respiratory_non_invasive_embedding` | 768 | Maskable |
-| F26 | `micro_respiratory_invasive_embedding` | 768 | Maskable |
-| F27 | `micro_respiratory_afb_embedding` | 768 | Maskable |
-| F28 | `micro_respiratory_viral_embedding` | 768 | Maskable |
-| F29 | `micro_respiratory_pcp_legionella_embedding` | 768 | Maskable |
-| F30 | `micro_gram_stain_respiratory_embedding` | 768 | Maskable |
-| F31 | `micro_gram_stain_wound_tissue_embedding` | 768 | Maskable |
-| F32 | `micro_gram_stain_csf_embedding` | 768 | Maskable |
-| F33 | `micro_wound_culture_embedding` | 768 | Maskable |
-| F34 | `micro_hardware_and_lines_culture_embedding` | 768 | Maskable |
-| F35 | `micro_pleural_culture_embedding` | 768 | Maskable |
-| F36 | `micro_peritoneal_culture_embedding` | 768 | Maskable |
-| F37 | `micro_joint_fluid_culture_embedding` | 768 | Maskable |
-| F38 | `micro_fluid_culture_embedding` | 768 | Maskable |
-| F39 | `micro_bone_marrow_culture_embedding` | 768 | Maskable |
-| F40 | `micro_csf_culture_embedding` | 768 | Maskable |
-| F41 | `micro_fungal_tissue_wound_embedding` | 768 | Maskable |
-| F42 | `micro_fungal_respiratory_embedding` | 768 | Maskable |
-| F43 | `micro_fungal_fluid_embedding` | 768 | Maskable |
-| F44 | `micro_mrsa_staph_screen_embedding` | 768 | Maskable |
-| F45 | `micro_resistance_screen_embedding` | 768 | Maskable |
-| F46 | `micro_cdiff_embedding` | 768 | Maskable |
-| F47 | `micro_stool_bacterial_embedding` | 768 | Maskable |
-| F48 | `micro_stool_parasitology_embedding` | 768 | Maskable |
-| F49 | `micro_herpesvirus_serology_embedding` | 768 | Maskable |
-| F50 | `micro_hepatitis_hiv_embedding` | 768 | Maskable |
-| F51 | `micro_syphilis_serology_embedding` | 768 | Maskable |
-| F52 | `micro_misc_serology_embedding` | 768 | Maskable |
-| F53 | `micro_herpesvirus_culture_antigen_embedding` | 768 | Maskable |
-| F54 | `micro_gc_chlamydia_sti_embedding` | 768 | Maskable |
-| F55 | `micro_vaginal_genital_flora_embedding` | 768 | Maskable |
-| F56 | `micro_throat_strep_embedding` | 768 | Maskable |
+**Always-visible slots:** The first `NUM_ALWAYS_VISIBLE_FEATURES` slots are always unmasked at episode start, regardless of masking mode. These correspond to information available at the start of each episode. The remaining M = N − `NUM_ALWAYS_VISIBLE_FEATURES` slots are maskable — the RL agent reveals them by transitioning their values from zero to their pre-computed representations as the episode progresses.
 
-**RL visibility:** F1–F5 are always unmasked at episode start. F6–F56 are maskable — the RL agent reveals them by transitioning their slots from zero to their pre-computed embedding values. All embeddings are static and pre-computed per admission by the preprocessing pipeline; no re-embedding occurs during RL episodes. State evolution is driven entirely by which feature slots the agent unmasks.
+**RL visibility convention:** Always-visible slots always appear as the leading slots in the feature vector. This positional convention is enforced by the upstream preprocessing pipeline column order, not by the reward model. The reward model only reads `NUM_ALWAYS_VISIBLE_FEATURES` from config — it has no knowledge of what the slots represent.
+
+**State evolution:** All feature representations are static and pre-computed per sample by the preprocessing pipeline. No re-embedding occurs at RL inference time. State evolution is driven entirely by which feature slots the agent unmasks.
+
+For the complete feature table specific to the current MIMIC-IV deployment — including column names, dimensions, and RL visibility — see `mimic4_feature_set.md` in this directory and Section 15 of this document.
 
 ---
 
@@ -258,13 +202,13 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 - **Parquet (`final_cdss_dataset.parquet`, input, read-only):** Columnar; predicate pushdown used for `split` filtering. Produced upstream via `fastparquet` append mode — this module reads with `pyarrow`.
 - **YAML (`config/reward_model.yaml`):** All hyperparameters and schedule parameters. Validated by Pydantic. Follows the same convention as `config/preprocessing.yaml`.
 - **PyTorch checkpoint (`best_model.pt`):** Weights (unwrapped from DDP), optimizer state, epoch, curriculum state, config snapshot. Written by rank 0 only. Enables full SLURM resume.
-- **JSON (`calibration_params.json`):** Per-head temperature values `T_y1` and `T_y2`. Human-readable audit trail.
+- **JSON (`calibration_params.json`):** Per-head temperature values, one per target (e.g. `T_0`, `T_1`). Human-readable audit trail.
 - **Parquet (`training_metrics.parquet`):** Per-epoch metrics written by rank 0. Columnar for downstream analysis.
 
 ### What Was Explicitly Rejected
 
 - **`BCELoss` (without logits):** Rejected — numerically unstable; no native `pos_weight` support.
-- **3-class softmax output:** Rejected. `y2_readmission` is NaN for deceased patients — a softmax implicitly assumes Y2 is defined for all patients. Two independent sigmoid heads with dynamic NaN masking correctly represent the label structure.
+- **T independent sigmoid heads rather than shared softmax output:** Rejected for multi-target setups where some targets are conditionally defined (NaN for non-applicable samples). A softmax implicitly assumes all T targets are defined for every sample. T independent sigmoid heads with dynamic per-target NaN masking correctly represent the label structure where each target may have a different applicable population.
 - **Internal projection / fusion layers:** Rejected. Dimensionality reduction of BERT embeddings belongs in `HRS/src/preprocessing`, not in the network.
 - **Separate `feature_index_map.yaml` config:** Rejected. Feature slot boundaries are derived at load time from the canonical column order in `PREPROCESSING_DATA_MODEL.md` Section 3.12. A separate file would duplicate that information and create a consistency risk.
 - **Fixed global importance ranking for adversarial masking:** Rejected. A ranking computed once does not adapt as the network evolves. Per-batch per-sample gradient-based selection (Shaham et al., 2016) is used instead.
@@ -279,11 +223,11 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 `Mimic4DataLoader` enforces the following assertions at startup. All failures raise with a descriptive error message referencing `PREPROCESSING_DATA_MODEL.md` and the producing module.
 
-**`y2_readmission` must be float32 with mathematical NaN for all deceased patients (`y1_mortality = 1`).** If a deceased patient carries `0.0` instead of NaN, the survivor mask `~torch.isnan(y2)` silently includes that patient in the readmission loss, corrupting `P(readmitted | survived)` without any visible error.
+**Target label columns must be float32 with mathematical NaN (not zero, not a sentinel integer) where a target is not applicable for a sample.** If a non-applicable sample carries `0.0` instead of NaN, the per-target NaN mask silently includes that sample in the loss for that target, corrupting the learned conditional distribution without any visible error. The NaN assignment rules are dataset-specific and are validated by the dataset-specific data loader at startup.
 
-**All `*_embedding` columns must be float32 non-null.** Missing features are zero vectors — never NaN. NaN inside an embedding column propagates silently through all MLP layers and corrupts loss, gradients, and adversarial importance scores.
+**All feature columns must be float32 non-null.** Missing features are zero vectors — never NaN. NaN inside a feature column propagates silently through all MLP layers and corrupts loss, gradients, and adversarial importance scores.
 
-**`y1_mortality` must be int8 non-null (0 or 1) for every row.**
+**The primary target label column must be non-null for every row.** Partial NaN is only valid for secondary targets where the classification is conditionally defined.
 
 ### 8.2 Feature Index Map Derivation
 
@@ -303,7 +247,7 @@ Adversarial masking under DDP requires attention: the first forward/backward pas
 
 ### 8.4 Masking Strategy and Curriculum
 
-Three masking modes are applied externally to the network before each forward pass. The network receives a fixed-length 42,248-dim float32 tensor with no awareness of which slots are masked.
+Three masking modes are applied externally to the network before each forward pass. The network receives a fixed-length D-dimensional float32 tensor with no awareness of which slots are masked.
 
 **Always-visible slots:** The first `NUM_ALWAYS_VISIBLE_FEATURES` slots (default 5 — F1–F5) are never candidates for masking. These correspond to information available at episode start. The remaining M = 51 slots are maskable. This is a positional convention: always-visible slots are always the leading slots in the feature index map, enforced by the preprocessing pipeline column order.
 
@@ -323,7 +267,7 @@ Total loss: `L = Σᵢ wᵢ * L_Yᵢ` summed over all T targets. Weights are nor
 
 The network is a feedforward MLP with a gradual funnel. Under DDP, each GPU holds a full model copy (~1.32 GB for Hidden 1 alone at float32). With 2 GPUs and AdamW optimizer state, total GPU memory per device is approximately 14–18 GB at batch size 256 per GPU (512 effective). The recommended mitigation if memory is exceeded is PCA reduction of BERT embeddings (768 → 256) applied in `HRS/src/preprocessing` — input reduces to ~14,088 dims with no architectural change to this module.
 
-The number of output heads T equals the number of configured classification targets (default T=2 for MIMIC-IV). All layer widths and dropout rates are configurable in `config/reward_model.yaml`. Dropout is configured per layer (`DROPOUT_RATES` as a list) to allow heavier regularisation on wider early layers.
+The number of output heads T equals the number of configured classification targets. All layer widths and dropout rates are configurable in `config/reward_model.yaml`. Dropout is configured per layer (`DROPOUT_RATES` as a list) to allow heavier regularisation on wider early layers. The first hidden layer width should be adjusted when D changes significantly from the MIMIC-IV default (42,248).
 
 | Layer | In | Out | Activation | Dropout rate |
 |-------|----|-----|------------|--------------|
@@ -335,7 +279,7 @@ The number of output heads T equals the number of configured classification targ
 
 ### 8.7 Post-Training Calibration
 
-Temperature scaling is applied on the dev split after training converges, on a single GPU. A scalar `T` is learned per head via NLL minimisation — weights are not modified. Well-calibrated probabilities are critical because the RL reward is `ΔP` between consecutive states. `T_y1` and `T_y2` are written to `data/reward_model/calibration_params.json` and applied at inference time.
+Temperature scaling is applied on the dev split after training converges, on a single GPU. A scalar temperature T is learned per output head via NLL minimisation in log-space — weights are not modified. Well-calibrated probabilities are critical because the RL reward is `ΔP` between consecutive states. One temperature value per target is written to `data/reward_model/calibration_params.json` and applied at inference time.
 
 ---
 
@@ -348,13 +292,11 @@ Temperature scaling is applied on the dev split after training converges, on a s
 | Column group | Columns | Type |
 |---|---|---|
 | Epoch metadata | `epoch`, `wall_time_s`, `masking_random_pct`, `masking_adversarial_pct`, `masking_none_pct` | int / float32 |
-| Loss | `loss_total`, `loss_y1`, `loss_y2` | float32 |
-| Y1 performance (unmasked — dev) | `auroc_y1`, `auprc_y1`, `ece_y1` | float32 |
-| Y2 performance (unmasked — dev) | `auroc_y2`, `auprc_y2`, `ece_y2` | float32 |
-| Y1 performance (masked — train diagnostic) | `auroc_y1_masked`, `auprc_y1_masked` | float32 |
-| Y2 performance (masked — train diagnostic) | `auroc_y2_masked`, `auprc_y2_masked` | float32 |
+| Loss | `loss_total`, `loss_target_0`, `loss_target_1`, ..., `loss_target_{T-1}` | float32 |
+| Per-target performance (unmasked — dev) | `auroc_target_i`, `auprc_target_i`, `ece_target_i` for each i | float32 |
+| Per-target performance (masked — train diagnostic) | `auroc_target_i_masked`, `auprc_target_i_masked` for each i | float32 |
 
-Dev metrics (unmasked) are the primary signals for early stopping and progress monitoring. Training masked metrics are diagnostic — they track the gap between masked and unmasked AUROC as the curriculum evolves, confirming that robustness is being built without sacrificing full-feature discriminative ability.
+Dev metrics (unmasked) are the primary signals for early stopping and progress monitoring. Training masked metrics are diagnostic — they track the gap between masked and unmasked AUROC as the curriculum evolves.
 
 ---
 
@@ -366,7 +308,7 @@ This module processes de-identified MIMIC-IV data under the PhysioNet data use a
 
 ## 11. Performance
 
-**Dominant bottleneck — Hidden 1 weight matrix.** The 42,248 × 8,192 matrix occupies ~1.32 GB at float32 per GPU. Under DDP with `nccl` all-reduce, each GPU holds a full model copy — memory savings from 2-GPU DDP come from halving the per-GPU effective batch size, not from splitting model weights. With AdamW optimizer state (~3× parameter size), Hidden 1 alone requires ~5 GB per GPU before activations.
+**Dominant bottleneck — Hidden 1 weight matrix.** The D × 8,192 matrix (where D is the total input dimensionality) occupies ~1.32 GB at float32 per GPU for the MIMIC-IV default D=42,248. Under DDP with `nccl` all-reduce, each GPU holds a full model copy — memory savings from 2-GPU DDP come from halving the per-GPU effective batch size, not from splitting model weights. With AdamW optimizer state (~3× parameter size), Hidden 1 alone requires ~5 GB per GPU before activations.
 
 **Effective batch size with DDP.** With `batch_size = 256` per GPU and 2 GPUs, the effective batch size is 512. Each GPU processes 256 samples per forward/backward pass. At batch size 256 per GPU, estimated total GPU memory per device is 14–18 GB.
 
@@ -382,7 +324,7 @@ This module processes de-identified MIMIC-IV data under the PhysioNet data use a
 | PCA in preprocessing | Applied in `HRS/src/preprocessing` | Reduces input to ~14,088 dims; no network change |
 | Reduce adversarial ratio | `masking_end_ratios` | Reduces proportion of double-pass batches |
 
-**Throughput:** Not yet characterised on target hardware. Anticipated bottleneck is Hidden 1 forward pass (dense matrix multiply), not I/O — `final_cdss_dataset.parquet` fits in RAM for the full MIMIC-IV cohort.
+**Throughput:** Not yet characterised on target hardware. Anticipated bottleneck is Hidden 1 forward pass (dense matrix multiply), not I/O — the dataset fits in RAM via lazy `ParquetDataset` loading.
 
 See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and full configuration reference.
 
@@ -429,7 +371,7 @@ HRS/
 │       ├── mimic4_data_loader.py           # step 1 — load, validate schema, derive feature index map
 │       ├── model.py                         # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
-│       ├── loss.py                          # step 4 — weighted BCE + dynamic NaN masking for Y2
+│       ├── loss.py                          # step 4 — weighted BCE + dynamic NaN masking per target
 │       ├── train.py                         # step 5 — DDP training loop, curriculum, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
@@ -471,7 +413,7 @@ University HPC cluster running SLURM — same cluster as `HRS/src/preprocessing`
 
 ### Capacity Sizing
 
-Under DDP with 2 GPUs, each GPU holds a full model copy. Hidden 1 weight matrix (42,248 × 8,192, ~1.32 GB float32) plus AdamW optimizer state requires ~5 GB per GPU before activations. At batch size 256 per GPU, total estimated GPU memory per device is 14–18 GB. A 24 GB GPU (A100 or equivalent) provides sufficient headroom. If memory is exceeded, apply PCA (768 → 256) in `HRS/src/preprocessing` — input reduces to ~14,088 dims, Hidden 1 to ~231 MB, with no changes to this module.
+Under DDP with 2 GPUs, each GPU holds a full model copy. For the MIMIC-IV default (D=42,248): Hidden 1 weight matrix (42,248 × 8,192, ~1.32 GB float32) plus AdamW optimizer state requires ~5 GB per GPU before activations. At batch size 256 per GPU, total estimated GPU memory per device is 14–18 GB. A 24 GB GPU (A100 or equivalent) provides sufficient headroom. If memory is exceeded, apply PCA (768 → 256) in `HRS/src/preprocessing` — input reduces to ~14,088 dims, Hidden 1 to ~231 MB, with no changes to this module.
 
 ### Scripts
 
