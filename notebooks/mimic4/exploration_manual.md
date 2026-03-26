@@ -61,7 +61,7 @@ Each job:
 - Partition: `A100-4h`
 - Resources: `--gres=gpu:1`, `--cpus-per-task=4`, `--mem=24G`, `--time=4:00:00`
 - Job name: `explore_<notebook_basename>`
-- Logs: `logs/explore_<job>.out/err`
+- Logs: `${REPO_ROOT}/logs/explore_<job>.out/err`
 - Executed notebook: `notebooks/mimic4/executed/<name>_executed.ipynb`
 
 Monitor:
