@@ -234,7 +234,7 @@ def _compute_ece_from_logits(
     probs = 1.0 / (1.0 + np.exp(-masked_logits / T))
 
     n_bins = 10
-    bin_edges = np.percentile(probs, np.linspace(0, 100, n_bins + 1))
+    bin_edges = np.percentile(probs, range(0, 101, 100 // n_bins))
     bin_edges[0] = 0.0
     bin_edges[-1] = 1.0
     bin_edges = np.unique(bin_edges)
