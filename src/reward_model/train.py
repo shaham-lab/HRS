@@ -822,86 +822,57 @@ def _train_epochs(
 
 
 def main() -> None:
-    """DDP training loop entry point launched by torchrun.
-
-    Full 11-step algorithm (Detailed Design §5, train.py):
-
-      1.  Parse CLI arguments: ``--config``, ``--resume``.
-      2.  Load and validate config via ``load_and_validate_config()``.
-          Configure root logging handler (rank 0: INFO to stdout;
-          all ranks: ERROR/CRITICAL).
-      3.  Initialise DDP process group via ``_init_ddp()``.  Fall back to
-          single-process mode if fewer than 2 CUDA devices are available
-          (logged at WARNING).
-      4.  Rank 0 calls ``Mimic4DataLoader(config).load()``; broadcasts
-          ``pos_weight_y1`` and ``pos_weight_y2`` via
-          ``_load_and_broadcast_dataset()``.  Non-rank-0 processes wait at
-          barrier; receive scalar weights only.
-      5.  Instantiate ``RewardModel(input_dim, layer_widths, dropout_rate,
-          activation)``; move to ``get_device(local_rank)``; wrap in
-          ``DistributedDataParallel`` if multi-GPU.
-      6.  Instantiate ``MaskingSchedule`` from config masking keys.
-      7.  Instantiate ``AdamW`` with ``LEARNING_RATE``, ``WEIGHT_DECAY``,
-          ``ADAM_BETA1``, ``ADAM_BETA2``.  Build cosine + warmup scheduler
-          via ``_build_lr_scheduler()``.
-      8.  If ``--resume``: rank 0 uses ``CheckpointManager`` to find and load the
-          latest checkpoint; validates the checkpoint feature index map against
-          the current dataset (raises on mismatch); broadcasts the loaded state
-          via ``dist.broadcast_object_list()``; ``dist.barrier()``.
-      9.  Construct ``RowGroupBlockSampler`` over ``train_dataset`` (round-robin
-          row group partitioning across ranks); wrap in ``DataLoader`` with
-          ``batch_size = BATCH_SIZE_PER_GPU``.
-      10. Epoch loop from ``start_epoch`` to ``MAX_EPOCHS``:
-            a. ``sampler.set_epoch(epoch)`` for per-epoch reshuffling.
-            b. Batch loop: call ``_run_train_batch()`` per mini-batch.
-            c. ``dist.barrier()`` (all ranks wait before rank 0 I/O).
-            d. Rank 0: call ``_eval_dev()``; ``_append_metrics_row()``;
-               check early stopping patience.
-            e. Rank 0: if dev loss improved, ``_save_checkpoint()``,
-               ``_save_best_model()``, ``_prune_old_checkpoints()``.
-            f. Broadcast early stopping boolean from rank 0 to all ranks
-               via ``broadcast_tensor()``.  All ranks break simultaneously.
-            g. ``dist.barrier()`` (all ranks resume next epoch together).
-      11. Rank 0: write final checkpoint.  ``dist.destroy_process_group()``.
-    """
+    """DDP training loop entry point launched by torchrun."""
+    # Parse CLI arguments (--config, --resume) and load YAML config.
     args = _parse_args()
     config = load_and_validate_config(args.config)
 
+    # Configure logging: rank 0 logs INFO to stdout; other ranks suppress noise.
     initial_rank = int(os.environ.get("RANK", "0"))
     _setup_logging(initial_rank)
 
+    # Initialise runtime: DDP ranks, local GPU device, and single-process fallback.
     rank, local_rank, world_size, is_ddp, device = _init_runtime(config)
 
+    # Load dataset (rank 0) and broadcast class weights to all ranks.
     bundle, pos_weight_y1, pos_weight_y2 = _load_datasets_and_weights(config, rank, device, is_ddp)
     feature_index_map: Dict[str, Tuple[int, int]] = bundle.feature_index_map
     input_dim: int = bundle.input_dim
     train_dataset = bundle.train_dataset
     dev_dataset = bundle.dev_dataset
 
+    # Prepare checkpoint manager and metrics output paths.
     checkpoint_dir = Path(config.CHECKPOINT_DIR)
     metrics_path = Path(config.METRICS_PATH)
     checkpoint_manager = CheckpointManager(checkpoint_dir, config.CHECKPOINT_KEEP_N)
 
+    # Optionally resume from the latest checkpoint (rank 0 load + broadcast).
     ckpt_state, start_epoch, best_dev_loss = _resume_from_checkpoint(
         args, checkpoint_manager, feature_index_map, config, rank, is_ddp
     )
 
+    # Build model and optimizer (wrap in DDP if multi-GPU).
     model = _build_model(input_dim, config, device, local_rank, is_ddp)
     optimizer = _build_optimizer(model, config)
 
+    # Create masking schedule (from checkpoint state if resuming).
     masking_schedule = _build_masking_schedule(config, feature_index_map, ckpt_state)
 
+    # Build dataloader with row-group-aware sampler.
     train_loader = _build_train_loader(train_dataset, config, rank, world_size, is_ddp)
 
     if is_ddp and train_loader is None:
         raise RuntimeError("Train dataset unavailable for DDP training")
 
+    # Construct LR scheduler with warmup; align start step when resuming.
     steps_per_epoch = len(train_loader) if train_loader is not None else 1
     start_step = start_epoch * steps_per_epoch
     scheduler = _build_lr_scheduler(optimizer, config, steps_per_epoch, start_step)
 
+    # Restore model/optimizer/scheduler states from checkpoint if available.
     _maybe_load_states(model, optimizer, scheduler, ckpt_state)
 
+    # Run training + evaluation loop with checkpointing and early stopping.
     _train_epochs(
         model=model,
         optimizer=optimizer,
@@ -922,6 +893,7 @@ def main() -> None:
         metrics_path=metrics_path,
     )
 
+    # Clean up distributed process group.
     if is_ddp:
         dist.destroy_process_group()
 
