@@ -86,6 +86,9 @@ MICRO_INCLUDE_COMMENTS: true
 MICRO_COMMENT_MAX_SENTENCES: 2
 MICRO_COMMENT_MAX_CHARS: 200
 
+# Path to the lab panel configuration (generated artefact in CLASSIFICATIONS_DIR).
+LAB_PANEL_CONFIG_PATH: "data/preprocessing/classifications/lab_panel_config.yaml"
+
 # Path to the microbiology panel configuration (version-controlled config, not a generated artefact).
 MICRO_PANEL_CONFIG_PATH: "config/micro_panel_config.yaml"
 

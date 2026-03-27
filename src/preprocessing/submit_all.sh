@@ -79,6 +79,24 @@ set -e
 echo "$EMBED_STATUS_OUTPUT"
 echo ""
 
+# Extraction completeness guard.
+# check_embed_status.py exits 1 for two distinct reasons:
+#   (a) extraction incomplete — output contains "parquet(s) missing from FEATURES_DIR"
+#   (b) embedding incomplete — output contains "Extraction completeness: OK"
+# Only case (a) should stop submission; case (b) proceeds to embed jobs below.
+if [[ $EMBED_STATUS_CODE -eq 1 ]] && \
+   echo "$EMBED_STATUS_OUTPUT" | grep -q "parquet(s) missing from FEATURES_DIR"; then
+    echo ""
+    echo "ERROR: Extraction incomplete."
+    echo "Run the following command first, then re-run submit_all.sh:"
+    echo ""
+    echo "  python src/preprocessing/run_pipeline.py \\"
+    echo "    --config config/preprocessing.yaml \\"
+    echo "    --extract_microbiology"
+    echo ""
+    exit 1
+fi
+
 # ------------------------------------------------------------------ #
 # Decide which jobs to submit based on exit code
 # ------------------------------------------------------------------ #
