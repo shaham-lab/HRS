@@ -104,7 +104,6 @@ HRS/
 │       ├── build_lab_panel_config.py           # Must run before extract_labs
 │       ├── build_lab_text_lines.py             # Helper called by extract_labs
 │       ├── extract_labs.py
-│       ├── build_micro_panel_config.py         # Must run before extract_microbiology
 │       ├── extract_microbiology.py
 │       ├── extract_radiology.py
 │       ├── extract_y_data.py
@@ -139,7 +138,6 @@ HRS/
             ├── y_labels.parquet
             ├── imputation_stats.json
             ├── lab_panel_config.yaml
-            ├── micro_panel_config.yaml
             ├── hadm_linkage_stats.json
             └── final_cdss_dataset.parquet
 ```
@@ -197,7 +195,6 @@ python src/preprocessing/run_pipeline.py --extract_discharge_history
 python src/preprocessing/run_pipeline.py --extract_triage_and_complaint
 python src/preprocessing/run_pipeline.py --build_lab_panel_config
 python src/preprocessing/run_pipeline.py --extract_labs
-python src/preprocessing/run_pipeline.py --build_micro_panel_config
 python src/preprocessing/run_pipeline.py --extract_microbiology
 python src/preprocessing/run_pipeline.py --extract_radiology
 python src/preprocessing/run_pipeline.py --extract_y_data
@@ -248,7 +245,7 @@ create_splits
   └─► extract_discharge_history   │  (these can run in parallel)
   └─► extract_triage_and_complaint│
   └─► build_lab_panel_config ─► extract_labs
-  └─► build_micro_panel_config ─► extract_microbiology
+  └─► extract_microbiology
   └─► extract_radiology           │
   └─► extract_y_data             ─┘
         └─► embed_features
@@ -256,9 +253,9 @@ create_splits
 ```
 
 **`create_splits` must complete first.** `build_lab_panel_config` must run
-before `extract_labs`, and `build_micro_panel_config` must run before
-`extract_microbiology`. All other `extract_*` modules can run in parallel once
-splits exist.
+before `extract_labs`. `micro_panel_config.yaml` is version-controlled and
+requires no build step — `extract_microbiology` can run as soon as splits exist.
+All other `extract_*` modules can run in parallel once splits exist.
 
 ---
 
@@ -412,7 +409,7 @@ python src/preprocessing/inspect_data.py --config /path/to/preprocessing.yaml
 | `y_labels.parquet`                     | `data/preprocessing/classifications/` | Parquet | `extract_y_data`          | One row per admission; `y1_mortality` and `y2_readmission` columns                                                                          |
 | `imputation_stats.json`                | `data/preprocessing/classifications/` | JSON    | `extract_demographics`    | Per-stratum (age-bin × gender) mean/std used for height/weight imputation, computed on train split only                                     |
 | `lab_panel_config.yaml`                | `data/preprocessing/classifications/` | YAML    | `build_lab_panel_config`  | Defines the 13 lab group names and their constituent itemids, derived from `d_labitems`                                                     |
-| `micro_panel_config.yaml`              | `data/preprocessing/classifications/` | YAML    | `build_micro_panel_config` | Defines the 37 microbiology panel names. Each panel entry includes a human-readable `description` field (e.g. `"Microbiology panel: blood culture"`) and a `combos` list of `[test_name, spec_type_desc]` pairs. |
+| `micro_panel_config.yaml`              | `config/`                             | YAML    | version-controlled         | Defines the 37 microbiology panel names. Each panel entry includes a human-readable `description` field (e.g. `"Microbiology panel: blood culture"`) and a `combos` list of `[test_name, spec_type_desc]` pairs. Path declared via `MICRO_PANEL_CONFIG_PATH` in `config/preprocessing.yaml`. |
 | `hadm_linkage_stats.json`              | `data/preprocessing/classifications/` | JSON    | all modules               | Per-module counts of null hadm_id records: dropped, linked, ambiguous-resolved, unresolvable                                               |
 | `final_cdss_dataset.parquet`           | `data/preprocessing/classifications/` | Parquet | `combine_dataset`         | One row per admission; all features and labels joined. Includes demographics, all 5 non-lab embedding columns, and all 13 lab group embedding columns as independent columns. `labs_features.parquet` (long-format raw event data) is excluded — it is superseded by the 13 per-group embedding parquets. The 13 lab group embeddings are discovered and joined automatically by `combine_dataset.py` via dynamic parquet discovery in `EMBEDDINGS_DIR`. |
 

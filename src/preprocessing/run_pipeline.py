@@ -97,11 +97,6 @@ def main() -> None:
         help="Run build_lab_panel_config.py",
     )
     parser.add_argument(
-        "--build_micro_panel_config",
-        action="store_true",
-        help="Run build_micro_panel_config.py",
-    )
-    parser.add_argument(
         "--extract_demographics",
         action="store_true",
         help="Run extract_demographics.py",
@@ -217,7 +212,7 @@ def main() -> None:
 
     # Full pipeline order
     _FULL_ORDER = (
-        ["create_splits", "build_lab_panel_config", "build_micro_panel_config"]
+        ["create_splits", "build_lab_panel_config"]
         + _EXTRACT_MODULES
         + ["embed_features", "combine_dataset"]
     )

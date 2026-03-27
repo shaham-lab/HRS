@@ -22,8 +22,10 @@ SPLIT_TEST: 0.10
 # HuggingFace BERT model settings
 BERT_MODEL_NAME: "Simonlee711/Clinical_ModernBERT"
 BERT_MAX_LENGTH: 8192
-# Batch size calibrated for max_length=512 on GPU with ≥8GB VRAM.
-# embed_features.py scales this automatically per feature based on sequence length.
+# Baseline batch size for max_length=512.
+# Auto-scales inversely with sequence length:
+# effective = BERT_BATCH_SIZE // (BERT_MAX_LENGTH // 512).
+# At BERT_MAX_LENGTH=8192 this gives effective batch size 2.
 BERT_BATCH_SIZE: 32
 BERT_DEVICE: "cuda"
 # Set to true to force re-embedding of all features even if output parquets exist.
@@ -57,6 +59,14 @@ HADM_LINKAGE_TOLERANCE_HOURS: 2
 # Default: 24 (first 24 hours of admission).
 LAB_ADMISSION_WINDOW: 24
 
+# ED lookback window (hours before admittime).
+# Extends the lower bound of the admission window backwards to capture
+# pre-admission ED labs charted before formal admittime (e.g. sepsis
+# lactates, admission troponins, baseline creatinine). Applied to both
+# extract_labs and extract_microbiology.
+# Default: 24 hours.
+ED_LOOKBACK_HOURS: 24
+
 # Microbiology event admission window.
 # Integer: include only events within this many hours of admittime
 #   (admittime <= charttime <= admittime + MICRO_WINDOW_HOURS hours).
@@ -75,6 +85,9 @@ MICRO_LINK_TOLERANCE_HOURS: 2
 MICRO_INCLUDE_COMMENTS: true
 MICRO_COMMENT_MAX_SENTENCES: 2
 MICRO_COMMENT_MAX_CHARS: 200
+
+# Path to the microbiology panel configuration (version-controlled config, not a generated artefact).
+MICRO_PANEL_CONFIG_PATH: "config/micro_panel_config.yaml"
 
 # Output directory roots (relative to repository root)
 PREPROCESSING_DIR: "data/preprocessing"

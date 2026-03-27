@@ -9,8 +9,9 @@ per-row text line strings using the canonical format:
 
 Where:
     [HH:MM]           – elapsed time since admittime (e.g. [02:14] = 2 h 14 min)
-    {value}           – valuenum formatted to 2 decimal places if available,
-                        otherwise the text value field
+    {value}           – valuenum formatted with :g (trailing zeros dropped,
+                        precision preserved) if available, otherwise the text
+                        value field
     (ref: lower-upper)– omitted if either bound is null
     [ABNORMAL]        – appended when flag == "abnormal" OR when valuenum is not
                         null and falls outside [ref_range_lower, ref_range_upper]
@@ -52,7 +53,7 @@ def build_lab_text_line_series(df: pd.DataFrame) -> pd.Series:
     has_num = pd.notna(value_num)
     text_values = df["value"].fillna("").astype(str).str.strip()
     value_strs = pd.Series(
-        [f"{v:.2f}" if h else t for h, v, t in zip(has_num, value_num, text_values)],
+        [f"{v:g}" if h else t for h, v, t in zip(has_num, value_num, text_values)],
         index=df.index,
     )
 
@@ -133,10 +134,10 @@ def build_lab_text_line_row(row) -> str:
     except (TypeError, ValueError, OverflowError):
         time_str = "00:00"
 
-    # Value: prefer numeric formatted to 2dp, fall back to text value
+    # Value: prefer numeric formatted with :g, fall back to text value
     if pd.notna(row.get("valuenum")):
         try:
-            value_str = f"{float(row['valuenum']):.2f}"
+            value_str = f"{float(row['valuenum']):g}"
         except (TypeError, ValueError):
             value_str = str(row.get("value", "")).strip()
     else:

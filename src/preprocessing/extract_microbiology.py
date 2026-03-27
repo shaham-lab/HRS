@@ -10,9 +10,9 @@ Output: FEATURES_DIR/micro_<panel_name>.parquet
   One row per admission with events in this panel within the time window.
 
 Expected config keys:
-    MIMIC_DATA_DIR     – root directory containing MIMIC-IV tables (hosp/)
-    FEATURES_DIR       – output directory for feature parquets
-    CLASSIFICATIONS_DIR – directory containing micro_panel_config.yaml
+    MIMIC_DATA_DIR          – root directory containing MIMIC-IV tables (hosp/)
+    FEATURES_DIR            – output directory for feature parquets
+    MICRO_PANEL_CONFIG_PATH – path to micro_panel_config.yaml (relative to repo root)
 
 Optional config keys:
     MICRO_WINDOW_HOURS          – int hours from admittime, or "full_admission"
@@ -24,6 +24,7 @@ Optional config keys:
 import json
 import logging
 import os
+from pathlib import Path
 
 import pandas as pd
 import yaml
@@ -63,14 +64,14 @@ def _parse_micro_window(config: dict):
 
 
 def run(config: dict) -> None:
-    _check_required_keys(config, ["MIMIC_DATA_DIR", "FEATURES_DIR", "CLASSIFICATIONS_DIR"])
+    _check_required_keys(config, ["MIMIC_DATA_DIR", "FEATURES_DIR", "MICRO_PANEL_CONFIG_PATH"])
 
     mimic_dir = str(config["MIMIC_DATA_DIR"])
     features_dir = str(config["FEATURES_DIR"])
-    classifications_dir = str(config["CLASSIFICATIONS_DIR"])
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
     micro_window = _parse_micro_window(config)
+    ed_lookback_hours: int = int(config.get("ED_LOOKBACK_HOURS", 24))
     null_hadm_strategy = str(config.get("MICRO_NULL_HADM_STRATEGY", "drop")).lower()
     link_tolerance_hours = int(config.get("MICRO_LINK_TOLERANCE_HOURS", 2))
 
@@ -90,11 +91,11 @@ def run(config: dict) -> None:
             return
 
     # Load micro panel config
-    config_path = os.path.join(classifications_dir, "micro_panel_config.yaml")
+    config_path = Path(config["MICRO_PANEL_CONFIG_PATH"]).resolve()
     if not os.path.exists(config_path):
         raise FileNotFoundError(
             f"micro_panel_config.yaml not found at {config_path}. "
-            "Run build_micro_panel_config first."
+            "Ensure MICRO_PANEL_CONFIG_PATH in config/preprocessing.yaml points to a valid file."
         )
     with open(config_path, encoding="utf-8") as fh:
         micro_cfg = yaml.safe_load(fh)
@@ -212,7 +213,8 @@ def run(config: dict) -> None:
     )
 
     # Apply time-window filter
-    window_mask = micro["charttime"] >= micro["admittime"]
+    lookback = pd.to_timedelta(ed_lookback_hours, unit="h")
+    window_mask = micro["charttime"] >= (micro["admittime"] - lookback)
     if isinstance(micro_window, int):
         cutoff = micro["admittime"] + pd.to_timedelta(micro_window, unit="h")
         window_mask &= micro["charttime"] <= cutoff
@@ -220,8 +222,9 @@ def run(config: dict) -> None:
         window_mask &= micro["charttime"] <= micro["dischtime"]
     micro = micro[window_mask].copy()
     logger.info(
-        "After window filter (%s): %d rows for %d admissions",
+        "After window filter (%s window, %dh ED lookback): %d rows for %d admissions",
         micro_window,
+        ed_lookback_hours,
         len(micro),
         micro["hadm_id"].nunique(),
     )

@@ -51,7 +51,6 @@ def main() -> None:
         os.path.join(features_dir, "labs_features.parquet"),
         os.path.join(classifications_dir, "y_labels.parquet"),
         os.path.join(classifications_dir, "lab_panel_config.yaml"),
-        os.path.join(classifications_dir, "micro_panel_config.yaml"),
     ]
     missing_preprocess = [p for p in required_preprocess_outputs
                           if not os.path.exists(p)]
@@ -91,7 +90,7 @@ def main() -> None:
     ]
 
     # Micro panel features: one row per admission in splits (zero vector if no events)
-    micro_panel_config_path = os.path.join(classifications_dir, "micro_panel_config.yaml")
+    micro_panel_config_path = str(config.get("MICRO_PANEL_CONFIG_PATH", os.path.join(classifications_dir, "micro_panel_config.yaml")))
     micro_features = []
     if os.path.exists(micro_panel_config_path):
         with open(micro_panel_config_path, encoding="utf-8") as fh:

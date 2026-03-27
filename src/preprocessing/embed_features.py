@@ -883,7 +883,7 @@ def _load_micro_inputs(config: dict, slice_hadm_ids: set) -> list[str]:
 
     classifications_dir = str(config["CLASSIFICATIONS_DIR"])
     features_dir = str(config["FEATURES_DIR"])
-    micro_panel_config_path = os.path.join(classifications_dir, "micro_panel_config.yaml")
+    micro_panel_config_path = str(config.get("MICRO_PANEL_CONFIG_PATH", os.path.join(classifications_dir, "micro_panel_config.yaml")))
 
     if not os.path.exists(micro_panel_config_path):
         logger.warning("micro_panel_config.yaml not found — micro embeddings skipped.")

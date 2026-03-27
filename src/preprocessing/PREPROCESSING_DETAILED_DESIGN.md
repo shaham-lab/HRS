@@ -6,7 +6,6 @@
 2. [Data Splits — Implementation](#2-data-splits--implementation)
 3. [Module Implementation](#3-module-implementation)
    - [build_lab_panel_config.py](#build_lab_panel_configpy)
-   - [build_micro_panel_config.py](#build_micro_panel_configpy)
    - [create_splits.py](#create_splitspy)
    - [extract_demographics.py](#extract_demographicspy)
    - [extract_diag_history.py](#extract_diag_historypy)
@@ -108,29 +107,6 @@ Derives lab groups from `d_labitems` and writes `classifications/lab_panel_confi
 | 11 | `bone_marrow` | Bone Marrow | Hematology | 44 | 768 |
 | 12 | `joint_fluid` | Joint Fluid | Blood Gas + Chemistry + Hematology | 38 | 768 |
 | 13 | `stool` | Stool | Chemistry + Hematology | 18 | 768 |
-
----
-
-### `build_micro_panel_config.py`
-
-Builds the microbiology panel configuration and writes `classifications/micro_panel_config.yaml`.
-
-**Algorithm:**
-1. Load the canonical `PANELS_37` dict (curated from EDA on `microbiologyevents`)
-2. For each panel, store the description and list of `(test_name, spec_type_desc)` combo pairs
-3. Append excluded test names (`EXCLUDED_TESTS`) and excluded specimen types (`EXCLUDED_SPEC_TYPES`)
-4. Append comment cleaning rules: `discard_prefixes` and `strip_triggers` lists
-5. Write YAML: `{panels: {...}, excluded_tests: [...], excluded_spec_types: [...], comment_cleaning: {...}}`
-
-**Panel assignment key:** `(test_name.strip(), spec_type_desc.strip())` — both fields stripped of whitespace before lookup. A row matching no combo is logged as unassigned and excluded from feature extraction.
-
-**Excluded specimen types:** `POSTMORTEM CULTURE`, `BLOOD CULTURE (POST-MORTEM)` — excluded entirely to prevent target leakage (post-mortem specimens perfectly predict Y1=1).
-
-**Output — 37 panels:** See Table 3 in `feature_preprocessing_updated.docx` for full panel list with feature IDs F20–F56.
-
-This is a one-time build step. The resulting `micro_panel_config.yaml` is version-controlled and must be present before `extract_microbiology.py` runs.
-
-See [Section 2](#2-data-splits--implementation).
 
 ---
 
@@ -286,7 +262,7 @@ Produces a long-format parquet of all lab events within the admission window.
 Produces 37 text parquets — one per microbiology panel — from `microbiologyevents`. Each parquet contains one row per admission with a `text` column holding the aggregated panel text for that admission.
 
 **Algorithm:**
-1. Load `micro_panel_config.yaml` — panel combo dict, excluded tests, excluded spec_types, comment cleaning rules
+1. Load `micro_panel_config.yaml` from `MICRO_PANEL_CONFIG_PATH` — panel combo dict, excluded tests, excluded spec_types, comment cleaning rules
 2. Stream `microbiologyevents` (or load fully if memory permits)
 3. Drop excluded tests and excluded spec_types
 4. Apply null `hadm_id` strategy (`MICRO_NULL_HADM_STRATEGY`):
