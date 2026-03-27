@@ -93,6 +93,55 @@ def _merge_embedding_parquets(base: pd.DataFrame, embeddings_dir: str) -> pd.Dat
     return base
 
 
+def _build_canonical_columns(config: dict) -> list[str]:
+    """Build the canonical column order from config files.
+
+    Order is:
+      1. Fixed metadata: subject_id, hadm_id, split
+      2. Fixed labels: y1_mortality, y2_readmission
+      3. Fixed structured vector: demographic_vec
+      4. Fixed history/triage embeddings (F2-F5):
+           diag_history_embedding, discharge_history_embedding,
+           triage_embedding, chief_complaint_embedding
+      5. Lab group embeddings — derived from lab_panel_config.yaml,
+         keys in insertion order (same order as build_lab_panel_config.py
+         produces them): f"lab_{panel_name}_embedding" for each panel
+      6. Fixed radiology: radiology_embedding
+      7. Microbiology panel embeddings — derived from
+         micro_panel_config.yaml panels keys in insertion order:
+           f"micro_{panel_name}_embedding" for each panel
+    """
+    import yaml
+
+    # Load lab panel config
+    lab_config_path = config.get(
+        "LAB_PANEL_CONFIG_PATH",
+        os.path.join(config["CLASSIFICATIONS_DIR"], "lab_panel_config.yaml"),
+    )
+    with open(lab_config_path) as f:
+        lab_cfg = yaml.safe_load(f)
+    lab_panel_names = list(lab_cfg.keys())  # insertion order
+
+    # Load micro panel config
+    micro_config_path = config["MICRO_PANEL_CONFIG_PATH"]
+    with open(micro_config_path) as f:
+        micro_cfg = yaml.safe_load(f)
+    micro_panel_names = list(micro_cfg["panels"].keys())  # insertion order
+
+    return (
+        ["subject_id", "hadm_id", "split",
+         "y1_mortality", "y2_readmission",
+         "demographic_vec",
+         "diag_history_embedding",
+         "discharge_history_embedding",
+         "triage_embedding",
+         "chief_complaint_embedding"]
+        + [f"lab_{name}_embedding" for name in lab_panel_names]
+        + ["radiology_embedding"]
+        + [f"micro_{name}_embedding" for name in micro_panel_names]
+    )
+
+
 def run(config: dict) -> None:
     """Combine all feature and label parquets into the final dataset."""
     _check_required_keys(config, [
@@ -164,6 +213,25 @@ def run(config: dict) -> None:
                 "The 'split' column is missing from the final dataset. "
                 "Ensure data_splits.parquet contains a 'split' column."
             )
+
+        # ------------------------------------------------------------------ #
+        # Enforce canonical column order derived from config files
+        # ------------------------------------------------------------------ #
+        canonical_cols = _build_canonical_columns(config)
+        missing = [c for c in canonical_cols if c not in base.columns]
+        extra = [c for c in base.columns if c not in canonical_cols]
+        if missing:
+            raise ValueError(
+                f"combine_dataset: {len(missing)} expected columns "
+                f"missing from final DataFrame: {missing}. "
+                f"Ensure all extraction and embedding steps completed."
+            )
+        if extra:
+            logger.warning(
+                "combine_dataset: %d unexpected columns will be dropped: %s",
+                len(extra), extra,
+            )
+        base = base[canonical_cols]
 
         # ------------------------------------------------------------------ #
         # Save final dataset inside the classifications directory
