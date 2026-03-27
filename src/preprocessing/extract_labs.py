@@ -16,6 +16,8 @@ Expected config keys:
 Optional config keys:
     LAB_ADMISSION_WINDOW – hours from admittime to include (default 24),
                            or "full" to include entire admission
+    ED_LOOKBACK_HOURS            – hours before admittime to include, capturing
+                                   pre-admission ED labs (default 24)
     HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
                                    null hadm_id in labevents
     HADM_LINKAGE_TOLERANCE_HOURS – hours of tolerance for time-window linkage
@@ -28,7 +30,7 @@ import os
 import pandas as pd
 from tqdm import tqdm
 
-from preprocessing_utils import _check_required_keys, _gz_or_csv, _link_hadm_for_row, _load_csv, _load_d_labitems, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _load_csv, _load_d_labitems, _record_hashes, _sources_unchanged
 from build_lab_text_lines import build_lab_text_line_row as _build_lab_text_line, build_lab_text_line_series
 
 logger = logging.getLogger(__name__)
@@ -96,21 +98,32 @@ def _stream_and_filter_labevents(
         if hadm_linkage_strategy == "drop":
             chunk = chunk[~null_hadm_mask].copy()
         elif hadm_linkage_strategy == "link" and null_hadm_count > 0:
-            null_rows = chunk[null_hadm_mask].copy()
-            resolved_rows = []
+            null_rows = chunk[null_hadm_mask].sort_values("charttime")
+            admissions_sorted = (
+                admissions[["subject_id", "hadm_id", "admittime"]]
+                .rename(columns={
+                    "hadm_id": "hadm_id_matched",
+                    "admittime": "admittime_matched",
+                })
+                .sort_values("admittime_matched")
+            )
             tolerance = pd.Timedelta(hours=hadm_linkage_tolerance_hours)
-            for _, row in null_rows.iterrows():
-                resolved_hadm = _link_hadm_for_row(row, admissions, tolerance)
-                if resolved_hadm is None:
-                    continue
-                new_row = row.copy()
-                new_row["hadm_id"] = int(resolved_hadm)
-                resolved_rows.append(new_row)
+            matched = pd.merge_asof(
+                null_rows,
+                admissions_sorted,
+                left_on="charttime",
+                right_on="admittime_matched",
+                by="subject_id",
+                direction="forward",
+                tolerance=tolerance,
+            )
+            matched = matched[matched["hadm_id_matched"].notna()].copy()
+            matched["hadm_id"] = matched["hadm_id_matched"].astype(int)
+            matched = matched.drop(columns=["hadm_id_matched", "admittime_matched"])
 
             non_null = chunk[~null_hadm_mask].copy()
-            if resolved_rows:
-                resolved_df = pd.DataFrame(resolved_rows)
-                chunk = pd.concat([non_null, resolved_df], ignore_index=True)
+            if not matched.empty:
+                chunk = pd.concat([non_null, matched], ignore_index=True)
             else:
                 chunk = non_null
 
@@ -145,6 +158,7 @@ def _apply_admission_window_filter(
     labs: pd.DataFrame,
     admissions: pd.DataFrame,
     lab_window_hours: int | None,
+    ed_lookback_hours: int = 24,
 ) -> pd.DataFrame:
     """Filter lab events to the configured admission window.
 
@@ -156,6 +170,10 @@ def _apply_admission_window_filter(
         Admissions table with admittime and dischtime columns.
     lab_window_hours : int or None
         Hours from admittime to include, or None for full admission.
+    ed_lookback_hours : int
+        Hours before admittime to include, capturing pre-admission ED labs
+        charted before formal admittime (e.g. sepsis lactates, troponins).
+        Default: 24.
 
     Returns
     -------
@@ -168,7 +186,8 @@ def _apply_admission_window_filter(
         how="inner",
     )
 
-    window_mask = labs["charttime"] >= labs["admittime"]
+    lookback = pd.to_timedelta(ed_lookback_hours, unit="h")
+    window_mask = labs["charttime"] >= (labs["admittime"] - lookback)
     if lab_window_hours is None:
         window_mask &= labs["charttime"] <= labs["dischtime"]
     else:
@@ -176,8 +195,9 @@ def _apply_admission_window_filter(
         window_mask &= labs["charttime"] <= cutoff
 
     labs = labs[window_mask]
-    logger.info("  After window filter (%s): %d rows for %d admissions",
+    logger.info("  After window filter (%s window, %dh ED lookback): %d rows for %d admissions",
                 f"{lab_window_hours}h" if lab_window_hours else "full",
+                ed_lookback_hours,
                 len(labs), labs["hadm_id"].nunique())
     return labs
 
@@ -192,6 +212,7 @@ def run(config: dict) -> None:
     registry_path = config.get("HASH_REGISTRY_PATH", "")
 
     lab_window_hours = _parse_lab_window(config)
+    ed_lookback_hours: int = int(config.get("ED_LOOKBACK_HOURS", 24))
 
     hadm_linkage_strategy: str = str(config.get("HADM_LINKAGE_STRATEGY", "drop")).lower()
     hadm_linkage_tolerance_hours: int = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 2))
@@ -292,7 +313,7 @@ def run(config: dict) -> None:
         # Apply admission window filter
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_labs — applying admission window filter")
-        labs = _apply_admission_window_filter(labs, admissions, lab_window_hours)
+        labs = _apply_admission_window_filter(labs, admissions, lab_window_hours, ed_lookback_hours)
         pbar.update(1)
 
         # ------------------------------------------------------------------ #

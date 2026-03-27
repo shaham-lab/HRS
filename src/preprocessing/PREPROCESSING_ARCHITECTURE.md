@@ -87,11 +87,11 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
                                │
                ┌───────────────┴───────────────┐
                │                               │
-    ┌──────────▼────────────┐     ┌────────────▼────────────┐
-    │ build_lab_panel_       │     │ build_micro_panel_       │
-    │ config.py              │     │ config.py                │
-    │ lab_panel_config.yaml  │     │ micro_panel_config.yaml  │
-    └──────────┬────────────┘     └────────────┬────────────┘
+    ┌──────────▼────────────┐     ┌────────────────────────┐
+    │ build_lab_panel_       │     │ micro_panel_config.yaml │
+    │ config.py              │     │ (version-controlled     │
+    │ lab_panel_config.yaml  │     │  config, no build step) │
+    └──────────┬────────────┘     └────────────┬───────────┘
                │                               │
                └───────────────┬───────────────┘
                                │
@@ -130,7 +130,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 ### Dependency Rules
 
 - `create_splits` → must run first
-- `build_lab_panel_config` and `build_micro_panel_config` → must run before any `extract_*`; independent of each other
+- `build_lab_panel_config` → must run before `extract_labs`; `micro_panel_config.yaml` is version-controlled and requires no build step
 - All `extract_*` → independent of each other, can run in parallel
 - `embed_features` → requires all `extract_*` complete; runs as **14 sequential SLURM jobs**
 - `combine_dataset` → requires all embed slices complete
@@ -150,7 +150,6 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | Step | Module | Output | Notes |
 |------|--------|--------|-------|
 | 0a | `build_lab_panel_config.py` | `lab_panel_config.yaml` | Must run before extract_labs |
-| 0b | `build_micro_panel_config.py` | `micro_panel_config.yaml` | Must run before extract_microbiology |
 | 1 | `create_splits.py` | `data_splits.parquet` | Patient-level, stratified, seed 42 |
 | 2 | `extract_demographics.py` | `demographics_features.parquet` | 8-float vector per admission |
 | 3 | `extract_diag_history.py` | `diag_history_features.parquet` | Prior visits only |
@@ -163,7 +162,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | 10 | `embed_features.py` | 55 embedding parquets | 14 SLURM jobs × 2 GPUs × 20k admissions |
 | 11 | `combine_dataset.py` | `final_cdss_dataset.parquet` | Left-join all features; 61 columns |
 
-Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`), `build_micro_text.py` (helper for `extract_microbiology` — comment cleaning and text construction).
+Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`), `build_micro_text.py` (helper for `extract_microbiology` — comment cleaning and text construction). `micro_panel_config.yaml` is a version-controlled config file in `config/` — no build step required.
 
 ---
 
@@ -208,7 +207,7 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 
 **No target leakage** — prior-visit features use only admissions strictly before current `admittime`. Lab events restricted to current admission window. Post-mortem specimens excluded from all microbiology panels — their presence perfectly predicts Y1 (in-hospital mortality) and would introduce a direct causal shortcut. Imputation statistics computed on train split only, persisted and applied identically to dev/test.
 
-**No hardcoding** — all paths, model names, split ratios, batch sizes, and thresholds in `config/preprocessing.yaml`. Lab groups derived dynamically from `d_labitems`. Microbiology panel membership, comment cleaning rules, excluded tests, and excluded specimen types defined in `micro_panel_config.yaml`.
+**No hardcoding** — all paths, model names, split ratios, batch sizes, and thresholds in `config/preprocessing.yaml`. Lab groups derived dynamically from `d_labitems`. Microbiology panel membership, comment cleaning rules, excluded tests, and excluded specimen types defined in `config/micro_panel_config.yaml` (version-controlled; path declared via `MICRO_PANEL_CONFIG_PATH`).
 
 **Reproducibility** — random seed 42. Imputation stats and source MD5 hashes persisted. Incremental runs skip modules whose source hashes match and outputs exist.
 
@@ -216,7 +215,7 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 
 **Time-window safety** — embedding is split into admission slices of ≤80k records (≤40k per GPU) to fit within the 12-hour SLURM partition limit. Each slice is a self-contained job that appends to the shared output parquets.
 
-**Graceful degradation** — missing OMR/chartevents falls back gracefully. Missing CUDA falls back to CPU. Missing lab events or microbiology events → zero vector. Missing `lab_panel_config.yaml` or `micro_panel_config.yaml` → respective embeddings skipped with warning.
+**Graceful degradation** — missing OMR/chartevents falls back gracefully. Missing CUDA falls back to CPU. Missing lab events or microbiology events → zero vector. Missing `lab_panel_config.yaml` or `micro_panel_config.yaml` (at path from `MICRO_PANEL_CONFIG_PATH`) → respective embeddings skipped with warning.
 
 ---
 
@@ -225,7 +224,8 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 ```
 HRS/
 ├── config/
-│   └── preprocessing.yaml              # All configuration — single source of truth
+│   ├── preprocessing.yaml              # All configuration — single source of truth
+│   └── micro_panel_config.yaml         # Microbiology panel definitions (version-controlled)
 ├── src/preprocessing/
 │   ├── pipeline_job.sh                 # SLURM: preprocessing (no GPU, 64G)
 │   ├── embed_job.sh                    # SLURM: one embed slice (2× L4 GPU, 64G)
@@ -235,7 +235,6 @@ HRS/
 │   ├── check_embed_status.py           # State detection for submit_all.sh
 │   ├── preprocessing_utils.py          # Shared utilities
 │   ├── build_lab_panel_config.py       # Step 0a
-│   ├── build_micro_panel_config.py     # Step 0b
 │   ├── create_splits.py                # Step 1
 │   ├── extract_demographics.py         # Step 2
 │   ├── extract_diag_history.py         # Step 3
@@ -260,7 +259,6 @@ HRS/
         ├── y_labels.parquet
         ├── final_cdss_dataset.parquet
         ├── lab_panel_config.yaml
-        ├── micro_panel_config.yaml
         ├── imputation_stats.json
         ├── hadm_linkage_stats.json
         └── micro_linkage_stats.json
