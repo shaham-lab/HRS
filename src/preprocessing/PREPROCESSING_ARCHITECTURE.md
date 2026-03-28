@@ -178,9 +178,9 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 
 **Multi-GPU within a job:** The slice's admissions are split evenly between 2 GPU workers (~20k each). Both workers run **in parallel** — each embeds all 55 features for its own admission half, writing to per-worker temporary parquets. The main process merges the per-worker parquets into the shared output parquets after both workers complete. LPT ordering within each worker (features sorted by estimated compute cost descending) ensures the most expensive features start first for better progress visibility. Each GPU worker loads its own model copy.
 
-**Admission-slice batching:** The full admission corpus is divided into slices based on `BERT_SLICE_SIZE_PER_GPU` (default: 20,000 admissions per GPU). With 2 GPUs, each slice covers 40,000 admissions. The number of slices is computed automatically at runtime. Each slice runs as a separate SLURM job (≤12h). Slices run sequentially and append their results into the same output parquets via `fastparquet` append mode. Adjusting `BERT_SLICE_SIZE_PER_GPU` is the only knob needed to fit different partition time limits.
+**Admission-slice batching:** The full admission corpus is divided into slices based on `BERT_SLICE_SIZE_PER_GPU` (default: 20,000 admissions per GPU). With 2 GPUs, each slice covers 40,000 admissions. The number of slices is computed automatically at runtime. Each slice runs as a separate SLURM job (≤12h). Slices run sequentially. Each slice reads the existing output parquet, concatenates its new rows with the existing rows using PyArrow, and atomically overwrites the output file. PyArrow is used throughout because other parquet writers cannot serialise `fixed_size_list(float32, 768)` embedding columns. Adjusting `BERT_SLICE_SIZE_PER_GPU` is the only knob needed to fit different partition time limits.
 
-**Resume:** Three levels — (1) slice-level: a completed slice is detected by row count and skipped; (2) feature-level: within a slice, completed feature-parquet segments are skipped; (3) record-level: within a feature in a slice, already-embedded rows are skipped via incremental checkpointing.
+**Resume:** Three levels — (1) slice-level: a slice is detected as complete when all its admission IDs are already present in the output parquet and skipped; (2) feature-level: within a slice, completed feature-parquet segments are skipped; (3) record-level: within a feature in a slice, already-embedded rows are skipped via incremental checkpointing.
 
 **Microbiology-specific configuration:** Microbiology panels use separate config keys from lab features — `MICRO_WINDOW_HOURS` (default 72h vs lab's 24h), `MICRO_NULL_HADM_STRATEGY`, and `MICRO_LINK_TOLERANCE_HOURS`. These are resolved at extract time; `embed_features.py` consumes the pre-extracted text parquets and is agnostic to the extraction configuration.
 
@@ -231,6 +231,8 @@ HRS/
 │   ├── embed_job.sh                    # SLURM: one embed slice (2× L4 GPU, 64G)
 │   ├── combine_job.sh                  # SLURM: combine (no GPU, 32G)
 │   ├── submit_all.sh                   # Auto-submit with state detection
+│   ├── micro_extract_job.sh            # SLURM: extract_microbiology only
+│   ├── labs_extract_job.sh             # SLURM: extract_labs only
 │   ├── run_pipeline.py                 # Orchestrator CLI
 │   ├── check_embed_status.py           # State detection for submit_all.sh
 │   ├── preprocessing_utils.py          # Shared utilities
@@ -281,14 +283,18 @@ The safe per-GPU admission limit is ~20,000 admissions per 2-GPU job, giving ~40
 
 ### Scripts
 
-All four scripts live in `src/preprocessing/` alongside the Python modules they invoke.
+All SLURM scripts live in `src/preprocessing/` alongside the Python modules they invoke.
 
 | Script | GPUs | Purpose |
 |--------|------|---------|
 | `pipeline_job.sh` | 0 | Steps 0a–9 (CPU only) |
+| `micro_extract_job.sh` | 0 | `extract_microbiology` only (CPU) — run before `submit_all.sh` |
+| `labs_extract_job.sh` | 0 | `extract_labs` only (CPU) — run before `submit_all.sh` |
 | `embed_job.sh` | 2 | One admission slice — takes `--slice-index N` (passed by `submit_all.sh`) |
 | `combine_job.sh` | 0 | Step 11 — combine only (CPU) |
 | `submit_all.sh` | — | Detects state, submits all pending slices chained via `--dependency=afterok` |
+
+`extract_labs` and `extract_microbiology` must be submitted as dedicated SLURM jobs before running `submit_all.sh`. `submit_all.sh` handles embedding and combine only — it will exit with an error if extraction parquets are missing, printing the exact command to run. Use `check_embed_status.py` to verify extraction completeness before submitting embed jobs.
 
 ### Auto-submit State Detection and Job Chaining
 
@@ -299,7 +305,9 @@ bash src/preprocessing/submit_all.sh
 
 `check_embed_status.py` scans embedding parquets for total row count, determines which slices are complete, and exits with:
 - **2** → preprocessing incomplete → submits pipeline → 14 embed slices → combine
-- **1** → embedding incomplete → submits remaining slice jobs → combine
+- **1** → embedding incomplete or extraction incomplete →  
+  if extraction incomplete: prints error with command to run extraction job and exits;  
+  if extraction complete: submits all embed slices → combine
 - **0** → all embeddings complete → submits combine only
 
 The 14 embed slice jobs are submitted as a dependency chain:
