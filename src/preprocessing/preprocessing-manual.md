@@ -129,7 +129,7 @@ HRS/
         │   ├── triage_features.parquet
         │   ├── chief_complaint_features.parquet
         │   ├── labs_features.parquet
-        │   ├── micro_<panel>.parquet
+        │   ├── micro_<panel>.parquet              # One per microbiology panel
         │   ├── radiology_features.parquet
         │   └── embeddings/
         │       ├── diag_history_embeddings.parquet
