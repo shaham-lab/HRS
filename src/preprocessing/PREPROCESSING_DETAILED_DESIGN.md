@@ -229,7 +229,7 @@ Produces a long-format parquet of all lab events within the admission window.
 **Algorithm:**
 1. Stream `labevents` in 500k-row chunks
 2. For each chunk: join `admissions` on `hadm_id` to get `admittime`
-3. Filter: `admittime ≤ charttime ≤ admittime + LAB_ADMISSION_WINDOW`
+3. Filter: `(admittime − ED_LOOKBACK_HOURS) ≤ charttime ≤ (admittime + LAB_ADMISSION_WINDOW)`. The lookback window (default 24h) captures pre-admission ED labs drawn before formal inpatient `admittime`. Null `hadm_id` events in the lookback window are resolved via `pd.merge_asof()` with `direction="forward"` when `HADM_LINKAGE_STRATEGY` is `"link"`, replacing the previous `iterrows()` row-by-row approach.
 4. Format each retained event as a text line
 5. Concatenate all chunks → write `labs_features.parquet`
 
@@ -239,16 +239,16 @@ Produces a long-format parquet of all lab events within the admission window.
 ```
 
 - `[HH:MM]` = elapsed hours:minutes since `admittime` (not wall clock time)
-- `valuenum` formatted to 2 decimal places when available; `value` text field otherwise
+- `valuenum` formatted with Python's `{:g}` specifier when available (e.g. Troponin 0.004 → `"0.004"`, Glucose 142.0 → `"142"`); preserves clinically significant precision and drops trailing zeros; `value` text field otherwise
 - `(ref: lower-upper)` omitted when either bound is null
 - `[ABNORMAL]` appended when `flag == "abnormal"` **or** `valuenum` outside `[ref_range_lower, ref_range_upper]`
 
 **Example (blood_chemistry group):**
 ```
-[00:14] Glucose: 8.20 mmol/L [ABNORMAL]
-[00:14] Sodium: 138.00 mEq/L
-[00:14] Potassium: 6.10 mEq/L [ABNORMAL]
-[08:32] Creatinine: 1.80 mg/dL [ABNORMAL]
+[00:14] Glucose: 8.2 mmol/L [ABNORMAL]
+[00:14] Sodium: 138 mEq/L
+[00:14] Potassium: 6.1 mEq/L [ABNORMAL]
+[08:32] Creatinine: 1.8 mg/dL [ABNORMAL]
 ```
 
 **Admission window:** `LAB_ADMISSION_WINDOW` — integer hours or `"full"`. Default: 24.
@@ -270,8 +270,8 @@ Produces 37 text parquets — one per microbiology panel — from `microbiologye
    - `"link"`: time-window linkage against admissions; classify as linked / ambiguous / unresolvable; save audit to `micro_linkage_stats.json`
 5. Join `admissions` on `hadm_id` to get `admittime` (and `dischtime` if `MICRO_WINDOW_HOURS = "full_admission"`)
 6. Apply time window filter based on `MICRO_WINDOW_HOURS`:
-   - Integer N: `admittime ≤ charttime ≤ admittime + N hours`
-   - `"full_admission"`: `admittime ≤ charttime ≤ dischtime`
+   - Integer N: `(admittime − ED_LOOKBACK_HOURS) ≤ charttime ≤ (admittime + N hours)`. Default lookback: 24h (`ED_LOOKBACK_HOURS` config key).
+   - `"full_admission"`: `(admittime − ED_LOOKBACK_HOURS) ≤ charttime ≤ dischtime`
 7. Assign panel via `(test_name.strip(), spec_type_desc.strip())` lookup; log unassigned combos
 8. Clean `comments` column via `clean_comment()` (see comment cleaning spec)
 9. Build per-event text string (Cases A/B/C — see below)
@@ -373,7 +373,9 @@ Builds `final_cdss_dataset.parquet` from `data_splits.parquet` as the admission 
 3. Left-join `demographics_features.parquet` on `hadm_id`
 4. Scan `EMBEDDINGS_DIR` for all `*.parquet` files dynamically
 5. Left-join each embedding parquet on `hadm_id`
-6. Write `final_cdss_dataset.parquet`
+6. Build canonical column order from config files via `_build_canonical_columns(config)`: reads lab panel names from `LAB_PANEL_CONFIG_PATH` and microbiology panel names from `MICRO_PANEL_CONFIG_PATH` in insertion order. Column order: `[metadata] + [labels] + [demographic_vec] + [F2-F5 fixed embeddings] + [13 lab group embeddings] + [radiology] + [37 micro panel embeddings]`.
+7. Assert all expected columns are present — raises `ValueError` listing any missing columns if extraction or embedding is incomplete.
+8. Reorder `df` to canonical order and write `final_cdss_dataset.parquet`.
 
 All joins are **left joins** — admissions missing a non-lab/micro feature receive null for that column. Lab and microbiology embedding columns are always a 768-float array (zero vector for admissions with no events — never null).
 
@@ -489,22 +491,13 @@ slice_hadm_ids = set(all_hadm_ids[slice_start:slice_end])
 
 #### Output Appending
 
-Each slice appends its rows to the same feature parquet using `fastparquet` append mode:
-
-```
-import fastparquet as fp
-
-if output_path.exists():
-    fp.write(str(output_path), df_slice, compression="snappy", append=True)
-else:
-    fp.write(str(output_path), df_slice, compression="snappy")
-```
-
-This adds a new row group to the parquet file. The resulting file is a valid multi-row-group parquet readable by `pandas`/`pyarrow` without modification.
+Each slice reads the existing output parquet (if present), concatenates its new rows with the existing data using `pa.concat_tables()`, and atomically overwrites the output file via a `.tmp` intermediate and `os.replace()`. PyArrow is used throughout — `fastparquet` cannot serialise `fixed_size_list` (`float32`, 768) embedding columns. The resulting file is a valid parquet readable by `pandas`/`pyarrow`. Concurrent writes are prevented by running slices sequentially (chained via `--dependency=afterok`).
 
 #### Slice-Level Completeness Check
 
-`check_embed_status.py` determines whether a slice is complete by comparing the number of embedded rows in each output parquet against the expected cumulative row count after each slice. A slice is considered done if all 55 feature parquets contain rows for all `hadm_id` values in that slice's range.
+`check_embed_status.py` determines whether a slice is complete by checking whether all `hadm_id` values for that slice's range are present in the output parquets. Row count comparison against expected cumulative counts is no longer used — `hadm_id` presence is the authoritative completeness signal.
+
+`check_embed_status.py` also validates extraction completeness before embedding: it checks that all expected feature parquets exist in `FEATURES_DIR` (including all 37 `micro_` panel parquets) before embedding proceeds.
 
 Slices always run sequentially (chained via `--dependency=afterok`) — this ensures each slice appends cleanly to the previous slice's output without concurrent write conflicts.
 
