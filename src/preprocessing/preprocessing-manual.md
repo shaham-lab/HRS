@@ -102,6 +102,7 @@ HRS/
 │       ├── extract_diag_history.py
 │       ├── extract_discharge_history.py
 │       ├── extract_triage_and_complaint.py
+│       ├── build_lab_panel_config.py           # Must run before extract_labs
 │       ├── build_lab_text_lines.py             # Helper called by extract_labs
 │       ├── extract_labs.py
 │       ├── build_micro_text.py                 # Helper called by extract_microbiology
