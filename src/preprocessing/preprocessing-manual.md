@@ -91,7 +91,8 @@ All tables are expected as **`.csv.gz`** (gzip-compressed CSV). Uncompressed
 HRS/
 ├── environment.yml
 ├── config/
-│   └── preprocessing.yaml              # Central preprocessing configuration
+│   ├── preprocessing.yaml              # Central preprocessing configuration
+│   └── micro_panel_config.yaml         # Microbiology panel definitions (version-controlled)
 ├── src/
 │   └── preprocessing/
 │       ├── run_pipeline.py                     # Orchestrator CLI
@@ -101,9 +102,9 @@ HRS/
 │       ├── extract_diag_history.py
 │       ├── extract_discharge_history.py
 │       ├── extract_triage_and_complaint.py
-│       ├── build_lab_panel_config.py           # Must run before extract_labs
 │       ├── build_lab_text_lines.py             # Helper called by extract_labs
 │       ├── extract_labs.py
+│       ├── build_micro_text.py                 # Helper called by extract_microbiology
 │       ├── extract_microbiology.py
 │       ├── extract_radiology.py
 │       ├── extract_y_data.py
@@ -111,6 +112,8 @@ HRS/
 │       ├── combine_dataset.py
 │       ├── preprocessing_utils.py
 │       ├── pipeline_job.sh             # Slurm: all steps except embed_features
+│       ├── labs_extract_job.sh         # Slurm: extract_labs only
+│       ├── micro_extract_job.sh        # Slurm: extract_microbiology only
 │       ├── embed_job.sh                # Slurm: embed one GPU slice
 │       ├── combine_job.sh              # Slurm: combine_dataset
 │       └── submit_all.sh              # Slurm: auto-submit entrypoint
@@ -126,6 +129,7 @@ HRS/
         │   ├── triage_features.parquet
         │   ├── chief_complaint_features.parquet
         │   ├── labs_features.parquet
+        │   ├── micro_<panel>.parquet
         │   ├── radiology_features.parquet
         │   └── embeddings/
         │       ├── diag_history_embeddings.parquet
