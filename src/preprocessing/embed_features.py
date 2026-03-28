@@ -1085,21 +1085,30 @@ def _merge_per_worker_parquets(results: list[dict], n_gpus: int) -> None:
             )
             continue
 
+        import pyarrow as pa            # type: ignore  # noqa: PLC0415
+        import pyarrow.parquet as pq    # type: ignore  # noqa: PLC0415
+
         if len(worker_paths) == 1:
             # Only one worker file present (e.g. other worker failed).
-            # Count rows before rename so we can log without re-reading.
-            n_rows = len(pd.read_parquet(worker_paths[0], columns=["hadm_id"]))
+            new_table = pq.read_table(worker_paths[0])
+            if os.path.exists(output_path):
+                existing = pq.read_table(output_path)
+                new_table = pa.concat_tables([existing, new_table])
+            n_rows = len(new_table)
             tmp_path = output_path + ".tmp"
-            os.replace(worker_paths[0], tmp_path)
+            pq.write_table(new_table, tmp_path, compression="snappy")
             os.replace(tmp_path, output_path)
+            os.remove(worker_paths[0])
         else:
             # Merge all worker parquets using pyarrow to preserve the typed
             # fixed_size_list(float32, 768) embedding column written by the
             # workers.  A pandas round-trip would lose the schema type and
             # cause fastparquet serialisation to fail on the object-dtype column.
-            import pyarrow as pa            # type: ignore  # noqa: PLC0415
-            import pyarrow.parquet as pq    # type: ignore  # noqa: PLC0415
-            tables = [pq.read_table(wp) for wp in worker_paths]
+            if os.path.exists(output_path):
+                existing = pq.read_table(output_path)
+                tables = [existing] + [pq.read_table(wp) for wp in worker_paths]
+            else:
+                tables = [pq.read_table(wp) for wp in worker_paths]
             merged_table = pa.concat_tables(tables)
             n_rows = len(merged_table)
             tmp_path = output_path + ".tmp"

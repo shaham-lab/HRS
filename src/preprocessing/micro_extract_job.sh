@@ -1,7 +1,7 @@
 #!/bin/bash
-#SBATCH --job-name=hrs_preprocessing
-#SBATCH --output=logs/hrs_preprocessing_%j.out
-#SBATCH --error=logs/hrs_preprocessing_%j.err
+#SBATCH --job-name=hrs_micro_extract
+#SBATCH --output=logs/hrs_micro_extract_%j.out
+#SBATCH --error=logs/hrs_micro_extract_%j.err
 #SBATCH --partition=cpu1T-24h
 #SBATCH --cpus-per-task=48
 #SBATCH --mem=64G
@@ -22,11 +22,9 @@ conda activate hrs
 cd ~/Python/HRS/
 mkdir -p logs
 
-# Run all pipeline steps except embed_features
-# embed_features runs separately via embed_job.sh with 2 GPUs
 python ./src/preprocessing/run_pipeline.py \
     --config config/preprocessing.yaml \
-    --all \
-    --skip-modules embed_features
+    --extract_microbiology \
+    --force
 
 echo "End: $(date)"

@@ -2,9 +2,8 @@
 #SBATCH --job-name=hrs_embed
 #SBATCH --output=logs/hrs_embed_%j.out
 #SBATCH --error=logs/hrs_embed_%j.err
-#SBATCH --partition=A100-4h
+#SBATCH --partition=B200-4h
 #SBATCH --gres=gpu:2
-#SBATCH --cpus-per-task=8
 #SBATCH --mem=64G
 #SBATCH --mail-user=eli.kazum@biu.ac.il
 #SBATCH --mail-type=END,FAIL

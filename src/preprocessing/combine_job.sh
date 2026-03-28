@@ -2,8 +2,8 @@
 #SBATCH --job-name=hrs_combine
 #SBATCH --output=logs/hrs_combine_%j.out
 #SBATCH --error=logs/hrs_combine_%j.err
-#SBATCH --partition=A100-4h
-#SBATCH --cpus-per-task=4
+#SBATCH --partition=cpu1T-24h
+#SBATCH --cpus-per-task=48
 #SBATCH --mem=32G
 #SBATCH --mail-user=eli.kazum@biu.ac.il
 #SBATCH --mail-type=END,FAIL
