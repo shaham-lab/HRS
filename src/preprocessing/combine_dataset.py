@@ -20,11 +20,16 @@ Expected config keys:
     PREPROCESSING_DIR     – directory containing data_splits.parquet
 """
 
+import gc
 import logging
 import os
 
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 from tqdm import tqdm
+
+WRITE_CHUNK_SIZE = 50_000  # rows per row group written to parquet
 
 from preprocessing_utils import _check_required_keys
 
@@ -74,7 +79,11 @@ def _merge_feature_parquets(base: pd.DataFrame, features_dir: str) -> pd.DataFra
 
 
 def _merge_embedding_parquets(base: pd.DataFrame, embeddings_dir: str) -> pd.DataFrame:
-    """Merge all embedding parquets from *embeddings_dir* into *base*."""
+    """Merge all embedding parquets from *embeddings_dir* into *base*.
+
+    Processes one file at a time — loading only hadm_id + the embedding
+    column — so peak memory is base_df plus one parquet, not all 55 at once.
+    """
     if not os.path.isdir(embeddings_dir):
         logger.warning(
             "Embeddings directory not found (%s) – no embeddings merged.",
@@ -86,9 +95,18 @@ def _merge_embedding_parquets(base: pd.DataFrame, embeddings_dir: str) -> pd.Dat
     )
     for filename in tqdm(embedding_files, desc="Merging embeddings", unit="file"):
         path = str(os.path.join(embeddings_dir, filename))
-        logger.info("Merging embedding file: %s", filename)
-        emb_df = pd.read_parquet(path)
-        base = base.merge(emb_df, on=["subject_id", "hadm_id"], how="left")
+        # Peek at schema only (no data loaded) to find the embedding column name.
+        schema = pq.read_schema(path)
+        emb_cols = [name for name in schema.names if name not in ("subject_id", "hadm_id")]
+        if not emb_cols:
+            logger.warning("No embedding column found in %s, skipping", filename)
+            continue
+        logger.info("Merging embedding file: %s (columns: %s)", filename, emb_cols)
+        # Load only the join key and the embedding column(s).
+        emb_df = pd.read_parquet(path, columns=["hadm_id"] + emb_cols)
+        base = base.merge(emb_df, on="hadm_id", how="left")
+        del emb_df
+        gc.collect()
     logger.info("  Merged %d embedding files", len(embedding_files))
     return base
 
@@ -155,6 +173,13 @@ def run(config: dict) -> None:
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
     classifications_dir = str(config["CLASSIFICATIONS_DIR"])
     preprocessing_dir = str(config["PREPROCESSING_DIR"])
+
+    # Remove any stale output file from a previous killed run before starting,
+    # so a partial file can never be mistaken for a completed one.
+    output_path = str(os.path.join(classifications_dir, "final_cdss_dataset.parquet"))
+    if os.path.exists(output_path):
+        os.remove(output_path)
+        logger.info("Removed existing output file: %s", output_path)
 
     steps = [
         "Load data_splits.parquet",
@@ -234,10 +259,21 @@ def run(config: dict) -> None:
         base = base[canonical_cols]
 
         # ------------------------------------------------------------------ #
-        # Save final dataset inside the classifications directory
+        # Save final dataset — write in chunks to limit write-buffer memory.
+        # Writes to a .tmp file first; atomically replaces output on success.
         # ------------------------------------------------------------------ #
-        output_path = str(os.path.join(classifications_dir, "final_cdss_dataset.parquet"))
-        base.to_parquet(output_path, index=False)
         logger.info("  Final dataset: %d rows × %d columns", base.shape[0], base.shape[1])
         logger.info("  Columns: %s", list(base.columns))
+        tmp_path = output_path + ".tmp"
+        schema = pa.Schema.from_pandas(base)
+        with pq.ParquetWriter(tmp_path, schema=schema, compression="snappy") as writer:
+            for start in range(0, len(base), WRITE_CHUNK_SIZE):
+                chunk = base.iloc[start:start + WRITE_CHUNK_SIZE]
+                writer.write_table(pa.Table.from_pandas(chunk, schema=schema))
+                logger.info(
+                    "Written rows %d–%d of %d",
+                    start, min(start + WRITE_CHUNK_SIZE, len(base)), len(base),
+                )
+        os.replace(tmp_path, output_path)
+        logger.info("Saved %s", os.path.basename(output_path))
         pbar.update(1)
