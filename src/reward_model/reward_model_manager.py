@@ -17,7 +17,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from checkpoint_manager import CheckpointManager
-from metrics import _append_metrics_row, compute_metrics
+from metrics import MetricsLogger, compute_metrics
 from mimic4_data_loader import Mimic4DataLoader
 from masking import MaskingSchedule
 from reward_model import RewardModel
@@ -72,7 +72,7 @@ class RewardModelManager:
         self.checkpoint_manager = CheckpointManager(
             Path(self.config.CHECKPOINT_DIR), self.config.CHECKPOINT_KEEP_N
         )
-        self.metrics_path = Path(self.config.METRICS_PATH)
+        self.metrics_logger = MetricsLogger(Path(self.config.METRICS_PATH), self.config.NUM_TARGETS)
 
         self.model = self._build_model()
         self.optimizer = self._build_optimizer()
@@ -413,7 +413,7 @@ class RewardModelManager:
                     row[f"auroc_target_{i}"] = dev_metrics[f"auroc_target_{i}"]
                     row[f"auprc_target_{i}"] = dev_metrics[f"auprc_target_{i}"]
                     row[f"ece_target_{i}"] = dev_metrics[f"ece_target_{i}"]
-                _append_metrics_row(self.metrics_path, row, num_targets=T)
+                self.metrics_logger.append_row(row)
 
                 current_dev_loss = dev_metrics["loss_total"]
                 improved = current_dev_loss < best_dev_loss

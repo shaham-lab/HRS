@@ -148,7 +148,7 @@ HRS/src/preprocessing
 | 2 | `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
 | 3 | `reward_mode.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `reward_model_manager.py` |
 | 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
-| 5 | `metrics.py` | Metrics + logging | Contains `compute_metrics()` and `_append_metrics_row()` for AUROC/AUPRC/ECE computation and metrics parquet logging |
+| 5 | `metrics.py` | Metrics + logging | Contains `compute_metrics()` and `MetricsLogger` (encapsulates Parquet schema + atomic appends for training metrics) |
 | 6 | `reward_model_manager.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, loss computation, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
 | 6a | `reward_model_main.py` | Process exit code | DDP entry point via `torchrun`; owns CLI parsing, logging setup, runtime init, resume wiring, and delegates to `RewardModelManager` |
 | 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split using log-space L-BFGS; single GPU |
@@ -165,7 +165,7 @@ graph TD
   RewardModelManager --> MaskingSchedule
   RewardModelManager --> RewardModel
   RewardModelManager --> Mimic4DataLoader
-  RewardModelManager --> Metrics[metrics.py functions]
+  RewardModelManager --> Metrics[metrics.py (MetricsLogger + helpers)]
   RewardModelManager --> RewardModelConfig
   Mimic4DataLoader --> ParquetDataset
   Mimic4DataLoader --> RowGroupBlockSampler
@@ -374,7 +374,7 @@ HRS/
 │       ├── mimic4_data_loader.py           # step 1 — load, validate schema, derive feature index map
 │       ├── reward_mode.py                   # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
-│       ├── metrics.py                       # step 4 — AUROC/AUPRC/ECE computation + metrics parquet logging helpers
+│       ├── metrics.py                       # step 4 — AUROC/AUPRC/ECE computation + MetricsLogger (Parquet logging)
 │       ├── reward_model_main.py             # step 5 — DDP entrypoint launched by torchrun
 │       ├── reward_model_manager.py                         # RewardModelManager class: loss computation, curriculum, epoch loop, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split
