@@ -1,21 +1,8 @@
-"""DDP training entry point for the CDSS-ML reward model.
+"""Training utilities and manager class for the CDSS-ML reward model.
 
-Launched by ``torchrun`` via ``reward_job.sh``.  Orchestrates the full training
-loop: DDP initialisation, dataset loading, masking curriculum, AdamW + cosine
-LR, early stopping, checkpointing, and metric logging.
-
-Usage::
-
-    # Fresh run
-    torchrun --nproc_per_node=2 src/reward_model/train.py \\
-        --config config/reward_model.yaml
-
-    # Resume from latest checkpoint
-    torchrun --nproc_per_node=2 src/reward_model/train.py \\
-        --config config/reward_model.yaml --resume
-
-See Detailed Design §5 (train.py), §6 (DDP implementation), §7 (adversarial
-gradient computation), §8 (checkpoint and resume).
+Houses data loading, masking curriculum, model/optimizer construction, and the
+RewardModelManager class. The torchrun entry point lives in
+``reward_model_main.py``.
 """
 
 import argparse
@@ -525,7 +512,7 @@ def _maybe_load_states(
     scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
 
 
-class TrainManager:
+class RewardModelManager:
     def __init__(
         self,
         config: RewardModelConfig,
