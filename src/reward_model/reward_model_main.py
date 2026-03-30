@@ -1,18 +1,39 @@
 """torchrun entry point for training the CDSS-ML reward model."""
 
+import argparse
+import logging
 import os
 import sys
 
 import torch.distributed as dist
 
 from reward_model_config import load_and_validate_config
-from train import (
-    RewardModelManager,
-    _init_runtime,
-    _parse_args,
-    _resume_from_checkpoint,
-    _setup_logging,
-)
+from reward_model_utils import get_device
+from train import RewardModelManager, _init_ddp, _resume_from_checkpoint
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the CDSS-ML reward model")
+    parser.add_argument("--config", required=True, help="Path to reward_model.yaml")
+    parser.add_argument("--resume", action="store_true", help="Resume from latest checkpoint")
+    return parser.parse_args()
+
+
+def _setup_logging(initial_rank: int) -> None:
+    if initial_rank == 0:
+        logging.basicConfig(
+            level=logging.INFO,
+            format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+            stream=sys.stdout,
+        )
+    else:
+        logging.basicConfig(level=logging.ERROR)
+
+
+def _init_runtime(config) -> tuple[int, int, int, bool, object]:
+    rank, local_rank, world_size, is_ddp = _init_ddp(config.NUM_GPUS)
+    device = get_device(local_rank)
+    return rank, local_rank, world_size, is_ddp, device
 
 
 def main() -> int:

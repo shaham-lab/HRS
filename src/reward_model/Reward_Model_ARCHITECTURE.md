@@ -149,8 +149,8 @@ HRS/src/preprocessing
 | 3 | `model.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `train.py` |
 | 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
 | 5 | `loss.py` | Scalar loss tensor | Generic T-target weighted BCE with dynamic NaN masking per target; weights normalised to sum to 1.0 |
-| 6 | `train.py` | Checkpoint files | Contains `RewardModelManager` class; handles masking curriculum, epoch loop, optimizer/scheduler, dev eval, checkpointing, and metrics |
-| 6a | `reward_model_main.py` | Process exit code | DDP entry point via `torchrun`; orchestrates CLI, runtime init, resume, and delegates to `RewardModelManager` |
+| 6 | `train.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
+| 6a | `reward_model_main.py` | Process exit code | DDP entry point via `torchrun`; owns CLI parsing, logging setup, runtime init, resume wiring, and delegates to `RewardModelManager` |
 | 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split using log-space L-BFGS; single GPU |
 | 8 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
 | 9 | `validate_contract.py` | Exit code 0/1 | Standalone schema assertion runner; metadata-only, no tensor construction |

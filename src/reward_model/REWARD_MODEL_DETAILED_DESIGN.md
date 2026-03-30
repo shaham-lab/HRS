@@ -70,7 +70,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
 | `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
 | `inference.py` | `RewardModelInference` | Frozen inference wrapper with calibration parameters. |
-| `train.py` | `RewardModelManager` | Encapsulates training state, masking curriculum, epoch loop, optimizer/scheduler, dev eval, checkpointing. |
+| `train.py` | `RewardModelManager` | Encapsulates dataset load/broadcast, model + optimizer + scheduler construction, training state, masking curriculum, epoch loop, dev eval, checkpointing. |
 
 ### Class vs plain script
 
@@ -81,8 +81,8 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `loss.py` | Plain functions | Stateless transformations; `compute_loss(logits_list, labels_list, pos_weights, loss_weights)` for T targets |
-| `train.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing |
-| `reward_model_main.py` | Plain script, DDP entry point | CLI + runtime init; instantiates `RewardModelManager` and delegates training |
+| `train.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
+| `reward_model_main.py` | Plain script, DDP entry point | CLI parsing, logging setup, runtime init; instantiates `RewardModelManager` and delegates training |
 | `calibrate.py` | Plain script, `run(config)` | Single optimisation pass; no persistent state |
 | `inference.py` | **Class** (`RewardModelInference`) | Loaded once, called repeatedly per RL step; holds frozen weights and calibration params in memory |
 | `validate_contract.py` | Plain script, CLI tool | One-shot assertion run; exits with code 0 (pass) or 1 (fail) |
@@ -90,7 +90,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 
 ### Encapsulation rules
 
-All helper functions are module-private (prefixed `_`). The public interface of each pipeline module is its `run(config)` function or class constructor. `reward_model_main.py` is the torchrun entry point and delegates to the `RewardModelManager` class in `train.py`. Config is always passed as a validated Pydantic model object, not a raw dict.
+All helper functions are module-private (prefixed `_`). The public interface of each pipeline module is its `run(config)` function or class constructor. `reward_model_main.py` owns CLI parsing, logging setup, and runtime initialisation, then delegates to the `RewardModelManager` class in `train.py`, which owns dataset loading/broadcast, model/optimizer/scheduler construction, and training/eval loops. Config is always passed as a validated Pydantic model object, not a raw dict.
 
 ### File naming conventions
 
