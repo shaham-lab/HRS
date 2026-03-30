@@ -36,7 +36,7 @@ torchrun \
     --nproc_per_node=1 \
     --rdzv_backend=c10d \
     --rdzv_endpoint=localhost:29500 \
-    src/reward_model/train.py \
+    src/reward_model/reward_model_main.py \
     --config config/reward_model.yaml \
     "$@"
 

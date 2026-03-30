@@ -37,7 +37,8 @@ def _build_export_dict(
 ) -> Dict[str, Any]:
     """Assemble a self-contained export dict from a checkpoint and calibration file.
 
-    Loads ``best_model.pt`` (or any epoch checkpoint written by ``train.py``)
+    Loads ``best_model.pt`` (or any epoch checkpoint written by
+    ``reward_model_manager.py``)
     and ``calibration_params.json`` and merges them into a single dict
     suitable for writing with ``torch.save``.  The result can be loaded by
     ``inference.py`` without access to ``config/reward_model.yaml``.
