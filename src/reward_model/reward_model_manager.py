@@ -195,66 +195,6 @@ def _resume_from_checkpoint(
     return ckpt_state, start_epoch, best_dev_loss
 
 
-def _build_masking_schedule(
-    config: RewardModelConfig, feature_index_map: Dict[str, Tuple[int, int]], ckpt_state: Optional[dict]
-) -> MaskingSchedule:
-    if ckpt_state is not None:
-        ms = ckpt_state["masking_schedule_state"]
-        return MaskingSchedule(
-            feature_index_map=feature_index_map,
-            start_ratios=ms["start_ratios"],
-            end_ratios=ms["end_ratios"],
-            transition_shape=ms["transition_shape"],
-            transition_midpoint_epoch=ms["transition_midpoint_epoch"],
-            total_epochs=ms["total_epochs"],
-            num_always_visible=ms["num_always_visible"],
-            random_k_min_fraction=ms["random_k_min_fraction"],
-            random_k_max_fraction=ms["random_k_max_fraction"],
-            adversarial_k_min_fraction=ms["adversarial_k_min_fraction"],
-            adversarial_k_max_fraction=ms["adversarial_k_max_fraction"],
-        )
-
-    return MaskingSchedule(
-        feature_index_map=feature_index_map,
-        start_ratios=config.MASKING_START_RATIOS,
-        end_ratios=config.MASKING_END_RATIOS,
-        transition_shape=config.MASKING_TRANSITION_SHAPE,
-        transition_midpoint_epoch=config.MASKING_TRANSITION_MIDPOINT_EPOCH,
-        total_epochs=config.MAX_EPOCHS,
-        num_always_visible=config.NUM_ALWAYS_VISIBLE_FEATURES,
-        random_k_min_fraction=config.MASKING_RANDOM_K_MIN_FRACTION,
-        random_k_max_fraction=config.MASKING_RANDOM_K_MAX_FRACTION,
-        adversarial_k_min_fraction=config.MASKING_ADVERSARIAL_K_MIN_FRACTION,
-        adversarial_k_max_fraction=config.MASKING_ADVERSARIAL_K_MAX_FRACTION,
-    )
-
-
-def _build_train_loader(
-    train_dataset: Optional[torch.utils.data.Dataset],
-    config: RewardModelConfig,
-    rank: int,
-    world_size: int,
-    is_ddp: bool,
-) -> Optional[DataLoader]:
-    if train_dataset is None:
-        return None
-
-    sampler = RowGroupBlockSampler(
-        dataset=train_dataset,
-        rank=rank,
-        world_size=world_size if is_ddp else 1,
-        shuffle=True,
-        seed=0,
-    )
-    return DataLoader(
-        train_dataset,
-        batch_size=config.BATCH_SIZE_PER_GPU,
-        sampler=sampler,
-        num_workers=config.DATALOADER_NUM_WORKERS,
-        pin_memory=torch.cuda.is_available(),
-    )
-
-
 def _maybe_load_states(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
@@ -440,12 +380,8 @@ class RewardModelManager:
         return result
 
     def setup_training_state(self, ckpt_state: Optional[dict], start_epoch: int) -> None:
-        self.masking_schedule = _build_masking_schedule(
-            self.config, self.feature_index_map, ckpt_state
-        )
-        self.train_loader = _build_train_loader(
-            self.train_dataset, self.config, self.rank, self.world_size, self.is_ddp
-        )
+        self.masking_schedule = self._build_masking_schedule(ckpt_state)
+        self.train_loader = self._build_train_loader()
         if self.is_ddp and self.train_loader is None:
             raise RuntimeError("Train dataset unavailable for DDP training")
 
@@ -453,6 +389,56 @@ class RewardModelManager:
         start_step = start_epoch * steps_per_epoch
         self.scheduler = self._build_lr_scheduler(steps_per_epoch, start_step)
         _maybe_load_states(self.model, self.optimizer, self.scheduler, ckpt_state)
+
+    def _build_masking_schedule(self, ckpt_state: Optional[dict]) -> MaskingSchedule:
+        if ckpt_state is not None:
+            ms = ckpt_state["masking_schedule_state"]
+            return MaskingSchedule(
+                feature_index_map=self.feature_index_map,
+                start_ratios=ms["start_ratios"],
+                end_ratios=ms["end_ratios"],
+                transition_shape=ms["transition_shape"],
+                transition_midpoint_epoch=ms["transition_midpoint_epoch"],
+                total_epochs=ms["total_epochs"],
+                num_always_visible=ms["num_always_visible"],
+                random_k_min_fraction=ms["random_k_min_fraction"],
+                random_k_max_fraction=ms["random_k_max_fraction"],
+                adversarial_k_min_fraction=ms["adversarial_k_min_fraction"],
+                adversarial_k_max_fraction=ms["adversarial_k_max_fraction"],
+            )
+
+        return MaskingSchedule(
+            feature_index_map=self.feature_index_map,
+            start_ratios=self.config.MASKING_START_RATIOS,
+            end_ratios=self.config.MASKING_END_RATIOS,
+            transition_shape=self.config.MASKING_TRANSITION_SHAPE,
+            transition_midpoint_epoch=self.config.MASKING_TRANSITION_MIDPOINT_EPOCH,
+            total_epochs=self.config.MAX_EPOCHS,
+            num_always_visible=self.config.NUM_ALWAYS_VISIBLE_FEATURES,
+            random_k_min_fraction=self.config.MASKING_RANDOM_K_MIN_FRACTION,
+            random_k_max_fraction=self.config.MASKING_RANDOM_K_MAX_FRACTION,
+            adversarial_k_min_fraction=self.config.MASKING_ADVERSARIAL_K_MIN_FRACTION,
+            adversarial_k_max_fraction=self.config.MASKING_ADVERSARIAL_K_MAX_FRACTION,
+        )
+
+    def _build_train_loader(self) -> Optional[DataLoader]:
+        if self.train_dataset is None:
+            return None
+
+        sampler = RowGroupBlockSampler(
+            dataset=self.train_dataset,
+            rank=self.rank,
+            world_size=self.world_size if self.is_ddp else 1,
+            shuffle=True,
+            seed=0,
+        )
+        return DataLoader(
+            self.train_dataset,
+            batch_size=self.config.BATCH_SIZE_PER_GPU,
+            sampler=sampler,
+            num_workers=self.config.DATALOADER_NUM_WORKERS,
+            pin_memory=torch.cuda.is_available(),
+        )
 
     def _run_train_batch(self, X: torch.Tensor, labels: list, epoch: int) -> Tuple[float, ...]:
         """Execute one mini-batch forward/backward/step."""
