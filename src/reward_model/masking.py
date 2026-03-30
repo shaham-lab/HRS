@@ -195,21 +195,28 @@ class MaskingSchedule:
         if self._M == 0:
             return X.clone()
         masked = X.clone()
+        #loop per sample
         for i in range(X.shape[0]):
+            #per sample decide how many features to mask
             k = self._sample_k(
                 self._adversarial_k_min_fraction, self._adversarial_k_max_fraction
             )
             # Compute RMS importance for every maskable slot.
+            #list to hold sorted gradients by importance
             importances: List[Tuple[float, str]] = []
+            #loop per maskable feature
             for slot in self._maskable_slots:
                 start, end = self._feature_index_map[slot]
                 slot_dim = end - start
-                norm = float(torch.linalg.norm(grad_X[i, start:end])) / (slot_dim ** 0.5)
+                #calculate L2 norm of gradient vector / sqrt(feature dimension)
+                norm = float(torch.linalg.norm(grad_X[i, start:end])) / math.sqrt(slot_dim)
                 importances.append((norm, slot))
             # Sort descending by importance; zero the top k.
             importances.sort(key=lambda pair: pair[0], reverse=True)
             for _, slot in importances[:k]:
+                #find feature start and end indexes in data
                 start, end = self._feature_index_map[slot]
+                #mask all feature related indexes
                 masked[i, start:end] = 0.0
         return masked
 

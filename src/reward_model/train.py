@@ -188,7 +188,7 @@ def _build_lr_scheduler(
     if warmup_steps > 0:
         warmup = torch.optim.lr_scheduler.LinearLR(
             optimizer,
-            start_factor=0.0,
+            start_factor=1e-8,
             end_factor=1.0,
             total_iters=warmup_steps,
         )
@@ -317,6 +317,7 @@ def _run_train_batch(
         Tuple of ``(total_loss, loss_0, loss_1, ...)`` as Python floats.
     """
     mode = masking_schedule.sample_mode(epoch)
+    logger.info("Mode: %s", mode)
 
     optimizer.zero_grad()
 
@@ -324,27 +325,29 @@ def _run_train_batch(
         context = model.no_sync() if is_ddp and hasattr(model, "no_sync") else nullcontext()
         X_grad = X.clone().requires_grad_(True)
         with context:
+            #forward pass to calculate gradients
             logits_list = list(model(X_grad))
             loss_total, _ = compute_loss(logits_list, labels, pos_weights, config.LOSS_WEIGHTS)
             loss_total.backward()
-        grad_X = X_grad.grad.detach()
+
+        gradients = X_grad.grad.detach()
         optimizer.zero_grad()
-        X_masked = masking_schedule.apply_adversarial_mask(X, grad_X)
-        logits_list = list(model(X_masked))
-        loss_total, component_losses = compute_loss(
-            logits_list, labels, pos_weights, config.LOSS_WEIGHTS
-        )
-        loss_total.backward()
+        #mask the features with highest gradients
+        X = masking_schedule.apply_adversarial_mask(X, gradients)
     else:
         if mode == "random":
+            #choose randomly which features to mask
             X = masking_schedule.apply_random_mask(X)
-        else:
-            X = masking_schedule.apply_no_mask(X)
-        logits_list = list(model(X))
-        loss_total, component_losses = compute_loss(
-            logits_list, labels, pos_weights, config.LOSS_WEIGHTS
-        )
-        loss_total.backward()
+        #else:
+            #no masking - no cloning of X required , it is just overhead
+        #    X = masking_schedule.apply_no_mask(X)
+
+    # forward step with masked (or unmasked) input
+    logits_list = list(model(X))
+    loss_total, component_losses = compute_loss(
+        logits_list, labels, pos_weights, config.LOSS_WEIGHTS
+    )
+    loss_total.backward()
 
     optimizer.step()
 
@@ -619,6 +622,8 @@ def _train_epochs(
     last_epoch_completed = start_epoch - 1
 
     for epoch in range(start_epoch, config.MAX_EPOCHS):
+        logger.info("Epoch %d", epoch)
+
         if train_loader is None:
             break
 
