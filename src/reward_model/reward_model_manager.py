@@ -35,11 +35,6 @@ def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
     return model.module if hasattr(model, "module") else model
 
 
-# ---------------------------------------------------------------------------
-# Dev evaluation
-# ---------------------------------------------------------------------------
-
-
 def _resume_from_checkpoint(
     args: argparse.Namespace,
     checkpoint_manager: CheckpointManager,
@@ -221,6 +216,10 @@ class RewardModelManager:
 
         return total_loss, component_losses
 
+    # ---------------------------------------------------------------------------
+    # Dev evaluation
+    # ---------------------------------------------------------------------------
+
     def _eval_dev(self) -> Dict:
         """Run full dev-split evaluation on rank 0 (no DDP, no masking)."""
         T = self.config.NUM_TARGETS
@@ -345,8 +344,6 @@ class RewardModelManager:
 
     def _run_train_batch(self, X: torch.Tensor, labels: list, epoch: int) -> Tuple[float, ...]:
         """Execute one mini-batch forward/backward/step."""
-        if self.masking_schedule is None:
-            raise RuntimeError("Masking schedule must be initialised before training")
 
         mode = self.masking_schedule.sample_mode(epoch)
 
@@ -360,23 +357,24 @@ class RewardModelManager:
             )
             X_grad = X.clone().requires_grad_(True)
             with context:
+                # forward pass to calculate gradients
                 logits_list = list(self.model(X_grad))
                 loss_total, _ = self.compute_loss(logits_list, labels)
                 loss_total.backward()
-            grad_X = X_grad.grad.detach()
+
+            gradients = X_grad.grad.detach()
             self.optimizer.zero_grad()
-            X_masked = self.masking_schedule.apply_adversarial_mask(X, grad_X)
-            logits_list = list(self.model(X_masked))
-            loss_total, component_losses = self.compute_loss(logits_list, labels)
-            loss_total.backward()
+            # mask the features with highest gradients
+            X = self.masking_schedule.apply_adversarial_mask(X, gradients)
         else:
             if mode == "random":
+                # choose randomly which features to mask
                 X = self.masking_schedule.apply_random_mask(X)
-            else:
-                X = self.masking_schedule.apply_no_mask(X)
-            logits_list = list(self.model(X))
-            loss_total, component_losses = self.compute_loss(logits_list, labels)
-            loss_total.backward()
+
+        # forward step with masked (or unmasked) input
+        logits_list = list(self.model(X))
+        loss_total, component_losses = self.compute_loss(logits_list, labels)
+        loss_total.backward()
 
         self.optimizer.step()
 
