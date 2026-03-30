@@ -95,13 +95,14 @@ HRS/src/preprocessing
         └──────────────┬───────────────────────┘
                        │
                        ▼
-        ┌──────────────────────────────────────┐
-        │   train.py  (torchrun, NUM_GPUS=2)    │  DDP across GPUs, masking curriculum,
-        │                                       │  forward/backward, early stopping,
-        │   GPU 0 ──── mini-batch shard 0       │  checkpointing (rank 0 only)
-        │   GPU 1 ──── mini-batch shard 1       │
-        │       └── all-reduce gradients        │
-        └──────────────┬───────────────────────┘
+         ┌──────────────────────────────────────┐
+         │   train_main.py (torchrun, NUM_GPUS=2)│  DDP entry; instantiates TrainManager
+         │   └── TrainManager (train.py)         │  masking curriculum, epoch loop,
+         │                                       │  forward/backward, early stopping,
+         │   GPU 0 ──── mini-batch shard 0       │  checkpointing (rank 0 only)
+         │   GPU 1 ──── mini-batch shard 1       │
+         │       └── all-reduce gradients        │
+         └──────────────┬───────────────────────┘
                        │  best_model.pt (rank 0)
                        ▼
         ┌──────────────────────────────────────┐
@@ -148,7 +149,8 @@ HRS/src/preprocessing
 | 3 | `model.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `train.py` |
 | 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
 | 5 | `loss.py` | Scalar loss tensor | Generic T-target weighted BCE with dynamic NaN masking per target; weights normalised to sum to 1.0 |
-| 6 | `train.py` | Checkpoint files | DDP entry point via `torchrun`; masking curriculum; AdamW + cosine LR; unmasked dev evaluation; early stopping; metric logging on rank 0 |
+| 6 | `train.py` | Checkpoint files | Contains `TrainManager` class; handles masking curriculum, epoch loop, optimizer/scheduler, dev eval, checkpointing, and metrics |
+| 6a | `train_main.py` | Process exit code | DDP entry point via `torchrun`; orchestrates CLI, runtime init, resume, and delegates to `TrainManager` |
 | 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split using log-space L-BFGS; single GPU |
 | 8 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
 | 9 | `validate_contract.py` | Exit code 0/1 | Standalone schema assertion runner; metadata-only, no tensor construction |
@@ -158,12 +160,13 @@ HRS/src/preprocessing
 
 ```mermaid
 graph TD
-  Train[train.py] --> CheckpointManager
-  Train --> MaskingSchedule
-  Train --> RewardModel
-  Train --> Mimic4DataLoader
-  Train --> LossFns[loss.py functions]
-  Train --> RewardModelConfig
+  TrainMain[train_main.py] --> TrainManager[train.py]
+  TrainManager --> CheckpointManager
+  TrainManager --> MaskingSchedule
+  TrainManager --> RewardModel
+  TrainManager --> Mimic4DataLoader
+  TrainManager --> LossFns[loss.py functions]
+  TrainManager --> RewardModelConfig
   Mimic4DataLoader --> ParquetDataset
   Mimic4DataLoader --> RowGroupBlockSampler
   ParquetDataset --> FeatureIndexMap
@@ -372,7 +375,8 @@ HRS/
 │       ├── model.py                         # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
 │       ├── loss.py                          # step 4 — weighted BCE + dynamic NaN masking per target
-│       ├── train.py                         # step 5 — DDP training loop, curriculum, checkpointing
+│       ├── train_main.py                    # step 5 — DDP entrypoint launched by torchrun
+│       ├── train.py                         # TrainManager class: curriculum, epoch loop, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
 │       │
@@ -437,7 +441,7 @@ python src/reward_model/validate_contract.py --config config/reward_model.yaml
 bash src/reward_model/submit_reward.sh
 
 # Resume after preemption (torchrun re-launches all DDP workers)
-torchrun --nproc_per_node=2 src/reward_model/train.py \
+torchrun --nproc_per_node=2 src/reward_model/train_main.py \
   --config config/reward_model.yaml \
   --resume
 ```
