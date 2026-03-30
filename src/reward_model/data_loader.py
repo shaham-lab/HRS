@@ -108,6 +108,15 @@ class DataLoader(ABC):
             cache_size, label_columns,
         )
 
+        n_train = len(train_rows)
+        n_dev = len(split_indices["dev"])
+        n_test = len(split_indices["test"])
+        logger.info("Dataset loaded: %d train, %d dev, %d test admissions",
+                    n_train, n_dev, n_test)
+        n_slots = len(feature_index_map)
+        logger.info("Input dim: %d  (%d feature slots: 1 structured + 55 embeddings)",
+                    derived_dim, n_slots)
+
         return DatasetBundle(
             train_dataset=train_dataset,
             dev_dataset=dev_dataset,

@@ -29,5 +29,5 @@ echo "Job chain:"
 echo "  [${TRAIN_JOB_ID}] reward_job.sh"
 echo "  [${CALIB_JOB_ID}] calibrate_job.sh  (runs after ${TRAIN_JOB_ID} succeeds)"
 echo ""
-echo "Monitor with:  squeue -u \$USER"
-echo "Training log:  logs/reward_train_${TRAIN_JOB_ID}.out"
+
+echo "log:  reward_train_${TRAIN_JOB_ID}.err"

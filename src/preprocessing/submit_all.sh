@@ -145,7 +145,4 @@ echo ""
 if [[ $EMBED_STATUS_CODE -eq 0 ]]; then
     echo "All embeddings already complete — submitted combine only."
     echo "To cancel: scancel $COMBINE_JOB"
-else
-    echo "Monitor : squeue -u \$USER"
-    echo "Logs    : ls logs/"
 fi
