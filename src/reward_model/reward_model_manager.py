@@ -24,26 +24,9 @@ from reward_model import RewardModel
 from dataset_bundle import DatasetBundle
 from reward_model_config import RewardModelConfig
 from row_group_block_sampler import RowGroupBlockSampler
+from reward_model_utils import unwrap_ddp
 
 logger = logging.getLogger(__name__)
-
-
-def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
-    """Unwrap a DDP-wrapped model to its underlying module."""
-    return model.module if hasattr(model, "module") else model
-
-
-def _maybe_load_states(
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    ckpt_state: Optional[dict],
-) -> None:
-    if ckpt_state is None:
-        return
-    unwrap_ddp(model).load_state_dict(ckpt_state["model_state_dict"])
-    optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
-    scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
 
 
 class RewardModelManager:
@@ -80,6 +63,13 @@ class RewardModelManager:
         self.masking_schedule: Optional[MaskingSchedule] = None
         self.train_loader: Optional[DataLoader] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+
+    def _maybe_load_states(self, ckpt_state: Optional[dict]) -> None:
+        if ckpt_state is None:
+            return
+        unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
+        self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+        self.scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
 
     def resume_from_checkpoint(self) -> Tuple[dict, int, float]:
         latest = self.checkpoint_manager.find_latest()
@@ -275,7 +265,7 @@ class RewardModelManager:
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
         start_step = start_epoch * steps_per_epoch
         self.scheduler = self._build_lr_scheduler(steps_per_epoch, start_step)
-        _maybe_load_states(self.model, self.optimizer, self.scheduler, ckpt_state)
+        self._maybe_load_states(ckpt_state)
 
     def _build_masking_schedule(self, ckpt_state: Optional[dict]) -> MaskingSchedule:
         if ckpt_state is not None:

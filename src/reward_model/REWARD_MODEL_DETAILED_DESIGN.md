@@ -148,7 +148,7 @@ The process group is initialised with the `nccl` backend at the start of `reward
 | `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
-| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_manager.py`) |
+| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_utils.py`) |
 | `RewardModelManager.broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (class method on `reward_model_manager.py`) |
 | **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
 | **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
@@ -356,7 +356,7 @@ Standalone CLI tool. Produces a self-contained artefact that `inference.py` can 
 **Algorithm:**
 1. Load `best_model.pt` from `CHECKPOINT_DIR`.
 2. Load `calibration_params.json` from `CALIBRATION_PARAMS_PATH`.
-3. Construct an export dict: model state dict (unwrapped from DDP if needed via `unwrap_ddp()`), feature index map snapshot, T calibration temperature values (one per target), model architecture config (layer widths, dropout), and input dimensionality.
+3. Construct an export dict: model state dict, feature index map snapshot, T calibration temperature values (one per target), model architecture config (layer widths, dropout), and input dimensionality.
 4. Write to `EXPORT_PATH` as a PyTorch `.pt` file.
 5. Log the export path and total model parameter count.
 
