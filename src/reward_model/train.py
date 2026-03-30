@@ -317,7 +317,6 @@ def _run_train_batch(
         Tuple of ``(total_loss, loss_0, loss_1, ...)`` as Python floats.
     """
     mode = masking_schedule.sample_mode(epoch)
-    logger.info("Mode: %s", mode)
 
     optimizer.zero_grad()
 
@@ -338,9 +337,6 @@ def _run_train_batch(
         if mode == "random":
             #choose randomly which features to mask
             X = masking_schedule.apply_random_mask(X)
-        #else:
-            #no masking - no cloning of X required , it is just overhead
-        #    X = masking_schedule.apply_no_mask(X)
 
     # forward step with masked (or unmasked) input
     logits_list = list(model(X))
