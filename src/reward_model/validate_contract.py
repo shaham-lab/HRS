@@ -5,9 +5,8 @@ from typing import List, Tuple
 
 import pyarrow.parquet as pq
 
-from src.reward_model.mimic4_data_loader import Mimic4DataLoader
-from src.reward_model.reward_model_config import RewardModelConfig
-from src.reward_model.reward_model_utils import load_and_validate_config
+from mimic4_data_loader import Mimic4DataLoader
+from reward_model_config import load_and_validate_config, RewardModelConfig
 
 logger = logging.getLogger(__name__)
 

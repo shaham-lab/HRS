@@ -121,9 +121,10 @@ def _build_canonical_columns(config: dict) -> list[str]:
       4. Fixed history/triage embeddings (F2-F5):
            diag_history_embedding, discharge_history_embedding,
            triage_embedding, chief_complaint_embedding
-      5. Lab group embeddings — derived from lab_panel_config.yaml,
-         keys in insertion order (same order as build_lab_panel_config.py
-         produces them): f"lab_{panel_name}_embedding" for each panel
+      5. Lab group embeddings — hardcoded canonical order per
+         PREPROCESSING_DATA_MODEL.md Section 3.12 (lab_panel_config.yaml
+         uses alphabetical order, not canonical order):
+           f"lab_{panel_name}_embedding" for each panel
       6. Fixed radiology: radiology_embedding
       7. Microbiology panel embeddings — derived from
          micro_panel_config.yaml panels keys in insertion order:
@@ -131,14 +132,16 @@ def _build_canonical_columns(config: dict) -> list[str]:
     """
     import yaml
 
-    # Load lab panel config
-    lab_config_path = config.get(
-        "LAB_PANEL_CONFIG_PATH",
-        os.path.join(config["CLASSIFICATIONS_DIR"], "lab_panel_config.yaml"),
-    )
-    with open(lab_config_path) as f:
-        lab_cfg = yaml.safe_load(f)
-    lab_panel_names = list(lab_cfg.keys())  # insertion order
+    # Canonical lab group order per PREPROCESSING_DATA_MODEL.md Section 3.12.
+    # lab_panel_config.yaml uses alphabetical key order, not canonical order,
+    # so the names are hardcoded here instead of read from that file.
+    LAB_GROUP_ORDER = [
+        "blood_gas", "blood_chemistry", "blood_hematology",
+        "urine_chemistry", "urine_hematology",
+        "other_body_fluid_chemistry", "other_body_fluid_hematology",
+        "ascites", "pleural", "csf",
+        "bone_marrow", "joint_fluid", "stool",
+    ]
 
     # Load micro panel config
     micro_config_path = config["MICRO_PANEL_CONFIG_PATH"]
@@ -154,7 +157,7 @@ def _build_canonical_columns(config: dict) -> list[str]:
          "discharge_history_embedding",
          "triage_embedding",
          "chief_complaint_embedding"]
-        + [f"lab_{name}_embedding" for name in lab_panel_names]
+        + [f"lab_{name}_embedding" for name in LAB_GROUP_ORDER]
         + ["radiology_embedding"]
         + [f"micro_{name}_embedding" for name in micro_panel_names]
     )

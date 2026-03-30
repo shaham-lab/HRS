@@ -21,10 +21,7 @@ from typing import Any, Dict
 
 import torch
 
-from src.reward_model.reward_model_utils import (
-    RewardModelConfig,
-    load_and_validate_config,
-)
+from reward_model_config import RewardModelConfig,load_and_validate_config
 
 logger = logging.getLogger(__name__)
 

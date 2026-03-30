@@ -7,10 +7,10 @@ from typing import Dict, List, Tuple
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from src.reward_model.dataset_bundle import DatasetBundle
-from src.reward_model.parquet_dataset import ParquetDataset
-from src.reward_model.reward_model_config import RewardModelConfig
-from src.reward_model.schema_error import SchemaError
+from dataset_bundle import DatasetBundle
+from parquet_dataset import ParquetDataset
+from reward_model_config import RewardModelConfig
+from schema_error import SchemaError
 
 logger = logging.getLogger(__name__)
 

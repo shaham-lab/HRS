@@ -5,7 +5,7 @@ from typing import Dict, List
 
 from torch.utils.data import Sampler
 
-from src.reward_model.parquet_dataset import ParquetDataset
+from parquet_dataset import ParquetDataset
 
 
 class RowGroupBlockSampler(Sampler[int]):

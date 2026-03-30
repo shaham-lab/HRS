@@ -596,71 +596,71 @@ All 55 embedding parquet files share the same schema:
 **Produced by:** `combine_dataset.py` (Step 11)  
 **Row definition:** One row per hospital admission  
 
-| Column | Type | Nullable | Description |
-|--------|------|----------|-------------|
-| `subject_id` | int64 | No | Patient identifier |
-| `hadm_id` | int64 | No | Hospital admission identifier |
-| `split` | varchar | No | Split assignment: `train`, `dev`, or `test` |
-| `y1_mortality` | int8 | No | In-hospital mortality label (0 or 1) |
-| `y2_readmission` | float32 | Yes | 30-day readmission label (0.0, 1.0, or NaN for deceased) |
-| `demographic_vec` | float32[8] | No | F1: 8-dimensional demographics vector |
-| `diag_history_embedding` | float32[768] | No | F2: diagnosis history embedding |
-| `discharge_history_embedding` | float32[768] | No | F3: discharge summary history embedding |
-| `triage_embedding` | float32[768] | No | F4: triage data embedding |
-| `chief_complaint_embedding` | float32[768] | No | F5: chief complaint embedding |
-| `lab_blood_gas_embedding` | float32[768] | No | F6: blood gas lab group embedding |
-| `lab_blood_chemistry_embedding` | float32[768] | No | F7: blood chemistry lab group embedding |
-| `lab_blood_hematology_embedding` | float32[768] | No | F8: blood hematology lab group embedding |
-| `lab_urine_chemistry_embedding` | float32[768] | No | F9: urine chemistry lab group embedding |
-| `lab_urine_hematology_embedding` | float32[768] | No | F10: urine hematology lab group embedding |
-| `lab_other_body_fluid_chemistry_embedding` | float32[768] | No | F11: other body fluid chemistry embedding |
-| `lab_other_body_fluid_hematology_embedding` | float32[768] | No | F12: other body fluid hematology embedding |
-| `lab_ascites_embedding` | float32[768] | No | F13: ascites lab group embedding |
-| `lab_pleural_embedding` | float32[768] | No | F14: pleural lab group embedding |
-| `lab_csf_embedding` | float32[768] | No | F15: CSF lab group embedding |
-| `lab_bone_marrow_embedding` | float32[768] | No | F16: bone marrow lab group embedding |
-| `lab_joint_fluid_embedding` | float32[768] | No | F17: joint fluid lab group embedding |
-| `lab_stool_embedding` | float32[768] | No | F18: stool lab group embedding |
-| `radiology_embedding` | float32[768] | No | F19: radiology note embedding |
-| `micro_blood_culture_routine_embedding` | float32[768] | No | F20: blood culture embedding |
-| `micro_blood_bottle_gram_stain_embedding` | float32[768] | No | F21: blood bottle gram stain embedding |
-| `micro_urine_culture_embedding` | float32[768] | No | F22: urine culture embedding |
-| `micro_urine_viral_embedding` | float32[768] | No | F23: urine viral culture embedding |
-| `micro_urinary_antigens_embedding` | float32[768] | No | F24: urinary antigens embedding |
-| `micro_respiratory_non_invasive_embedding` | float32[768] | No | F25: respiratory non-invasive embedding |
-| `micro_respiratory_invasive_embedding` | float32[768] | No | F26: respiratory invasive embedding |
-| `micro_respiratory_afb_embedding` | float32[768] | No | F27: respiratory AFB/TB embedding |
-| `micro_respiratory_viral_embedding` | float32[768] | No | F28: respiratory viral embedding |
-| `micro_respiratory_pcp_legionella_embedding` | float32[768] | No | F29: PCP/Legionella embedding |
-| `micro_gram_stain_respiratory_embedding` | float32[768] | No | F30: gram stain respiratory embedding |
-| `micro_gram_stain_wound_tissue_embedding` | float32[768] | No | F31: gram stain wound/tissue embedding |
-| `micro_gram_stain_csf_embedding` | float32[768] | No | F32: gram stain CSF embedding |
-| `micro_wound_culture_embedding` | float32[768] | No | F33: wound culture embedding |
-| `micro_hardware_and_lines_culture_embedding` | float32[768] | No | F34: hardware/lines culture embedding |
-| `micro_pleural_culture_embedding` | float32[768] | No | F35: pleural culture embedding |
-| `micro_peritoneal_culture_embedding` | float32[768] | No | F36: peritoneal culture embedding |
-| `micro_joint_fluid_culture_embedding` | float32[768] | No | F37: joint fluid culture embedding |
-| `micro_fluid_culture_embedding` | float32[768] | No | F38: fluid culture embedding |
-| `micro_bone_marrow_culture_embedding` | float32[768] | No | F39: bone marrow culture embedding |
-| `micro_csf_culture_embedding` | float32[768] | No | F40: CSF culture embedding |
-| `micro_fungal_tissue_wound_embedding` | float32[768] | No | F41: fungal tissue/wound embedding |
-| `micro_fungal_respiratory_embedding` | float32[768] | No | F42: fungal respiratory embedding |
-| `micro_fungal_fluid_embedding` | float32[768] | No | F43: fungal fluid embedding |
-| `micro_mrsa_staph_screen_embedding` | float32[768] | No | F44: MRSA/Staph screen embedding |
-| `micro_resistance_screen_embedding` | float32[768] | No | F45: resistance screen embedding |
-| `micro_cdiff_embedding` | float32[768] | No | F46: C. difficile embedding |
-| `micro_stool_bacterial_embedding` | float32[768] | No | F47: stool bacterial culture embedding |
-| `micro_stool_parasitology_embedding` | float32[768] | No | F48: stool parasitology embedding |
-| `micro_herpesvirus_serology_embedding` | float32[768] | No | F49: herpesvirus serology embedding |
-| `micro_hepatitis_hiv_embedding` | float32[768] | No | F50: hepatitis/HIV viral loads embedding |
-| `micro_syphilis_serology_embedding` | float32[768] | No | F51: syphilis serology embedding |
-| `micro_misc_serology_embedding` | float32[768] | No | F52: miscellaneous serology embedding |
-| `micro_herpesvirus_culture_antigen_embedding` | float32[768] | No | F53: herpesvirus culture/antigen embedding |
-| `micro_gc_chlamydia_sti_embedding` | float32[768] | No | F54: GC/Chlamydia STI embedding |
-| `micro_vaginal_genital_flora_embedding` | float32[768] | No | F55: vaginal/genital flora embedding |
-| `micro_throat_strep_embedding` | float32[768] | No | F56: throat strep embedding |
+| Column | Type          | Nullable | Description |
+|--------|---------------|----------|-------------|
+| `subject_id` | int64         | No  | Patient identifier |
+| `hadm_id` | int64         | No  | Hospital admission identifier |
+| `split` | varchar       | No  | Split assignment: `train`, `dev`, or `test` |
+| `y1_mortality` | int64         | No  | In-hospital mortality label (0 or 1) |
+| `y2_readmission` | float64       | Yes | 30-day readmission label (0.0, 1.0, or NaN for deceased) |
+| `demographic_vec` | float64[8]    | No  | F1: 8-dimensional demographics vector |
+| `diag_history_embedding` | float32[768]  | No  | F2: diagnosis history embedding |
+| `discharge_history_embedding` | float32[768]  | No  | F3: discharge summary history embedding |
+| `triage_embedding` | float32[768]  | No  | F4: triage data embedding |
+| `chief_complaint_embedding` | float32[768]  | No  | F5: chief complaint embedding |
+| `lab_blood_gas_embedding` | float32[768]  | No  | F6: blood gas lab group embedding |
+| `lab_blood_chemistry_embedding` | float32[768]  | No  | F7: blood chemistry lab group embedding |
+| `lab_blood_hematology_embedding` | float32[768]  | No  | F8: blood hematology lab group embedding |
+| `lab_urine_chemistry_embedding` | float32[768]  | No  | F9: urine chemistry lab group embedding |
+| `lab_urine_hematology_embedding` | float32[768]  | No  | F10: urine hematology lab group embedding |
+| `lab_other_body_fluid_chemistry_embedding` | float32[768]  | No  | F11: other body fluid chemistry embedding |
+| `lab_other_body_fluid_hematology_embedding` | float32[768]  | No  | F12: other body fluid hematology embedding |
+| `lab_ascites_embedding` | float32[768]  | No  | F13: ascites lab group embedding |
+| `lab_pleural_embedding` | float32[768]  | No  | F14: pleural lab group embedding |
+| `lab_csf_embedding` | float32[768]  | No  | F15: CSF lab group embedding |
+| `lab_bone_marrow_embedding` | float32[768]  | No  | F16: bone marrow lab group embedding |
+| `lab_joint_fluid_embedding` | float32[768]  | No  | F17: joint fluid lab group embedding |
+| `lab_stool_embedding` | float32[768]  | No  | F18: stool lab group embedding |
+| `radiology_embedding` | float32[768]  | No  | F19: radiology note embedding |
+| `micro_blood_culture_routine_embedding` | float32[768]  | No  | F20: blood culture embedding |
+| `micro_blood_bottle_gram_stain_embedding` | float32[768]  | No  | F21: blood bottle gram stain embedding |
+| `micro_urine_culture_embedding` | float32[768]  | No  | F22: urine culture embedding |
+| `micro_urine_viral_embedding` | float32[768]  | No  | F23: urine viral culture embedding |
+| `micro_urinary_antigens_embedding` | float32[768]  | No  | F24: urinary antigens embedding |
+| `micro_respiratory_non_invasive_embedding` | float32[768]  | No  | F25: respiratory non-invasive embedding |
+| `micro_respiratory_invasive_embedding` | float32[768]  | No  | F26: respiratory invasive embedding |
+| `micro_respiratory_afb_embedding` | float32[768]  | No  | F27: respiratory AFB/TB embedding |
+| `micro_respiratory_viral_embedding` | float32[768]  | No  | F28: respiratory viral embedding |
+| `micro_respiratory_pcp_legionella_embedding` | float32[768]  | No  | F29: PCP/Legionella embedding |
+| `micro_gram_stain_respiratory_embedding` | float32[768]  | No  | F30: gram stain respiratory embedding |
+| `micro_gram_stain_wound_tissue_embedding` | float32[768]  | No  | F31: gram stain wound/tissue embedding |
+| `micro_gram_stain_csf_embedding` | float32[768]  | No  | F32: gram stain CSF embedding |
+| `micro_wound_culture_embedding` | float32[768]  | No  | F33: wound culture embedding |
+| `micro_hardware_and_lines_culture_embedding` | float32[768]  | No  | F34: hardware/lines culture embedding |
+| `micro_pleural_culture_embedding` | float32[768]  | No  | F35: pleural culture embedding |
+| `micro_peritoneal_culture_embedding` | float32[768]  | No  | F36: peritoneal culture embedding |
+| `micro_joint_fluid_culture_embedding` | float32[768]  | No  | F37: joint fluid culture embedding |
+| `micro_fluid_culture_embedding` | float32[768]  | No  | F38: fluid culture embedding |
+| `micro_bone_marrow_culture_embedding` | float32[768]  | No  | F39: bone marrow culture embedding |
+| `micro_csf_culture_embedding` | float32[768]  | No  | F40: CSF culture embedding |
+| `micro_fungal_tissue_wound_embedding` | float32[768]  | No  | F41: fungal tissue/wound embedding |
+| `micro_fungal_respiratory_embedding` | float32[768]  | No  | F42: fungal respiratory embedding |
+| `micro_fungal_fluid_embedding` | float32[768]  | No  | F43: fungal fluid embedding |
+| `micro_mrsa_staph_screen_embedding` | float32[768]  | No  | F44: MRSA/Staph screen embedding |
+| `micro_resistance_screen_embedding` | float32[768]  | No  | F45: resistance screen embedding |
+| `micro_cdiff_embedding` | float32[768]  | No  | F46: C. difficile embedding |
+| `micro_stool_bacterial_embedding` | float32[768]  | No  | F47: stool bacterial culture embedding |
+| `micro_stool_parasitology_embedding` | float32[768]  | No  | F48: stool parasitology embedding |
+| `micro_herpesvirus_serology_embedding` | float32[768]  | No  | F49: herpesvirus serology embedding |
+| `micro_hepatitis_hiv_embedding` | float32[768]  | No  | F50: hepatitis/HIV viral loads embedding |
+| `micro_syphilis_serology_embedding` | float32[768]  | No  | F51: syphilis serology embedding |
+| `micro_misc_serology_embedding` | float32[768]  | No  | F52: miscellaneous serology embedding |
+| `micro_herpesvirus_culture_antigen_embedding` | float32[768]  | No  | F53: herpesvirus culture/antigen embedding |
+| `micro_gc_chlamydia_sti_embedding` | float32[768]  | No  | F54: GC/Chlamydia STI embedding |
+| `micro_vaginal_genital_flora_embedding` | float32[768]  | No  | F55: vaginal/genital flora embedding |
+| `micro_throat_strep_embedding` | float32[768]  | No  | F56: throat strep embedding |
 
-**Primary key:** `hadm_id`  
-**Total columns:** 61 (3 metadata + 2 labels + 1 structured + 55 embeddings)  
-**Total embedding dimensions per admission:** 55 × 768 = 42,240 float32 values  
-**Notes:** All embedding columns are non-nullable — missing feature text produces a zero vector, never null. `y2_readmission` is the only nullable column (NaN for deceased patients). Embedding columns are joined from `EMBEDDINGS_DIR` dynamically — the column list above reflects the expected full dataset. Column order is canonical and enforced by `combine_dataset.py` using `CANONICAL_COLUMNS` derived at runtime from `LAB_PANEL_CONFIG_PATH` and `MICRO_PANEL_CONFIG_PATH` — no column names are hardcoded in `combine_dataset.py`. If any expected column is missing at combine time, `combine_dataset.py` raises `ValueError` listing the missing columns.
+**Primary key:** `hadm_id`
+**Total columns:** 61 (3 metadata + 2 labels + 1 structured + 55 embeddings)
+**Total embedding dimensions per admission:** 55 × 768 = 42,240 float32 values
+**Notes:** The Nullable column reflects the data contract, not the PyArrow schema declaration (PyArrow marks all columns `nullable=True` by default regardless of actual data content). All embedding columns and `demographic_vec` are non-nullable by contract — missing feature text produces a zero vector, never null. `y2_readmission` is the only nullable column (NaN for deceased patients). PyArrow stores `y1_mortality` as int64, `y2_readmission` and `demographic_vec` as float64 (double). All `*_embedding` columns are stored as `list<element: float>` (float32). Downstream consumers should accept these types and cast if needed rather than asserting specific bit-widths. Embedding columns are joined from `EMBEDDINGS_DIR` dynamically — the column list above reflects the expected full dataset. Column order is canonical and enforced by `combine_dataset.py` using `CANONICAL_COLUMNS` derived at runtime from `LAB_PANEL_CONFIG_PATH` and `MICRO_PANEL_CONFIG_PATH` — no column names are hardcoded in `combine_dataset.py`. If any expected column is missing at combine time, `combine_dataset.py` raises `ValueError` listing the missing columns.

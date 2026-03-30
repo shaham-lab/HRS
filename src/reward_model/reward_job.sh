@@ -14,12 +14,21 @@
 #
 # Customise --partition, --account, and --constraint for your cluster.
 #SBATCH --job-name=reward_train
-#SBATCH --gres=gpu:2
-#SBATCH --mem=64G
-#SBATCH --cpus-per-task=8
-#SBATCH --time=48:00:00
 #SBATCH --output=logs/reward_train_%j.out
 #SBATCH --error=logs/reward_train_%j.err
+#SBATCH --partition=H200-12h
+#SBATCH --gres=gpu:2
+#SBATCH --mem=64G
+#SBATCH --mail-user=eli.kazum@biu.ac.il
+#SBATCH --mail-type=END,FAIL
+
+echo "Host: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "GPUs: $SLURM_GPUS"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "Start: $(date)"
+
+nvidia-smi
 
 set -euo pipefail
 
@@ -30,8 +39,9 @@ mkdir -p logs
 # module load cuda/12.x python/3.11
 
 # Activate conda environment.
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate HRS
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate hrs
+
 
 # Launch DDP training.
 # --nproc_per_node must equal the number of GPUs requested above (--gres=gpu:N).
@@ -44,3 +54,5 @@ torchrun \
     src/reward_model/train.py \
     --config config/reward_model.yaml \
     "$@"
+
+echo "End: $(date)"

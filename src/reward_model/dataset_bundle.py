@@ -2,7 +2,7 @@
 
 from typing import Dict, List, NamedTuple, Tuple
 
-from src.reward_model.parquet_dataset import ParquetDataset
+from parquet_dataset import ParquetDataset
 
 
 class DatasetBundle(NamedTuple):

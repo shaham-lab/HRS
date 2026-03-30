@@ -7,7 +7,7 @@ from typing import Dict, List, Optional, Union
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from src.reward_model.schema_error import SchemaError
+from schema_error import SchemaError
 
 
 class RewardModelConfig(BaseModel):

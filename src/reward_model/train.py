@@ -32,18 +32,15 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
-from src.reward_model.checkpoint_manager import CheckpointManager
-from src.reward_model.loss import compute_loss, compute_metrics
-from src.reward_model.mimic4_data_loader import Mimic4DataLoader
-from src.reward_model.masking import MaskingSchedule
-from src.reward_model.model import RewardModel
-from src.reward_model.reward_model_utils import (
-    DatasetBundle,
-    RewardModelConfig,
-    RowGroupBlockSampler,
-    get_device,
-    load_and_validate_config,
-)
+from checkpoint_manager import CheckpointManager
+from loss import compute_loss, compute_metrics
+from mimic4_data_loader import Mimic4DataLoader
+from masking import MaskingSchedule
+from model import RewardModel
+from dataset_bundle import DatasetBundle
+from reward_model_config import RewardModelConfig, load_and_validate_config
+from reward_model_utils import get_device
+from row_group_block_sampler import RowGroupBlockSampler
 
 logger = logging.getLogger(__name__)
 

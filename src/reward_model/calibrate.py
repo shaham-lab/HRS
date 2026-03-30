@@ -23,14 +23,11 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from src.reward_model.model import RewardModel
-from src.reward_model.reward_model_utils import (
-    ParquetDataset,
-    RewardModelConfig,
-    get_device,
-    load_and_validate_config,
-)
-from src.reward_model.mimic4_data_loader import Mimic4DataLoader
+from model import RewardModel
+from parquet_dataset import ParquetDataset
+from reward_model_config import RewardModelConfig,load_and_validate_config
+from reward_model_utils import get_device
+from mimic4_data_loader import Mimic4DataLoader
 
 logger = logging.getLogger(__name__)
 

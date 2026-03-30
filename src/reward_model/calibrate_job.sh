@@ -24,6 +24,14 @@
 #SBATCH --output=logs/reward_calib_%j.out
 #SBATCH --error=logs/reward_calib_%j.err
 
+echo "Host: $(hostname)"
+echo "Job ID: $SLURM_JOB_ID"
+echo "GPUs: $SLURM_GPUS"
+echo "CUDA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-<unset>}"
+echo "Start: $(date)"
+
+nvidia-smi
+
 set -euo pipefail
 
 cd ~/Python/HRS
@@ -33,8 +41,10 @@ mkdir -p logs
 # module load cuda/12.x python/3.11
 
 # Activate conda environment.
-source "$(conda info --base)/etc/profile.d/conda.sh"
-conda activate HRS
+source ~/miniconda3/etc/profile.d/conda.sh
+conda activate hrs
 
 # Run temperature scaling calibration on the dev split.
 python src/reward_model/calibrate.py --config config/reward_model.yaml
+
+echo "End: $(date)"

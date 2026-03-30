@@ -4,7 +4,7 @@ from typing import Dict, Optional, Tuple
 
 import torch
 
-from src.reward_model.schema_error import SchemaError
+from schema_error import SchemaError
 
 
 class CheckpointManager:
