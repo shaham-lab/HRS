@@ -5,7 +5,6 @@ RewardModelManager class. The torchrun entry point lives in
 ``reward_model_main.py``.
 """
 
-import argparse
 import logging
 import time
 from contextlib import nullcontext
@@ -32,37 +31,6 @@ logger = logging.getLogger(__name__)
 def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
     """Unwrap a DDP-wrapped model to its underlying module."""
     return model.module if hasattr(model, "module") else model
-
-
-def _resume_from_checkpoint(
-    args: argparse.Namespace,
-    checkpoint_manager: CheckpointManager,
-    feature_index_map: Dict[str, Tuple[int, int]],
-    config: RewardModelConfig,
-    rank: int,
-    is_ddp: bool,
-) -> Tuple[Optional[dict], int, float]:
-    start_epoch = 0
-    best_dev_loss = float("inf")
-    ckpt_state: Optional[dict] = None
-
-    if args.resume:
-        latest = checkpoint_manager.find_latest()
-        if latest is None:
-            raise RuntimeError("Resume requested but no checkpoint found")
-        if rank == 0:
-            ckpt_state = checkpoint_manager.load(latest, feature_index_map)
-        if is_ddp:
-            obj_state: list = [ckpt_state]
-            dist.broadcast_object_list(obj_state, src=0)
-            ckpt_state = obj_state[0]
-            dist.barrier()
-        if ckpt_state is None:
-            raise RuntimeError("Checkpoint state could not be loaded")
-        start_epoch = ckpt_state["epoch"] + 1
-        best_dev_loss = ckpt_state.get("best_dev_loss", best_dev_loss)
-
-    return ckpt_state, start_epoch, best_dev_loss
 
 
 def _maybe_load_states(
@@ -112,6 +80,24 @@ class RewardModelManager:
         self.masking_schedule: Optional[MaskingSchedule] = None
         self.train_loader: Optional[DataLoader] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+
+    def resume_from_checkpoint(self) -> Tuple[dict, int, float]:
+        latest = self.checkpoint_manager.find_latest()
+        if latest is None:
+            raise RuntimeError("Resume requested but no checkpoint found")
+        ckpt_state: Optional[dict] = None
+        if self.rank == 0:
+            ckpt_state = self.checkpoint_manager.load(latest, self.feature_index_map)
+        if self.is_ddp:
+            obj_state: list = [ckpt_state]
+            dist.broadcast_object_list(obj_state, src=0)
+            ckpt_state = obj_state[0]
+            dist.barrier()
+        if ckpt_state is None:
+            raise RuntimeError("Checkpoint state could not be loaded")
+        start_epoch = ckpt_state["epoch"] + 1
+        best_dev_loss = ckpt_state.get("best_dev_loss", float("inf"))
+        return ckpt_state, start_epoch, best_dev_loss
 
     def broadcast_tensor(self, tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
         """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""

@@ -10,7 +10,7 @@ import torch.distributed as dist
 
 from reward_model_config import load_and_validate_config
 from reward_model_utils import get_device
-from reward_model_manager import RewardModelManager, _resume_from_checkpoint
+from reward_model_manager import RewardModelManager
 
 
 def _parse_args() -> argparse.Namespace:
@@ -68,9 +68,12 @@ def main() -> int:
     rank, local_rank, world_size, is_ddp, device = _init_runtime(config)
 
     manager = RewardModelManager(config, rank, local_rank, world_size, is_ddp, device)
-    ckpt_state, start_epoch, best_dev_loss = _resume_from_checkpoint(
-        args, manager.checkpoint_manager, manager.feature_index_map, config, rank, is_ddp
-    )
+    ckpt_state = None
+    start_epoch = 0
+    best_dev_loss = float("inf")
+
+    if args.resume:
+        ckpt_state, start_epoch, best_dev_loss = manager.resume_from_checkpoint()
     manager.setup_training_state(ckpt_state, start_epoch)
     manager.train_epochs(start_epoch, best_dev_loss)
 
