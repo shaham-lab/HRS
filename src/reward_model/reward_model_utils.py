@@ -1,15 +1,7 @@
 """Shared helpers and backward-compatibility re-exports for the reward model.
-
-This module re-exports class-only modules (ParquetDataset, DatasetBundle, etc.)
-so legacy import paths keep working after refactors. Keep the re-exports in
-place until all downstream users migrate to direct imports.
 """
-import logging
 
 import torch
-
-logger = logging.getLogger(__name__)
-
 
 def get_device(local_rank: int) -> torch.device:
     """Return CUDA device at local_rank if available, else CPU."""
