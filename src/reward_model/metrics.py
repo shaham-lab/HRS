@@ -1,5 +1,7 @@
 import logging
-from typing import Dict, List, Tuple, Union
+import os
+from pathlib import Path
+from typing import Dict, List, Union
 
 import numpy as np
 import torch
@@ -38,43 +40,6 @@ def _safe_metric(func, labels: np.ndarray, probs: np.ndarray) -> float:
     return float(func(labels, probs))
 
 
-def compute_loss(
-    logits_list: List[torch.Tensor],
-    labels_list: List[torch.Tensor],
-    pos_weights: List[float],
-    loss_weights: List[float],
-) -> Tuple[torch.Tensor, List[torch.Tensor]]:
-    """Compute total weighted loss over T targets with dynamic NaN masking.
-
-    Args:
-        logits_list: List of T raw logit tensors, each shape ``(N, 1)`` or ``(N,)``.
-        labels_list: List of T label tensors, each shape ``(N,)``; float32 with
-            NaN where a target is not applicable for a sample.
-        pos_weights: List of T positive class weights.
-        loss_weights: List of T normalised loss weights (must sum to 1.0).
-
-    Returns:
-        ``(total_loss, [loss_0, loss_1, ...])``.  Component losses are scalar
-        tensors on the same device as their logits.
-    """
-    device = logits_list[0].device
-    total_loss = torch.tensor(0.0, device=device)
-    component_losses: List[torch.Tensor] = []
-
-    for logits, labels, pw, w in zip(logits_list, labels_list, pos_weights, loss_weights):
-        mask = ~torch.isnan(labels.view(-1))
-        if not mask.any():
-            loss_i = torch.tensor(0.0, device=device)
-        else:
-            pw_tensor = torch.tensor(pw, device=device)
-            loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw_tensor)
-            loss_i = loss_fn(logits.view(-1)[mask], labels.view(-1)[mask].float())
-        component_losses.append(loss_i)
-        total_loss = total_loss + w * loss_i
-
-    return total_loss, component_losses
-
-
 def compute_metrics(
     logits_list: List[torch.Tensor],
     labels_list: List[torch.Tensor],
@@ -107,3 +72,72 @@ def compute_metrics(
         }
     result["masked"] = masked
     return result
+
+
+def _append_metrics_row(metrics_path: Path, row: Dict, num_targets: int = 2) -> None:
+    """Append one epoch's metrics to *metrics_path* (rank 0 only).
+
+    Uses an atomic write (write to temp file, rename) so that a SLURM
+    preemption mid-write cannot corrupt the Parquet file.  If the file does
+    not yet exist it is created with the correct schema.
+
+    Columns written (Architecture §9):
+        epoch, wall_time_s, masking_random_pct, masking_adversarial_pct,
+        masking_none_pct, loss_total,
+        loss_target_<i>, auroc_target_<i>, auprc_target_<i>, ece_target_<i>
+        for each i in 0..num_targets-1.
+
+    Args:
+        metrics_path: Path to ``training_metrics.parquet``.
+        row: Dict mapping column name to scalar value for this epoch.
+        num_targets: Number of classification targets T.
+    """
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    metrics_path.parent.mkdir(parents=True, exist_ok=True)
+    columns = [
+        "epoch",
+        "wall_time_s",
+        "masking_random_pct",
+        "masking_adversarial_pct",
+        "masking_none_pct",
+        "loss_total",
+    ]
+    for i in range(num_targets):
+        columns += [
+            f"loss_target_{i}",
+            f"auroc_target_{i}",
+            f"auprc_target_{i}",
+            f"ece_target_{i}",
+        ]
+
+    schema_fields = [
+        ("epoch", pa.int64()),
+        ("wall_time_s", pa.float64()),
+        ("masking_random_pct", pa.float64()),
+        ("masking_adversarial_pct", pa.float64()),
+        ("masking_none_pct", pa.float64()),
+        ("loss_total", pa.float64()),
+    ]
+    for i in range(num_targets):
+        schema_fields += [
+            (f"loss_target_{i}", pa.float64()),
+            (f"auroc_target_{i}", pa.float64()),
+            (f"auprc_target_{i}", pa.float64()),
+            (f"ece_target_{i}", pa.float64()),
+        ]
+    schema = pa.schema(schema_fields)
+
+    new_row = {name: [row[name]] for name in columns}
+    new_table = pa.table(new_row, schema=schema)
+
+    if metrics_path.exists():
+        existing = pq.read_table(metrics_path)
+        table = pa.concat_tables([existing, new_table])
+    else:
+        table = new_table
+
+    tmp_path = metrics_path.with_suffix(".parquet.tmp")
+    pq.write_table(table, tmp_path)
+    os.replace(tmp_path, metrics_path)

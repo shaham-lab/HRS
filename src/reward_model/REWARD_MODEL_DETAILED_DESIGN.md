@@ -22,7 +22,7 @@
    - [mimic4_data_loader.py](#mimic4_data_loaderpy)
    - [model.py](#modelpy)
    - [masking.py](#maskingpy)
-   - [loss.py](#losspy)
+   - [metrics.py](#metricspy)
    - [reward_model_manager.py](#reward_model_managerpy)
    - [calibrate.py](#calibratepy)
    - [inference.py](#inferencepy)
@@ -80,7 +80,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `mimic4_data_loader.py` | **Class** (`Mimic4DataLoader`) | MIMIC-IV implementation; validates schema, constructs `DatasetBundle`; single instantiation per run |
 | `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
-| `loss.py` | Plain functions | Stateless transformations; `compute_loss(logits_list, labels_list, pos_weights, loss_weights)` for T targets |
+| `metrics.py` | Plain functions | Stateless metrics helpers (`compute_metrics`, `_append_metrics_row`) |
 | `reward_model_manager.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
 | `reward_model_main.py` | Plain script, DDP entry point | CLI parsing, logging setup, runtime init; instantiates `RewardModelManager` and delegates training |
 | `calibrate.py` | Plain script, `run(config)` | Single optimisation pass; no persistent state |
@@ -256,17 +256,15 @@ The constructor accepts the `feature_index_map`, `num_always_visible` (integer �
 
 ---
 
-### `loss.py`
+### `metrics.py`
 
 Plain module-level functions. No class, no state.
 
-`compute_loss(logits_list, labels_list, pos_weights, loss_weights)` computes the total weighted loss over T targets. `logits_list` and `labels_list` are lists of T tensors, one per target. `pos_weights` and `loss_weights` are lists of T floats. `loss_weights` are normalised to sum to 1.0 — normalisation is applied by `RewardModelConfig` at config load time so that callers always receive weights that already sum to 1.0.
-
-For each target i: construct the valid-sample mask `~torch.isnan(labels_list[i])`. If the mask is all-false (no valid samples for this target in the batch), set `L_i = torch.tensor(0.0)` on the correct device to prevent NaN propagation. Otherwise apply `BCEWithLogitsLoss` with `pos_weight = pos_weights[i]` over the masked subset. Accumulate `L = Σ loss_weights[i] * L_i`. Returns the scalar total loss plus the per-target component losses separately for epoch logging.
-
 `compute_metrics(logits_list, labels_list, masked=False)` applies sigmoid to each logits tensor, constructs per-target valid-sample masks, and computes AUROC, AUPRC, and ECE for each target using scikit-learn. Returns a dict keyed by target index: `{0: {'auroc': ..., 'auprc': ..., 'ece': ...}, 1: {...}, ...}`. The `masked` flag is included in the returned dict as a tag so callers can distinguish masked-input metrics from unmasked-input metrics in the epoch log. ECE uses equal-mass binning (adaptive bin edges via `np.percentile`) rather than equal-width binning, to produce reliable calibration estimates under class imbalance. Called on the dev split by rank 0 at epoch end using unmasked inputs. Also called on training batches for diagnostic AUROC tracking — see Section 6.4.
 
-**Config keys used:** `LOSS_WEIGHTS` (list of T normalised weights), `POS_WEIGHTS` (list of T positive class weights).
+`_append_metrics_row(metrics_path, row, num_targets)` appends one epoch of metrics to the Parquet file at `metrics_path` using an atomic write (write temp, rename). Creates the file with the correct schema if it does not exist. Rank 0 only.
+
+**Config keys used:** None directly; the caller supplies already-computed values.
 
 ---
 
@@ -278,6 +276,7 @@ Defines the `RewardModelManager` class, which owns all training state and encaps
 - `setup_training_state(ckpt_state, start_epoch)` builds the `MaskingSchedule`, `DataLoader` (with `RowGroupBlockSampler`), and LR scheduler (warmup + cosine), then restores model/optimizer/scheduler state when resuming.
 - `_run_train_batch(X, labels, epoch)` executes the masking-aware mini-batch (random/adversarial/none). Adversarial mode clones `X`, sets `requires_grad_(True)`, does the first backward under `no_sync()` (when DDP) to obtain gradients, reapplies adversarial masks, then performs the second backward/step.
 - `train_epochs(start_epoch, best_dev_loss)` drives the epoch loop: sets sampler epoch, iterates batches (calling `_run_train_batch` and stepping the scheduler), runs dev evaluation on rank 0, logs metrics, performs checkpoint/early-stop decisions, and broadcasts stop signals across ranks.
+- `compute_loss(logits_list, labels_list)` is a method on the manager that applies per-target dynamic NaN masking and weighted BCE with `pos_weight`. Returns `(total_loss, component_losses)` for epoch logging.
 
 **Config keys used:** `LEARNING_RATE`, `WEIGHT_DECAY`, `LR_WARMUP_EPOCHS`, `LR_MIN`, `ADAM_BETA1`, `ADAM_BETA2`, `MAX_EPOCHS`, `BATCH_SIZE_PER_GPU`, `NUM_GPUS`, `EARLY_STOPPING_PATIENCE`, `CHECKPOINT_DIR`, `CHECKPOINT_KEEP_N`, `METRICS_PATH`, all masking keys, all loss keys, all model architecture keys.
 
@@ -418,7 +417,7 @@ The gradient computation step in `RewardModelManager` feeds `masking.py apply_ad
 
 **The mechanism:**
 
-Before the first forward pass in an adversarial batch, `RewardModelManager` clones the batch input tensor and calls `requires_grad_(True)` on the clone. This ensures the original data tensor in the `DataLoader` is not modified. The first forward pass runs on this clone. The resulting loss is computed via `loss.compute_loss()`. `loss.backward()` is called inside `model.no_sync()` to suppress DDP all-reduce. After the backward pass, the clone's `.grad` attribute holds `∂L/∂X` of shape `(batch_size, D)`.
+Before the first forward pass in an adversarial batch, `RewardModelManager` clones the batch input tensor and calls `requires_grad_(True)` on the clone. This ensures the original data tensor in the `DataLoader` is not modified. The first forward pass runs on this clone. The resulting loss is computed via `RewardModelManager.compute_loss()`. `loss.backward()` is called inside `model.no_sync()` to suppress DDP all-reduce. After the backward pass, the clone's `.grad` attribute holds `∂L/∂X` of shape `(batch_size, D)`.
 
 **Importance scoring per feature slot (RMS normalisation):**
 
@@ -473,7 +472,7 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 | `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | `model.py` | Hidden layer output sizes; length determines depth |
 | `★ DROPOUT_RATES` | `[0.4, 0.3, 0.3, 0.2]` | `model.py` | Per-layer dropout probabilities; must match length of `LAYER_WIDTHS`. A single float is also accepted and broadcast to all layers for backward compatibility |
 | `ACTIVATION` | `relu` | `model.py` | Activation function; supports `relu`, `leaky_relu` |
-| `NUM_TARGETS` | `2` | `model.py`, `loss.py`, `calibrate.py`, `inference.py` | Number of classification targets T; determines number of output heads |
+| `NUM_TARGETS` | `2` | `model.py`, `reward_model_manager.py`, `calibrate.py`, `inference.py` | Number of classification targets T; determines number of output heads |
 
 ### Training
 
@@ -495,8 +494,8 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `LOSS_WEIGHTS` | `[0.75, 0.25]` (MIMIC-IV) | `loss.py` | List of T normalised weights, one per target; `RewardModelConfig` validates they sum to 1.0 at startup |
-| `POS_WEIGHTS` | (computed) | `loss.py` | List of T positive class weights; each computed from the applicable (non-NaN) training rows for that target if omitted |
+| `LOSS_WEIGHTS` | `[0.75, 0.25]` (MIMIC-IV) | `reward_model_manager.py` | List of T normalised weights, one per target; `RewardModelConfig` validates they sum to 1.0 at startup |
+| `POS_WEIGHTS` | (computed) | `reward_model_manager.py` | List of T positive class weights; each computed from the applicable (non-NaN) training rows for that target if omitted |
 
 ### Masking curriculum
 
@@ -600,7 +599,7 @@ This section documents the specific implementation of the generic reward model f
 | 0 — Y1 mortality | `y1_mortality` | `admissions.hospital_expire_flag = 1` | All admissions | Never NaN |
 | 1 — Y2 readmission | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors (Y1=0) | NaN when Y1=1 |
 
-Y2 = NaN for deceased patients is enforced upstream by `extract_y_data.py` and validated by `Mimic4DataLoader._validate_labels()`. The dynamic NaN mask in `loss.py` handles this per batch without removing rows from the dataset.
+Y2 = NaN for deceased patients is enforced upstream by `extract_y_data.py` and validated by `Mimic4DataLoader._validate_labels()`. The dynamic NaN mask in `RewardModelManager.compute_loss()` handles this per batch without removing rows from the dataset.
 
 ### 11.2 Feature Slot Summary
 

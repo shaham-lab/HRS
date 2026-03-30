@@ -5,6 +5,7 @@ RewardModelManager class. The torchrun entry point lives in
 ``reward_model_main.py``.
 """
 
+import argparse
 import logging
 import os
 import time
@@ -18,7 +19,7 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from checkpoint_manager import CheckpointManager
-from loss import compute_loss, compute_metrics
+from metrics import _append_metrics_row, compute_metrics
 from mimic4_data_loader import Mimic4DataLoader
 from masking import MaskingSchedule
 from model import RewardModel
@@ -83,80 +84,6 @@ def _init_ddp(num_gpus: int) -> Tuple[int, int, int, bool]:
     torch.cuda.set_device(local_rank)
     dist.init_process_group(backend="nccl")
     return rank, local_rank, world_size, True
-
-
-# ---------------------------------------------------------------------------
-# Metrics logging
-# ---------------------------------------------------------------------------
-
-
-def _append_metrics_row(metrics_path: Path, row: Dict, num_targets: int = 2) -> None:
-    """Append one epoch's metrics to *metrics_path* (rank 0 only).
-
-    Uses an atomic write (write to temp file, rename) so that a SLURM
-    preemption mid-write cannot corrupt the Parquet file.  If the file does
-    not yet exist it is created with the correct schema.
-
-    Columns written (Architecture §9):
-        epoch, wall_time_s, masking_random_pct, masking_adversarial_pct,
-        masking_none_pct, loss_total,
-        loss_target_<i>, auroc_target_<i>, auprc_target_<i>, ece_target_<i>
-        for each i in 0..num_targets-1.
-
-    Args:
-        metrics_path: Path to ``training_metrics.parquet``.
-        row: Dict mapping column name to scalar value for this epoch.
-        num_targets: Number of classification targets T.
-    """
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    columns = [
-        "epoch",
-        "wall_time_s",
-        "masking_random_pct",
-        "masking_adversarial_pct",
-        "masking_none_pct",
-        "loss_total",
-    ]
-    for i in range(num_targets):
-        columns += [
-            f"loss_target_{i}",
-            f"auroc_target_{i}",
-            f"auprc_target_{i}",
-            f"ece_target_{i}",
-        ]
-
-    schema_fields = [
-        ("epoch", pa.int64()),
-        ("wall_time_s", pa.float64()),
-        ("masking_random_pct", pa.float64()),
-        ("masking_adversarial_pct", pa.float64()),
-        ("masking_none_pct", pa.float64()),
-        ("loss_total", pa.float64()),
-    ]
-    for i in range(num_targets):
-        schema_fields += [
-            (f"loss_target_{i}", pa.float64()),
-            (f"auroc_target_{i}", pa.float64()),
-            (f"auprc_target_{i}", pa.float64()),
-            (f"ece_target_{i}", pa.float64()),
-        ]
-    schema = pa.schema(schema_fields)
-
-    new_row = {name: [row[name]] for name in columns}
-    new_table = pa.table(new_row, schema=schema)
-
-    if metrics_path.exists():
-        existing = pq.read_table(metrics_path)
-        table = pa.concat_tables([existing, new_table])
-    else:
-        table = new_table
-
-    tmp_path = metrics_path.with_suffix(".parquet.tmp")
-    pq.write_table(table, tmp_path)
-    os.replace(tmp_path, metrics_path)
 
 
 # ---------------------------------------------------------------------------
@@ -316,6 +243,29 @@ class RewardModelManager:
             scheduler.step()
         return scheduler
 
+    def compute_loss(
+        self, logits_list: list[torch.Tensor], labels_list: list[torch.Tensor]
+    ) -> Tuple[torch.Tensor, list[torch.Tensor]]:
+        """Compute total weighted loss over T targets with dynamic NaN masking."""
+        device = logits_list[0].device
+        total_loss = torch.tensor(0.0, device=device)
+        component_losses: list[torch.Tensor] = []
+
+        for logits, labels, pw, w in zip(
+            logits_list, labels_list, self.pos_weights, self.config.LOSS_WEIGHTS
+        ):
+            mask = ~torch.isnan(labels.view(-1))
+            if not mask.any():
+                loss_i = torch.tensor(0.0, device=device)
+            else:
+                pw_tensor = torch.tensor(pw, device=device)
+                loss_fn = torch.nn.BCEWithLogitsLoss(pos_weight=pw_tensor)
+                loss_i = loss_fn(logits.view(-1)[mask], labels.view(-1)[mask].float())
+            component_losses.append(loss_i)
+            total_loss = total_loss + w * loss_i
+
+        return total_loss, component_losses
+
     def _eval_dev(self) -> Dict:
         """Run full dev-split evaluation on rank 0 (no DDP, no masking)."""
         T = self.config.NUM_TARGETS
@@ -343,9 +293,7 @@ class RewardModelManager:
                 batch_labels = [batch[i + 1].to(self.device) for i in range(T)]
 
                 logits_list = list(eval_model(X))
-                loss_total, component_losses = compute_loss(
-                    logits_list, batch_labels, self.pos_weights, self.config.LOSS_WEIGHTS
-                )
+                loss_total, component_losses = self.compute_loss(logits_list, batch_labels)
 
                 total_loss_acc += float(loss_total.detach().item())
                 for i, cl in enumerate(component_losses):
@@ -458,17 +406,13 @@ class RewardModelManager:
             X_grad = X.clone().requires_grad_(True)
             with context:
                 logits_list = list(self.model(X_grad))
-                loss_total, _ = compute_loss(
-                    logits_list, labels, self.pos_weights, self.config.LOSS_WEIGHTS
-                )
+                loss_total, _ = self.compute_loss(logits_list, labels)
                 loss_total.backward()
             grad_X = X_grad.grad.detach()
             self.optimizer.zero_grad()
             X_masked = self.masking_schedule.apply_adversarial_mask(X, grad_X)
             logits_list = list(self.model(X_masked))
-            loss_total, component_losses = compute_loss(
-                logits_list, labels, self.pos_weights, self.config.LOSS_WEIGHTS
-            )
+            loss_total, component_losses = self.compute_loss(logits_list, labels)
             loss_total.backward()
         else:
             if mode == "random":
@@ -476,9 +420,7 @@ class RewardModelManager:
             else:
                 X = self.masking_schedule.apply_no_mask(X)
             logits_list = list(self.model(X))
-            loss_total, component_losses = compute_loss(
-                logits_list, labels, self.pos_weights, self.config.LOSS_WEIGHTS
-            )
+            loss_total, component_losses = self.compute_loss(logits_list, labels)
             loss_total.backward()
 
         self.optimizer.step()

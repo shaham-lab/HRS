@@ -13,7 +13,7 @@
 | 0 — Y1 | `y1_mortality` | In-hospital mortality (`admissions.hospital_expire_flag = 1`) | All admissions | Never NaN; ~8–10% positive rate |
 | 1 — Y2 | `y2_readmission` | Unplanned readmission within 30 days of `dischtime` | Survivors only (`y1_mortality = 0`) | NaN when `y1_mortality = 1`; ~20% positive among survivors |
 
-**NaN assignment rule:** `y2_readmission = NaN` must be set for all admissions where `y1_mortality = 1`. This is enforced by `extract_y_data.py` in `HRS/src/preprocessing` and validated by `Mimic4DataLoader._validate_labels()` at load time. Readmission is undefined for deceased patients — the reward model head for Y2 learns `P(readmitted | survived)`. The per-batch dynamic NaN mask in `loss.py` excludes deceased patients from the Y2 loss without removing rows from the dataset.
+**NaN assignment rule:** `y2_readmission = NaN` must be set for all admissions where `y1_mortality = 1`. This is enforced by `extract_y_data.py` in `HRS/src/preprocessing` and validated by `Mimic4DataLoader._validate_labels()` at load time. Readmission is undefined for deceased patients — the reward model head for Y2 learns `P(readmitted | survived)`. The per-batch dynamic NaN mask in `RewardModelManager.compute_loss()` excludes deceased patients from the Y2 loss without removing rows from the dataset.
 
 The following assertions must pass after NaN assignment:
 ```python
