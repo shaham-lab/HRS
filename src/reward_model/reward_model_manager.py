@@ -52,6 +52,9 @@ class RewardModelManager:
         self.dev_dataset = self.bundle.dev_dataset
         self.input_dim: int = self.bundle.input_dim
 
+        if self.rank == 0:
+            logger.info("Successfully loaded datasets and broadcasted positive weights.")
+
         self.checkpoint_manager = CheckpointManager(
             Path(self.config.CHECKPOINT_DIR), self.config.CHECKPOINT_KEEP_N
         )
@@ -63,6 +66,9 @@ class RewardModelManager:
         self.masking_schedule: Optional[MaskingSchedule] = None
         self.train_loader: Optional[DataLoader] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+
+        if self.rank == 0:
+            logger.info(f"Initialized RewardModel with input_dim={self.input_dim} and DDP={self.is_ddp}")
 
     def _maybe_load_states(self, ckpt_state: Optional[dict]) -> None:
         if ckpt_state is None:
@@ -266,6 +272,8 @@ class RewardModelManager:
         start_step = start_epoch * steps_per_epoch
         self.scheduler = self._build_lr_scheduler(steps_per_epoch, start_step)
         self._maybe_load_states(ckpt_state)
+        if self.rank == 0:
+            logger.info(f"Training state setup complete. Resuming from epoch {start_epoch}.")
 
     def _build_masking_schedule(self, ckpt_state: Optional[dict]) -> MaskingSchedule:
         if ckpt_state is not None:
@@ -366,6 +374,9 @@ class RewardModelManager:
         epochs_without_improve = 0
         last_epoch_completed = start_epoch - 1
 
+        if self.rank == 0:
+            logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
+
         for epoch in range(start_epoch, self.config.MAX_EPOCHS):
             if self.train_loader is None:
                 break
@@ -403,6 +414,11 @@ class RewardModelManager:
                     row[f"auroc_target_{i}"] = dev_metrics[f"auroc_target_{i}"]
                     row[f"auprc_target_{i}"] = dev_metrics[f"auprc_target_{i}"]
                     row[f"ece_target_{i}"] = dev_metrics[f"ece_target_{i}"]
+                logger.info(
+                    f"Epoch {epoch} completed in {time.time() - epoch_start:.2f}s | "
+                    f"Dev Loss: {dev_metrics['loss_total']:.4f} | "
+                    f"Masking (R/A/N): {probs[0]*100:.0f}%/{probs[1]*100:.0f}%/{probs[2]*100:.0f}%"
+                )
                 self.metrics_logger.append_row(row)
 
                 current_dev_loss = dev_metrics["loss_total"]
@@ -410,6 +426,7 @@ class RewardModelManager:
                 if improved:
                     best_dev_loss = current_dev_loss
                     epochs_without_improve = 0
+                    logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
                     self.checkpoint_manager.save_epoch_checkpoint(
                         self.model,
                         self.optimizer,
@@ -429,6 +446,10 @@ class RewardModelManager:
                     self.checkpoint_manager.prune_old_checkpoints()
                 else:
                     epochs_without_improve += 1
+                    logger.info(
+                        f"Dev loss did not improve. Early stopping patience: "
+                        f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
+                    )
 
                 should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
             else:
@@ -440,6 +461,8 @@ class RewardModelManager:
                 should_stop = bool(stop_tensor.item())
 
             if should_stop:
+                if self.rank == 0:
+                    logger.info(f"Early stopping triggered at epoch {epoch}.")
                 break
 
             if self.is_ddp:
@@ -462,4 +485,9 @@ class RewardModelManager:
         if self.is_ddp:
             dist.barrier()
 
+        if self.rank == 0:
+            logger.info(
+                f"Training finished. Last completed epoch: {last_epoch_completed}, "
+                f"Best Dev Loss: {best_dev_loss:.4f}"
+            )
         return last_epoch_completed, best_dev_loss
