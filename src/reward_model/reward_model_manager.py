@@ -22,7 +22,7 @@ from checkpoint_manager import CheckpointManager
 from metrics import _append_metrics_row, compute_metrics
 from mimic4_data_loader import Mimic4DataLoader
 from masking import MaskingSchedule
-from model import RewardModel
+from reward_mode import RewardModel
 from dataset_bundle import DatasetBundle
 from reward_model_config import RewardModelConfig
 from row_group_block_sampler import RowGroupBlockSampler
@@ -30,60 +30,9 @@ from row_group_block_sampler import RowGroupBlockSampler
 logger = logging.getLogger(__name__)
 
 
-def broadcast_tensor(tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
-    """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""
-    if torch.distributed.is_available() and torch.distributed.is_initialized():
-        torch.distributed.broadcast(tensor, src=src_rank)
-    return tensor
-
-
 def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
     """Unwrap a DDP-wrapped model to its underlying module."""
     return model.module if hasattr(model, "module") else model
-
-
-# ---------------------------------------------------------------------------
-# DDP initialisation
-# ---------------------------------------------------------------------------
-
-
-def _init_ddp(num_gpus: int) -> Tuple[int, int, int, bool]:
-    """Initialise the DDP process group from torchrun environment variables.
-
-    Reads ``RANK``, ``LOCAL_RANK``, ``WORLD_SIZE``, ``MASTER_ADDR``, and
-    ``MASTER_PORT`` set by ``torchrun``.  Calls
-    ``dist.init_process_group(backend='nccl')`` and
-    ``torch.cuda.set_device(local_rank)``.
-
-    If fewer than 2 CUDA devices are available at runtime, DDP initialisation
-    is skipped.  Single-process mode is logged at WARNING and the returned
-    ``is_ddp`` flag is ``False``.
-
-    Args:
-        num_gpus: Number of GPUs requested via config.
-
-    Returns:
-        Tuple of ``(rank, local_rank, world_size, is_ddp)``.  In single-process
-        mode all three integers are 0 / 1 / 1 respectively and ``is_ddp`` is
-        ``False``.
-    """
-    configured_gpus = int(num_gpus)
-    available_gpus = torch.cuda.device_count()
-    if configured_gpus == 1 or available_gpus < 2:
-        logger.warning("Insufficient CUDA devices for DDP — running in single-process mode")
-        return 0, 0, 1, False
-
-    rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
-    world_size = int(os.environ.get("WORLD_SIZE", "1"))
-
-    if world_size <= 1:
-        logger.warning("WORLD_SIZE <= 1 — running in single-process mode")
-        return 0, 0, 1, False
-
-    torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
-    return rank, local_rank, world_size, True
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +119,12 @@ class RewardModelManager:
         self.train_loader: Optional[DataLoader] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
 
+    def broadcast_tensor(self, tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
+        """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""
+        if torch.distributed.is_available() and torch.distributed.is_initialized():
+            torch.distributed.broadcast(tensor, src=src_rank)
+        return tensor
+
     def _load_and_broadcast_dataset(self) -> Tuple[DatasetBundle, list]:
         """Load dataset on rank 0 and broadcast pos_weights to all ranks."""
         T = self.config.NUM_TARGETS
@@ -183,7 +138,7 @@ class RewardModelManager:
         weight_tensors = [torch.tensor(w, device=self.device) for w in pos_weights_local]
         if self.is_ddp:
             for t in weight_tensors:
-                broadcast_tensor(t, src_rank=0)
+                self.broadcast_tensor(t, src_rank=0)
             obj_list = [bundle]
             dist.broadcast_object_list(obj_list, src=0)
             bundle = obj_list[0]
@@ -508,7 +463,7 @@ class RewardModelManager:
 
             if self.is_ddp:
                 stop_tensor = torch.tensor(1 if should_stop else 0, device=self.device)
-                broadcast_tensor(stop_tensor, src_rank=0)
+                self.broadcast_tensor(stop_tensor, src_rank=0)
                 should_stop = bool(stop_tensor.item())
 
             if should_stop:

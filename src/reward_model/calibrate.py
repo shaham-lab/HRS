@@ -23,7 +23,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from model import RewardModel
+from reward_mode import RewardModel
 from parquet_dataset import ParquetDataset
 from reward_model_config import RewardModelConfig,load_and_validate_config
 from reward_model_utils import get_device

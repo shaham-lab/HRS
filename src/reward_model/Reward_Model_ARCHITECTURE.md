@@ -146,7 +146,7 @@ HRS/src/preprocessing
 | — | `reward_model_utils.py` | Shared helpers + re-exports | No class definitions; re-exports all class-only modules for backward compatibility |
 | 1 | `data_loader.py` | Abstract `DataLoader` base | Template method for open → validate → build index map → split → bundle; subclassed by dataset-specific loaders |
 | 2 | `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
-| 3 | `model.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `reward_model_manager.py` |
+| 3 | `reward_mode.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `reward_model_manager.py` |
 | 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
 | 5 | `metrics.py` | Metrics + logging | Contains `compute_metrics()` and `_append_metrics_row()` for AUROC/AUPRC/ECE computation and metrics parquet logging |
 | 6 | `reward_model_manager.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, loss computation, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
@@ -343,7 +343,7 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **Preprocessing owns dimensionality.** BERT embedding dimensions, PCA reduction choices, and feature count are decisions made in `HRS/src/preprocessing`. The reward model accepts whatever `final_cdss_dataset.parquet` provides.
 
-**Masking is external to the network.** The network receives a flat float32 tensor and has no awareness of masked slots. All masking logic lives in `masking.py`, entirely decoupled from `model.py`.
+**Masking is external to the network.** The network receives a flat float32 tensor and has no awareness of masked slots. All masking logic lives in `masking.py`, entirely decoupled from `reward_mode.py`.
 
 **Feature boundaries are derived, not declared.** The feature index map is constructed at load time from the canonical column order in `PREPROCESSING_DATA_MODEL.md` Section 3.12. No separate index map config file exists.
 
@@ -372,7 +372,7 @@ HRS/
 │       ├── REWARD_MODEL_DETAILED_DESIGN.md  # per-module implementation details
 │       │
 │       ├── mimic4_data_loader.py           # step 1 — load, validate schema, derive feature index map
-│       ├── model.py                         # step 2 — RewardModel MLP definition
+│       ├── reward_mode.py                   # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
 │       ├── metrics.py                       # step 4 — AUROC/AUPRC/ECE computation + metrics parquet logging helpers
 │       ├── reward_model_main.py             # step 5 — DDP entrypoint launched by torchrun

@@ -5,11 +5,12 @@ import logging
 import os
 import sys
 
+import torch
 import torch.distributed as dist
 
 from reward_model_config import load_and_validate_config
 from reward_model_utils import get_device
-from reward_model_manager import RewardModelManager, _init_ddp, _resume_from_checkpoint
+from reward_model_manager import RewardModelManager, _resume_from_checkpoint
 
 
 def _parse_args() -> argparse.Namespace:
@@ -30,7 +31,28 @@ def _setup_logging(initial_rank: int) -> None:
         logging.basicConfig(level=logging.ERROR)
 
 
-def _init_runtime(config) -> tuple[int, int, int, bool, object]:
+def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
+    """Initialise the DDP process group from torchrun environment variables."""
+    configured_gpus = int(num_gpus)
+    available_gpus = torch.cuda.device_count()
+    if configured_gpus == 1 or available_gpus < 2:
+        logging.warning("Insufficient CUDA devices for DDP — running in single-process mode")
+        return 0, 0, 1, False
+
+    rank = int(os.environ.get("RANK", "0"))
+    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
+    world_size = int(os.environ.get("WORLD_SIZE", "1"))
+
+    if world_size <= 1:
+        logging.warning("WORLD_SIZE <= 1 — running in single-process mode")
+        return 0, 0, 1, False
+
+    torch.cuda.set_device(local_rank)
+    dist.init_process_group(backend="nccl")
+    return rank, local_rank, world_size, True
+
+
+def _init_runtime(config) -> tuple[int, int, int, bool, torch.device]:
     rank, local_rank, world_size, is_ddp = _init_ddp(config.NUM_GPUS)
     device = get_device(local_rank)
     return rank, local_rank, world_size, is_ddp, device

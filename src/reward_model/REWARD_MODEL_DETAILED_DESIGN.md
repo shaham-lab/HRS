@@ -20,7 +20,7 @@
    - [data_loader.py](#data_loaderpy)
    - [checkpoint_manager.py](#checkpoint_managerpy)
    - [mimic4_data_loader.py](#mimic4_data_loaderpy)
-   - [model.py](#modelpy)
+   - [reward_mode.py](#reward_modepy)
    - [masking.py](#maskingpy)
    - [metrics.py](#metricspy)
    - [reward_model_manager.py](#reward_model_managerpy)
@@ -65,7 +65,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `row_group_block_sampler.py` | `RowGroupBlockSampler` | Sampler that shards row groups round-robin across DDP ranks. |
 | `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, and pos-weights. |
 | `schema_error.py` | `SchemaError` | Custom exception for schema validation failures. |
-| `model.py` | `RewardModel` | Feedforward MLP with T output heads (one per classification target). |
+| `reward_mode.py` | `RewardModel` | Feedforward MLP with T output heads (one per classification target). |
 | `masking.py` | `MaskingSchedule` | Masking curriculum with random/adversarial/none modes. |
 | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
 | `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
@@ -78,7 +78,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 |--------|---------|--------|
 | `data_loader.py` | **Class** (`DataLoader`) | Generic base (no dataset-specific logic); single instantiation per run |
 | `mimic4_data_loader.py` | **Class** (`Mimic4DataLoader`) | MIMIC-IV implementation; validates schema, constructs `DatasetBundle`; single instantiation per run |
-| `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
+| `reward_mode.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `metrics.py` | Plain functions | Stateless metrics helpers (`compute_metrics`, `_append_metrics_row`) |
 | `reward_model_manager.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
@@ -148,7 +148,7 @@ The process group is initialised with the `nccl` backend at the start of `reward
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
 | `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_manager.py`) |
-| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (implemented in `reward_model_manager.py`) |
+| `RewardModelManager.broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (class method on `reward_model_manager.py`) |
 | **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
 | **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
 | **`DatasetBundle(NamedTuple)`** | Class-only module `dataset_bundle.py`. Bundles `train/dev/test` `ParquetDataset` instances plus metadata. Re-exported by `reward_model_utils.py`. |
@@ -216,7 +216,7 @@ Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `Data
 
 ---
 
-### `model.py`
+### `reward_mode.py`
 
 Defines the `RewardModel` class — a feedforward MLP with a gradual funnel and T independent sigmoid output heads, one per classification target.
 
@@ -226,7 +226,7 @@ The constructor accepts `input_dim` (derived from the feature index map at runti
 
 `forward(x)` returns a tuple of T tensors `(logits_y1, ..., logits_yT)`, each of shape `(batch_size, 1)`. **Sigmoid is not applied inside `forward`** — raw logits are returned so that `BCEWithLogitsLoss` can be used for numerical stability in training. Sigmoid is applied only at inference time in `inference.py`.
 
-The model is not DDP-aware — DDP wrapping is performed by `RewardModelManager` (`reward_model_manager.py`) during construction. This keeps `model.py` independently testable without a process group.
+The model is not DDP-aware — DDP wrapping is performed by `RewardModelManager` (`reward_model_manager.py`) during construction. This keeps `reward_mode.py` independently testable without a process group.
 
 **Config keys used:** `LAYER_WIDTHS`, `DROPOUT_RATES`, `ACTIVATION`, `NUM_TARGETS`.
 
@@ -468,11 +468,11 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `INPUT_DIM` | `42248` (MIMIC-IV) | `mimic4_data_loader.py`, `model.py` | Expected input dimensionality; validated against feature index map at startup; update when deploying on a different dataset |
-| `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | `model.py` | Hidden layer output sizes; length determines depth |
-| `★ DROPOUT_RATES` | `[0.4, 0.3, 0.3, 0.2]` | `model.py` | Per-layer dropout probabilities; must match length of `LAYER_WIDTHS`. A single float is also accepted and broadcast to all layers for backward compatibility |
-| `ACTIVATION` | `relu` | `model.py` | Activation function; supports `relu`, `leaky_relu` |
-| `NUM_TARGETS` | `2` | `model.py`, `reward_model_manager.py`, `calibrate.py`, `inference.py` | Number of classification targets T; determines number of output heads |
+| `INPUT_DIM` | `42248` (MIMIC-IV) | `mimic4_data_loader.py`, `reward_mode.py` | Expected input dimensionality; validated against feature index map at startup; update when deploying on a different dataset |
+| `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | `reward_mode.py` | Hidden layer output sizes; length determines depth |
+| `★ DROPOUT_RATES` | `[0.4, 0.3, 0.3, 0.2]` | `reward_mode.py` | Per-layer dropout probabilities; must match length of `LAYER_WIDTHS`. A single float is also accepted and broadcast to all layers for backward compatibility |
+| `ACTIVATION` | `relu` | `reward_mode.py` | Activation function; supports `relu`, `leaky_relu` |
+| `NUM_TARGETS` | `2` | `reward_mode.py`, `reward_model_manager.py`, `calibrate.py`, `inference.py` | Number of classification targets T; determines number of output heads |
 
 ### Training
 
