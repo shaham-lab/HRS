@@ -20,7 +20,7 @@
    - [data_loader.py](#data_loaderpy)
    - [checkpoint_manager.py](#checkpoint_managerpy)
    - [mimic4_data_loader.py](#mimic4_data_loaderpy)
-   - [reward_mode.py](#reward_modepy)
+   - [reward_model.py](#reward_modelpy)
    - [masking.py](#maskingpy)
    - [metrics.py](#metricspy)
    - [reward_model_manager.py](#reward_model_managerpy)
@@ -65,7 +65,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `row_group_block_sampler.py` | `RowGroupBlockSampler` | Sampler that shards row groups round-robin across DDP ranks. |
 | `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, and pos-weights. |
 | `schema_error.py` | `SchemaError` | Custom exception for schema validation failures. |
-| `reward_mode.py` | `RewardModel` | Feedforward MLP with T output heads (one per classification target). |
+| `reward_model.py` | `RewardModel` | Feedforward MLP with T output heads (one per classification target). |
 | `masking.py` | `MaskingSchedule` | Masking curriculum with random/adversarial/none modes. |
 | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
 | `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
@@ -78,7 +78,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 |--------|---------|--------|
 | `data_loader.py` | **Class** (`DataLoader`) | Generic base (no dataset-specific logic); single instantiation per run |
 | `mimic4_data_loader.py` | **Class** (`Mimic4DataLoader`) | MIMIC-IV implementation; validates schema, constructs `DatasetBundle`; single instantiation per run |
-| `reward_mode.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
+| `reward_model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `metrics.py` | Plain functions | Stateless metrics helpers (`compute_metrics`, `_append_metrics_row`) |
 | `reward_model_manager.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
@@ -216,7 +216,7 @@ Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `Data
 
 ---
 
-### `reward_mode.py`
+### `reward_model.py`
 
 Defines the `RewardModel` class — a feedforward MLP with a gradual funnel and T independent sigmoid output heads, one per classification target.
 

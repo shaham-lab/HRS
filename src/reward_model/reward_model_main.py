@@ -12,6 +12,8 @@ from reward_model_config import load_and_validate_config
 from reward_model_utils import get_device
 from reward_model_manager import RewardModelManager
 
+logger = logging.getLogger(__name__)
+
 
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the CDSS-ML reward model")
@@ -36,7 +38,7 @@ def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
     configured_gpus = int(num_gpus)
     available_gpus = torch.cuda.device_count()
     if configured_gpus == 1 or available_gpus < 2:
-        logging.warning("Insufficient CUDA devices for DDP — running in single-process mode")
+        logger.warning("Insufficient CUDA devices for DDP — running in single-process mode")
         return 0, 0, 1, False
 
     rank = int(os.environ.get("RANK", "0"))
@@ -44,7 +46,7 @@ def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     if world_size <= 1:
-        logging.warning("WORLD_SIZE <= 1 — running in single-process mode")
+        logger.warning("WORLD_SIZE <= 1 — running in single-process mode")
         return 0, 0, 1, False
 
     torch.cuda.set_device(local_rank)
