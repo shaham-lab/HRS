@@ -9,7 +9,7 @@ import torch.distributed as dist
 
 from reward_model_config import load_and_validate_config
 from reward_model_utils import get_device
-from train import RewardModelManager, _init_ddp, _resume_from_checkpoint
+from reward_model_manager import RewardModelManager, _init_ddp, _resume_from_checkpoint
 
 
 def _parse_args() -> argparse.Namespace:

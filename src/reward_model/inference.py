@@ -55,7 +55,8 @@ class RewardModelInference:
     ) -> None:
         """Load frozen model and calibration parameters.
 
-        Supports both the epoch/best checkpoint format written by ``train.py``
+        Supports both the epoch/best checkpoint format written by
+        ``reward_model_manager.py``
         and the self-contained export format written by ``export_model.py``.
         All parameters are loaded from the provided files — no access to
         ``config/reward_model.yaml`` is required.
@@ -67,7 +68,7 @@ class RewardModelInference:
 
         Args:
             checkpoint_path: Path to ``best_model.pt`` written by
-                ``train.py``, or to the self-contained ``frozen_model.pt``
+                ``reward_model_manager.py``, or to the self-contained ``frozen_model.pt``
                 artefact written by ``export_model.py``.
             calibration_params_path: Path to ``calibration_params.json``
                 containing ``{'T_0': float, 'T_1': float, ...}``.  Used only

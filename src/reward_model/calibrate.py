@@ -50,7 +50,7 @@ def _load_model_from_checkpoint(
 
     Args:
         checkpoint_path: Absolute path to ``best_model.pt`` (or any epoch
-            checkpoint written by ``train.py``).
+            checkpoint written by ``reward_model_manager.py``).
         device: Target device for the loaded model.
 
     Returns:
@@ -61,7 +61,7 @@ def _load_model_from_checkpoint(
           inside the checkpoint (maps feature column name to ``(start, end)``
           byte-range in the flat input tensor).
         - *config_snapshot* — Raw ``Dict`` from ``config.model_dump()`` as
-           saved by ``train.py``; authoritative for architecture keys
+           saved by ``reward_model_manager.py``; authoritative for architecture keys
            ``LAYER_WIDTHS``, ``DROPOUT_RATES``, ``ACTIVATION``, and
            ``NUM_TARGETS``.
     """

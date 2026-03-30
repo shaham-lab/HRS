@@ -23,7 +23,7 @@
    - [model.py](#modelpy)
    - [masking.py](#maskingpy)
    - [loss.py](#losspy)
-   - [train.py](#trainpy)
+   - [reward_model_manager.py](#reward_model_managerpy)
    - [calibrate.py](#calibratepy)
    - [inference.py](#inferencepy)
    - [validate_contract.py](#validate_contractpy)
@@ -70,7 +70,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
 | `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
 | `inference.py` | `RewardModelInference` | Frozen inference wrapper with calibration parameters. |
-| `train.py` | `RewardModelManager` | Encapsulates dataset load/broadcast, model + optimizer + scheduler construction, training state, masking curriculum, epoch loop, dev eval, checkpointing. |
+| `reward_model_manager.py` | `RewardModelManager` | Encapsulates dataset load/broadcast, model + optimizer + scheduler construction, training state, masking curriculum, epoch loop, dev eval, checkpointing. |
 
 ### Class vs plain script
 
@@ -81,7 +81,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
 | `loss.py` | Plain functions | Stateless transformations; `compute_loss(logits_list, labels_list, pos_weights, loss_weights)` for T targets |
-| `train.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
+| `reward_model_manager.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
 | `reward_model_main.py` | Plain script, DDP entry point | CLI parsing, logging setup, runtime init; instantiates `RewardModelManager` and delegates training |
 | `calibrate.py` | Plain script, `run(config)` | Single optimisation pass; no persistent state |
 | `inference.py` | **Class** (`RewardModelInference`) | Loaded once, called repeatedly per RL step; holds frozen weights and calibration params in memory |
@@ -90,7 +90,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 
 ### Encapsulation rules
 
-All helper functions are module-private (prefixed `_`). The public interface of each pipeline module is its `run(config)` function or class constructor. `reward_model_main.py` owns CLI parsing, logging setup, and runtime initialisation, then delegates to the `RewardModelManager` class in `train.py`, which owns dataset loading/broadcast, model/optimizer/scheduler construction, and training/eval loops. Config is always passed as a validated Pydantic model object, not a raw dict.
+All helper functions are module-private (prefixed `_`). The public interface of each pipeline module is its `run(config)` function or class constructor. `reward_model_main.py` owns CLI parsing, logging setup, and runtime initialisation, then delegates to the `RewardModelManager` class in `reward_model_manager.py`, which owns dataset loading/broadcast, model/optimizer/scheduler construction, and training/eval loops. Config is always passed as a validated Pydantic model object, not a raw dict.
 
 ### File naming conventions
 
@@ -147,8 +147,8 @@ The process group is initialised with the `nccl` backend at the start of `reward
 | `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
-| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `train.py`) |
-| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (implemented in `train.py`) |
+| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_manager.py`) |
+| `broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (implemented in `reward_model_manager.py`) |
 | **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
 | **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
 | **`DatasetBundle(NamedTuple)`** | Class-only module `dataset_bundle.py`. Bundles `train/dev/test` `ParquetDataset` instances plus metadata. Re-exported by `reward_model_utils.py`. |
@@ -165,7 +165,7 @@ The number and breakdown of feature slots, their column names, and their declare
 
 The dataset-specific data loader validates the expected slot count and per-group breakdown and raises `SchemaError` referencing the upstream data model document if any count does not match. This guards against silent miscounting if the upstream dataset schema changes.
 
-The map is constructed once by the data loader, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `train.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
+The map is constructed once by the data loader, stored in the returned `DatasetBundle`, and passed explicitly to `masking.py` and `reward_model_manager.py`. It is also saved as a snapshot inside every checkpoint file so that `inference.py` can reconstruct the same boundaries when loading a frozen model, even if the upstream dataset schema were to change between runs.
 
 The map is never written to a standalone config or YAML file — a separate file would duplicate the upstream data model document and create a consistency risk.
 
@@ -226,7 +226,7 @@ The constructor accepts `input_dim` (derived from the feature index map at runti
 
 `forward(x)` returns a tuple of T tensors `(logits_y1, ..., logits_yT)`, each of shape `(batch_size, 1)`. **Sigmoid is not applied inside `forward`** — raw logits are returned so that `BCEWithLogitsLoss` can be used for numerical stability in training. Sigmoid is applied only at inference time in `inference.py`.
 
-The model is not DDP-aware — DDP wrapping is performed by `RewardModelManager` (`train.py`) during construction. This keeps `model.py` independently testable without a process group.
+The model is not DDP-aware — DDP wrapping is performed by `RewardModelManager` (`reward_model_manager.py`) during construction. This keeps `model.py` independently testable without a process group.
 
 **Config keys used:** `LAYER_WIDTHS`, `DROPOUT_RATES`, `ACTIVATION`, `NUM_TARGETS`.
 
@@ -270,7 +270,7 @@ For each target i: construct the valid-sample mask `~torch.isnan(labels_list[i])
 
 ---
 
-### `train.py`
+### `reward_model_manager.py`
 
 Defines the `RewardModelManager` class, which owns all training state and encapsulates the epoch loop.
 
@@ -479,17 +479,17 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `MAX_EPOCHS` | `100` | `train.py` | Maximum training epochs |
-| `★ BATCH_SIZE_PER_GPU` | `256` | `train.py` | Samples per GPU per step; effective batch = this × `NUM_GPUS` |
-| `★ NUM_GPUS` | `2` | `train.py`, `reward_job.sh` | GPUs for DDP; `1` disables DDP |
-| `LEARNING_RATE` | `1e-4` | `train.py` | Initial AdamW learning rate |
-| `WEIGHT_DECAY` | `1e-5` | `train.py` | AdamW weight decay |
-| `ADAM_BETA1` | `0.9` | `train.py` | AdamW first moment decay |
-| `ADAM_BETA2` | `0.999` | `train.py` | AdamW second moment decay |
-| `LR_WARMUP_EPOCHS` | `5` | `train.py` | Linear warmup before cosine decay |
-| `LR_MIN` | `1e-6` | `train.py` | Minimum LR at end of cosine decay |
-| `EARLY_STOPPING_PATIENCE` | `10` | `train.py` | Epochs without dev loss improvement before stopping |
-| `CHECKPOINT_KEEP_N` | `3` | `train.py` | Most recent epoch checkpoints to retain on disk |
+| `MAX_EPOCHS` | `100` | `reward_model_manager.py` | Maximum training epochs |
+| `★ BATCH_SIZE_PER_GPU` | `256` | `reward_model_manager.py` | Samples per GPU per step; effective batch = this × `NUM_GPUS` |
+| `★ NUM_GPUS` | `2` | `reward_model_manager.py`, `reward_job.sh` | GPUs for DDP; `1` disables DDP |
+| `LEARNING_RATE` | `1e-4` | `reward_model_manager.py` | Initial AdamW learning rate |
+| `WEIGHT_DECAY` | `1e-5` | `reward_model_manager.py` | AdamW weight decay |
+| `ADAM_BETA1` | `0.9` | `reward_model_manager.py` | AdamW first moment decay |
+| `ADAM_BETA2` | `0.999` | `reward_model_manager.py` | AdamW second moment decay |
+| `LR_WARMUP_EPOCHS` | `5` | `reward_model_manager.py` | Linear warmup before cosine decay |
+| `LR_MIN` | `1e-6` | `reward_model_manager.py` | Minimum LR at end of cosine decay |
+| `EARLY_STOPPING_PATIENCE` | `10` | `reward_model_manager.py` | Epochs without dev loss improvement before stopping |
+| `CHECKPOINT_KEEP_N` | `3` | `reward_model_manager.py` | Most recent epoch checkpoints to retain on disk |
 
 ### Loss
 
@@ -524,8 +524,8 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
 | `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
-| `CHECKPOINT_DIR` | `data/reward_model/checkpoints` | `train.py`, `calibrate.py`, `export_model.py` | Checkpoint directory |
-| `METRICS_PATH` | `data/reward_model/training_metrics.parquet` | `train.py` | Per-epoch metrics output |
+| `CHECKPOINT_DIR` | `data/reward_model/checkpoints` | `reward_model_manager.py`, `calibrate.py`, `export_model.py` | Checkpoint directory |
+| `METRICS_PATH` | `data/reward_model/training_metrics.parquet` | `reward_model_manager.py` | Per-epoch metrics output |
 | `CALIBRATION_PARAMS_PATH` | `data/reward_model/calibration_params.json` | `calibrate.py`, `inference.py` | Temperature scaling output |
 | `EXPORT_PATH` | `data/reward_model/frozen_model.pt` | `export_model.py` | Self-contained frozen model artefact |
 

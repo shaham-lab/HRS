@@ -65,7 +65,7 @@ The exact column names, target count T, and feature count N are dataset-specific
 
 ## 4. Feature Set
 
-The input vector X is constructed by concatenating all feature columns from the dataset file in the canonical column order defined by the upstream preprocessing pipeline. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions. The derived index map is held in memory by the dataset-specific data loader (a subclass of the generic `DataLoader` base) and passed to `masking.py` and `train.py`.
+The input vector X is constructed by concatenating all feature columns from the dataset file in the canonical column order defined by the upstream preprocessing pipeline. **No separate feature index map config file exists** — feature slot boundaries are derived at load time from the dataset column names and their declared dimensions. The derived index map is held in memory by the dataset-specific data loader (a subclass of the generic `DataLoader` base) and passed to `masking.py` and `reward_model_manager.py`.
 
 **Feature slot structure:** The input vector consists of N feature slots concatenated in a fixed order. Each slot has a declared width (number of float32 dimensions). The total input dimensionality D is the sum of all slot widths.
 
@@ -97,7 +97,7 @@ HRS/src/preprocessing
                        ▼
          ┌──────────────────────────────────────┐
          │   reward_model_main.py (torchrun, NUM_GPUS=2)│  DDP entry; instantiates RewardModelManager
-         │   └── RewardModelManager (train.py)         │  masking curriculum, epoch loop,
+         │   └── RewardModelManager (reward_model_manager.py)         │  masking curriculum, epoch loop,
          │                                       │  forward/backward, early stopping,
          │   GPU 0 ──── mini-batch shard 0       │  checkpointing (rank 0 only)
          │   GPU 1 ──── mini-batch shard 1       │
@@ -119,7 +119,7 @@ HRS/src/preprocessing
 
 **Dependency rules:**
 - `HRS/src/preprocessing` must have produced `final_cdss_dataset.parquet` before any reward model job runs.
-- `Mimic4DataLoader` must pass all schema assertions before `train.py` starts.
+- `Mimic4DataLoader` must pass all schema assertions before `reward_model_manager.py` starts.
 - `calibrate.py` requires `best_model.pt` from a completed training run.
 - The reward model never writes to `HRS/data/preprocessing/` — that directory is read-only from this module's perspective.
 
@@ -146,10 +146,10 @@ HRS/src/preprocessing
 | — | `reward_model_utils.py` | Shared helpers + re-exports | No class definitions; re-exports all class-only modules for backward compatibility |
 | 1 | `data_loader.py` | Abstract `DataLoader` base | Template method for open → validate → build index map → split → bundle; subclassed by dataset-specific loaders |
 | 2 | `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
-| 3 | `model.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `train.py` |
+| 3 | `model.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `reward_model_manager.py` |
 | 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
 | 5 | `loss.py` | Scalar loss tensor | Generic T-target weighted BCE with dynamic NaN masking per target; weights normalised to sum to 1.0 |
-| 6 | `train.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
+| 6 | `reward_model_manager.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
 | 6a | `reward_model_main.py` | Process exit code | DDP entry point via `torchrun`; owns CLI parsing, logging setup, runtime init, resume wiring, and delegates to `RewardModelManager` |
 | 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split using log-space L-BFGS; single GPU |
 | 8 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
@@ -160,7 +160,7 @@ HRS/src/preprocessing
 
 ```mermaid
 graph TD
-  TrainMain[reward_model_main.py] --> RewardModelManager[train.py]
+  TrainMain[reward_model_main.py] --> RewardModelManager[reward_model_manager.py]
   RewardModelManager --> CheckpointManager
   RewardModelManager --> MaskingSchedule
   RewardModelManager --> RewardModel
@@ -234,7 +234,7 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### 8.2 Feature Index Map Derivation
 
-At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `train.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
+At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `reward_model_manager.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
 
 #### Checkpoint manager and feature-index validation
 
@@ -351,7 +351,7 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **Rank 0 owns all I/O.** Under DDP, only rank 0 writes checkpoints, metrics, and logs. All ranks participate in forward/backward passes and gradient all-reduce. This prevents duplicate writes and ensures a consistent checkpoint state.
 
-**Resumability.** Every checkpoint saves model weights (unwrapped from DDP), optimizer state, current epoch, curriculum schedule state, and a full config snapshot. Re-running `train.py --resume` via `torchrun` continues from the last checkpoint. Schema validation runs on every start regardless of resume status.
+**Resumability.** Every checkpoint saves model weights (unwrapped from DDP), optimizer state, current epoch, curriculum schedule state, and a full config snapshot. Re-running `reward_model_manager.py --resume` via `torchrun` continues from the last checkpoint. Schema validation runs on every start regardless of resume status.
 
 ---
 
@@ -376,7 +376,7 @@ HRS/
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
 │       ├── loss.py                          # step 4 — weighted BCE + dynamic NaN masking per target
 │       ├── reward_model_main.py             # step 5 — DDP entrypoint launched by torchrun
-│       ├── train.py                         # RewardModelManager class: curriculum, epoch loop, checkpointing
+│       ├── reward_model_manager.py                         # RewardModelManager class: curriculum, epoch loop, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
 │       │
