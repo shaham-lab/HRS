@@ -93,8 +93,6 @@ def run(config: Dict) -> None:
         feature_dim = X.shape[1]
         n_components = _effective_components(target_dim, fit_rows, feature_dim, method)
 
-        model = PCA(n_components=n_components) if method == "pca_nonzero" else TruncatedSVD(n_components=n_components)
-
         if fit_rows == 0:
             logger.warning("No non-zero train rows for %s; leaving zeros.", col_name)
             fitted_transforms[col_name] = None
@@ -107,13 +105,19 @@ def run(config: Dict) -> None:
                 n_components,
                 fit_rows,
             )
+            model = PCA(n_components=n_components) if method == "pca_nonzero" else TruncatedSVD(n_components=n_components)
             model.fit(X[fit_mask])
             X_reduced = np.zeros((n_rows, target_dim), dtype=np.float32)
             if nonzero_mask.any():
                 transformed = model.transform(X[nonzero_mask]).astype(np.float32)
                 X_reduced[nonzero_mask, : transformed.shape[1]] = transformed
             fitted_transforms[col_name] = model
-            variance_stats[col_name] = float(getattr(model, "explained_variance_ratio_", np.array([])).sum())
+            var_ratio = getattr(model, "explained_variance_ratio_", None)
+            if var_ratio is None:
+                logger.warning("explained_variance_ratio_ missing for %s; recording 0.0", col_name)
+                variance_stats[col_name] = 0.0
+            else:
+                variance_stats[col_name] = float(np.array(var_ratio).sum())
 
         flat = X_reduced.reshape(-1)
         embedding_array = pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float32()), target_dim)
