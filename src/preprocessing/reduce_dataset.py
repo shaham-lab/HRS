@@ -16,8 +16,6 @@ from preprocessing_utils import _load_config
 
 logger = logging.getLogger(__name__)
 
-ZERO_VECTOR_THRESHOLD = 1e-6  # Norm threshold to detect true zero (missing) vectors
-
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -27,7 +25,7 @@ def _setup_logging() -> None:
     )
 
 
-def _effective_components(target_dim: int, fit_rows: int, feature_dim: int, method: str) -> int:
+def _clamp_n_components(target_dim: int, fit_rows: int, feature_dim: int, method: str) -> int:
     """Clamp n_components to valid bounds for the chosen method."""
     max_dim = feature_dim - 1 if method == "svd" and feature_dim > 1 else feature_dim
     if fit_rows > 0:
@@ -92,11 +90,11 @@ def run(config: Dict) -> None:
         except ValueError as exc:
             raise ValueError(f"Failed to stack embedding column '{col_name}': {exc}") from exc
 
-        nonzero_mask = np.linalg.norm(X, axis=1) > ZERO_VECTOR_THRESHOLD
+        nonzero_mask = (X != 0).any(axis=1)
         fit_mask = is_train & nonzero_mask
         fit_rows = int(fit_mask.sum())
         feature_dim = X.shape[1]
-        n_components = _effective_components(target_dim, fit_rows, feature_dim, method)
+        n_components = _clamp_n_components(target_dim, fit_rows, feature_dim, method)
 
         if fit_rows == 0:
             logger.warning("No non-zero train rows for %s; leaving zeros.", col_name)
@@ -134,8 +132,8 @@ def run(config: Dict) -> None:
             else:
                 variance_stats[col_name] = float(np.array(var_ratio).sum())
 
-        flat = X_reduced.reshape(-1)
-        embedding_array = pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float32()), target_dim)
+        flattened_embeddings = X_reduced.reshape(-1)
+        embedding_array = pa.FixedSizeListArray.from_arrays(pa.array(flattened_embeddings, type=pa.float32()), target_dim)
         arrays.append(embedding_array)
         names.append(col_name)
 
