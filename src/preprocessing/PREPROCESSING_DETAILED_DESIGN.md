@@ -17,6 +17,7 @@
    - [extract_y_data.py](#extract_y_datapy)
    - [embed_features.py](#embed_featurespy)
    - [combine_dataset.py](#combine_datasetpy)
+   - [reduce_dataset.py](#reduce_datasetpy)
 4. [Embedding Implementation Detail](#4-embedding-implementation-detail)
    - [Model](#model)
    - [Mean Pooling](#mean-pooling)
@@ -380,6 +381,32 @@ Builds `final_cdss_dataset.parquet` from `data_splits.parquet` as the admission 
 All joins are **left joins** — admissions missing a non-lab/micro feature receive null for that column. Lab and microbiology embedding columns are always a 768-float array (zero vector for admissions with no events — never null).
 
 **Intentionally excluded:** `labs_features.parquet` (superseded by per-group embedding parquets), all raw text parquets including `micro_<panel>.parquet` (superseded by embedding parquets).
+
+---
+
+### `reduce_dataset.py`
+
+Optional post-processing step that reduces the dimensionality of each embedding column in `final_cdss_dataset.parquet`, producing `reduced_cdss_dataset.parquet` plus persisted transformers and explained-variance artefacts.
+
+**Zero-vector constraint:** Missing features are encoded as the all-zero vector. Mean-centred PCA would shift these rows away from the origin, violating the missingness contract. The implementation therefore supports only zero-preserving reducers:
+
+- **Compact SVD (no mean centring):** compute a low-rank SVD directly on the column matrix so zero rows remain exactly zero.
+- **Non-Zero Masked PCA:** isolate non-zero rows, fit PCA on that subset, transform only the non-zero rows, and write them back into a preallocated all-zero output matrix.
+
+**Train-only fitting:** Each column's reducer is fitted **only on `is_train == True` rows** to prevent leakage. The fitted object is then applied to train/dev/test splits for that column.
+
+**Memory management:** Columns are processed one at a time. For each embedding column: load column → fit on train rows → transform in batches if needed → write reduced column out → release memory. This avoids materialising the entire ~50 GB dataset in RAM and respects the 64 GB limit.
+
+**Outputs:**  
+- `reduced_cdss_dataset.parquet` (canonical column order, reduced embedding widths)  
+- Per-column fitted reducers for inference-time application  
+- Explained variance statistics (JSON/txt) for auditability
+
+**Configuration keys:**  
+- `REDUCTION_ENABLED` (bool) — gate for running the step  
+- `REDUCTION_METHOD` (`"svd"` or `"pca_nonzero"`) — choice of zero-preserving reducer  
+- `REDUCED_EMBEDDING_DIM` (int, default `128`) — target dimensionality for embedding columns  
+- `REDUCTION_OUTPUT_DIR` (str) — destination directory for the reduced parquet and artefacts
 
 ---
 
@@ -776,6 +803,10 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `BERT_SLICE_INDEX` | int | `0` | Slice index for this job; overridden by `--slice-index` CLI arg |
 | `BERT_FORCE_REEMBED` | bool | `false` | Bypass all slice/feature/record-level resume |
 | `BERT_CHECKPOINT_INTERVAL` | int | `10000` | Rows between within-feature checkpoint appends |
+| `REDUCTION_ENABLED` | bool | `false` | Run `reduce_dataset.py` to emit reduced embeddings |
+| `REDUCTION_METHOD` | str | `"svd"` | `"svd"` = compact SVD (no mean centring); `"pca_nonzero"` = mask non-zero rows |
+| `REDUCED_EMBEDDING_DIM` | int | `128` | Target embedding dimensionality for all `*_embedding` columns |
+| `REDUCTION_OUTPUT_DIR` | str | `data/preprocessing/classifications/reduced` | Destination for reduced parquet, transformers, and explained-variance stats |
 | `LAB_ADMISSION_WINDOW` | int\|`"full"` | `24` | Hours of lab events from `admittime`; `"full"` = entire admission |
 | `HADM_LINKAGE_STRATEGY` | str | `"drop"` | `"drop"` or `"link"` for null `hadm_id` records in lab/note/chartevents |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | int | `2` | Tolerance in hours for time-window linkage (lab/note/chartevents) |

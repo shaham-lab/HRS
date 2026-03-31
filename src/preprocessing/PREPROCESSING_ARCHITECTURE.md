@@ -124,7 +124,13 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
               ┌───────────────────┐
               │  combine_dataset   │
               │ final_cdss_dataset │
-              └───────────────────┘
+              └───────────┬───────┘
+                          │
+                          ▼
+              ┌───────────────────────────────┐
+              │  reduce_dataset (optional)     │
+              │ reduced_cdss_dataset.parquet   │
+              └───────────────────────────────┘
 ```
 
 ### Dependency Rules
@@ -134,6 +140,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 - All `extract_*` → independent of each other, can run in parallel
 - `embed_features` → requires all `extract_*` complete; runs as **14 sequential SLURM jobs**
 - `combine_dataset` → requires all embed slices complete
+- `reduce_dataset` (optional) → runs after `combine_dataset` and consumes `final_cdss_dataset.parquet`
 
 ### Runtime (SLURM, GPU cluster)
 
@@ -142,6 +149,8 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | Preprocessing (steps 0–9) | 1 | ~25 min | ~25 min |
 | Embedding (step 10, 14 slices) | 14 | ≤6 hrs | ≤84 hrs wall, runs sequentially (2 GPUs parallel within each job) |
 | Combine (step 11) | 1 | ~1 min | ~1 min |
+
+Optional step 12 (`reduce_dataset.py`) runs after combine and streams one embedding column at a time; runtime depends on the selected reduction method and target dimensionality.
 
 ---
 
@@ -161,6 +170,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | 9 | `extract_y_data.py` | `y_labels.parquet` | Y1 + Y2 labels |
 | 10 | `embed_features.py` | 55 embedding parquets | 14 SLURM jobs × 2 GPUs × 20k admissions |
 | 11 | `combine_dataset.py` | `final_cdss_dataset.parquet` | Left-join all features; 61 columns |
+| 12 | `reduce_dataset.py` | `reduced_cdss_dataset.parquet` | Column-wise embedding dimensionality reduction; fit on train split only (no leakage) |
 
 Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`), `build_micro_text.py` (helper for `extract_microbiology` — comment cleaning and text construction). `micro_panel_config.yaml` is a version-controlled config file in `config/` — no build step required.
 
@@ -200,6 +210,8 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 | Microbiology panel embeddings (F20–F56, 37 panels) | 37 | float[768] each |
 
 Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardcoded list.
+
+Two artefacts are available for downstream training: (1) the full-dimensionality dataset (≈50 GB) and (2) the reduced-dimensionality dataset (e.g., ≈17 GB when reduced to 128 dimensions) produced by `reduce_dataset.py`, allowing the reward model to choose based on hardware constraints.
 
 ---
 

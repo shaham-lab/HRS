@@ -21,14 +21,15 @@
    - 3.2 [demographics_features.parquet](#32-demographics_featuresparquet)
    - 3.3 [diag_history_features.parquet](#33-diag_history_featuresparquet)
    - 3.4 [discharge_history_features.parquet](#34-discharge_history_featuresparquet)
-   - 3.5 [triage_features.parquet](#35-triage_featuresparquet)
-   - 3.6 [chief_complaint_features.parquet](#36-chief_complaint_featuresparquet)
-   - 3.7 [labs_features.parquet](#37-labs_featuresparquet)
-   - 3.8 [micro\_\<panel\>.parquet × 37](#38-micro_panelparquet--37)
-   - 3.9 [radiology_features.parquet](#39-radiology_featuresparquet)
-   - 3.10 [y_labels.parquet](#310-y_labelsparquet)
-   - 3.11 [Embedding parquets × 55](#311-embedding-parquets--55)
-   - 3.12 [final_cdss_dataset.parquet](#312-final_cdss_datasetparquet)
+   - 3.5 [reduced_cdss_dataset.parquet](#35-reduced_cdss_datasetparquet)
+   - 3.6 [triage_features.parquet](#36-triage_featuresparquet)
+   - 3.7 [chief_complaint_features.parquet](#37-chief_complaint_featuresparquet)
+   - 3.8 [labs_features.parquet](#38-labs_featuresparquet)
+   - 3.9 [micro\_\<panel\>.parquet × 37](#39-micro_panelparquet--37)
+   - 3.10 [radiology_features.parquet](#310-radiology_featuresparquet)
+   - 3.11 [y_labels.parquet](#311-y_labelsparquet)
+   - 3.12 [Embedding parquets × 55](#312-embedding-parquets--55)
+   - 3.13 [final_cdss_dataset.parquet](#313-final_cdss_datasetparquet)
 
 ---
 
@@ -344,7 +345,23 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 
 ---
 
-### 3.5 triage_features.parquet
+### 3.5 reduced_cdss_dataset.parquet
+
+**Produced by:** `reduce_dataset.py` (Step 12, optional)  
+**Row definition:** One row per hospital admission  
+
+**Schema:** Identical to `final_cdss_dataset.parquet`, including canonical column order and data types. All metadata, label, structured, and embedding columns are present; only the embedding vector lengths differ.
+
+**Embedding dimensionality:** Each `*_embedding` column stores `float32[128]` by default (configurable via `REDUCED_EMBEDDING_DIM`). With 55 embedding columns, the total feature vector per admission shrinks from 42,248 floats (8 demographics + 55 × 768) to 7,048 floats (8 demographics + 55 × 128).
+
+**Artefacts:** Saved alongside the parquet are (1) the fitted reduction transform objects per embedding column for inference-time application and (2) explained variance statistics (JSON/txt) for auditability.
+
+**Primary key:** `hadm_id`  
+**Notes:** The transform for each column is fitted on `is_train == True` rows only to avoid data leakage, then applied to dev/test.
+
+---
+
+### 3.6 triage_features.parquet
 
 **Produced by:** `extract_triage_and_complaint.py` (Step 5)  
 **Row definition:** One row per hospital admission  
@@ -359,7 +376,7 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 
 ---
 
-### 3.6 chief_complaint_features.parquet
+### 3.7 chief_complaint_features.parquet
 
 **Produced by:** `extract_triage_and_complaint.py` (Step 5)  
 **Row definition:** One row per hospital admission  
@@ -374,7 +391,7 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 
 ---
 
-### 3.7 labs_features.parquet
+### 3.8 labs_features.parquet
 
 **Produced by:** `extract_labs.py` (Step 6)  
 **Row definition:** One row per lab event (long format — multiple rows per admission)  
@@ -403,7 +420,7 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 
 ---
 
-### 3.8 micro\_\<panel\>.parquet × 37
+### 3.9 micro\_\<panel\>.parquet × 37
 
 **Produced by:** `extract_microbiology.py` (Step 7)  
 **Files:** One parquet file per microbiology panel, named `micro_<panel_name>.parquet`  
@@ -465,7 +482,7 @@ All 37 files share the same schema:
 
 ---
 
-### 3.9 radiology_features.parquet
+### 3.10 radiology_features.parquet
 
 **Produced by:** `extract_radiology.py` (Step 8)  
 **Row definition:** One row per hospital admission  
@@ -480,7 +497,7 @@ All 37 files share the same schema:
 
 ---
 
-### 3.10 y_labels.parquet
+### 3.11 y_labels.parquet
 
 **Produced by:** `extract_y_data.py` (Step 9)  
 **Row definition:** One row per hospital admission  
@@ -511,7 +528,7 @@ Surviving admissions with null or corrupt `dischtime` in `admissions` are exclud
 
 ---
 
-### 3.11 Embedding parquets × 55
+### 3.12 Embedding parquets × 55
 
 **Produced by:** `embed_features.py` (Step 10)  
 **Files:** One parquet file per embedded feature  
@@ -591,7 +608,7 @@ All 55 embedding parquet files share the same schema:
 
 ---
 
-### 3.12 final_cdss_dataset.parquet
+### 3.13 final_cdss_dataset.parquet
 
 **Produced by:** `combine_dataset.py` (Step 11)  
 **Row definition:** One row per hospital admission  
