@@ -348,6 +348,7 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 ### 3.5 reduced_cdss_dataset.parquet
 
 **Produced by:** `reduce_dataset.py` (Step 12, optional, runs after `combine_dataset.py`)  
+Documented here for quick reference; generation occurs after `final_cdss_dataset.parquet` (section 3.13) has been produced.
 **Row definition:** One row per hospital admission  
 
 **Schema:** Identical to `final_cdss_dataset.parquet`, including canonical column order and data types. All metadata, label, structured, and embedding columns are present; only the embedding vector lengths differ.

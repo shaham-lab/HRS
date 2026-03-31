@@ -390,7 +390,7 @@ Optional post-processing step that reduces the dimensionality of each embedding 
 
 **Zero-vector constraint:** Missing features are encoded as the all-zero vector. Mean-centred PCA would shift these rows away from the origin, violating the missingness contract. The implementation therefore supports only zero-preserving reducers:
 
-- **Compact SVD (no mean centering):** compute a low-rank SVD directly on the column matrix so zero rows remain exactly zero.
+- **Compact SVD (no mean centering):** compute a truncated rank-`k` SVD (where `k = REDUCED_EMBEDDING_DIM`) directly on the column matrix so zero rows remain exactly zero.
 - **Non-Zero Masked PCA:** isolate non-zero rows, fit PCA on that subset, transform only the non-zero rows, and write them back into a preallocated all-zero output matrix.
 
 **Train-only fitting:** Each column's reducer is fitted **only on `is_train == True` rows** to prevent leakage. The fitted object is then applied to train/dev/test splits for that column.
