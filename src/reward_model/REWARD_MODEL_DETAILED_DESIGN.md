@@ -72,6 +72,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `inference.py` | `RewardModelInference` | Frozen inference wrapper with calibration parameters. |
 | `metrics.py` | `MetricsLogger` | Encapsulates Parquet appends and schema for training metrics (also houses metric helpers). |
 | `reward_model_manager.py` | `RewardModelManager` | Encapsulates dataset load/broadcast, model + optimizer + scheduler construction, training state, masking curriculum, epoch loop, dev eval, checkpointing. |
+| `calibrate.py` | `TemperatureCalibrator` | Manages dev-split inference and per-head temperature scaling state. |
 
 ### Class vs plain script
 
@@ -84,7 +85,7 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `metrics.py` | **Class** (`MetricsLogger`) + Plain functions | Holds persistent metrics path state for Parquet appends; retains stateless metric helpers. |
 | `reward_model_manager.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
 | `reward_model_main.py` | Plain script, DDP entry point | CLI parsing, logging setup, runtime init; instantiates `RewardModelManager` and delegates training |
-| `calibrate.py` | Plain script, `run(config)` | Single optimisation pass; no persistent state |
+| `calibrate.py` | **Class** (`TemperatureCalibrator`) + Plain script entry point | Coordinates dev-split inference and temperature scaling with a minimal stateful wrapper |
 | `inference.py` | **Class** (`RewardModelInference`) | Loaded once, called repeatedly per RL step; holds frozen weights and calibration params in memory |
 | `validate_contract.py` | Plain script, CLI tool | One-shot assertion run; exits with code 0 (pass) or 1 (fail) |
 | `export_model.py` | Plain script, CLI tool | One-shot serialisation; no shared state |
@@ -301,20 +302,22 @@ Plain script and DDP entry point launched by `torchrun`. It wires CLI/runtime co
 
 ### `calibrate.py`
 
-Applies temperature scaling to the best trained model. Plain script with `run(config)` entry point. Single GPU — no DDP.
+Temperature-scaling calibration is owned by the `TemperatureCalibrator` class. Single GPU — no DDP.
 
-**Algorithm:**
-1. Load `best_model.pt` from `CHECKPOINT_DIR`. Extract model state dict and the config snapshot from the checkpoint (not the current `config/reward_model.yaml` — the checkpoint config is authoritative for architecture).
-2. Instantiate `RewardModel` from the checkpoint config snapshot. Load state dict. Move to device. Call `model.eval()`.
-3. Load the dev split from `final_cdss_dataset.parquet`.
-4. Run a full forward pass on the dev split with `torch.no_grad()` to collect raw logits for all T targets.
-5. For each target i: construct the valid-sample mask `~torch.isnan(labels_i)`. Optimise scalar temperature `T_i` in log-space — define `log_T = torch.nn.Parameter(torch.zeros(1))` and recover `T = exp(log_T)` inside the closure. This guarantees T > 0 throughout optimisation, avoiding erratic gradients at the clamp boundary that occur with direct optimisation of T. Minimise negative log-likelihood on the valid-sample subset using L-BFGS. Return `max(exp(log_T).item(), 1e-8)` as the fitted temperature for target i.
-6. Log pre- and post-calibration ECE for all T heads for audit.
-7. Write `{'T_0': float, 'T_1': float, ..., 'T_{T-1}': float}` to `CALIBRATION_PARAMS_PATH` as JSON.
-7. Log pre- and post-calibration ECE for both heads for audit.
-8. Log the calibration parameters and export path.
+**Class: `TemperatureCalibrator`**
 
-**Config keys used:** `CHECKPOINT_DIR`, `DATASET_PATH`, `CALIBRATION_PARAMS_PATH`.
+- `__init__(config, device)`: Loads `best_model.pt`, reconstructs the `RewardModel` from the checkpoint snapshot (checkpoint config is authoritative for architecture), moves it to `device`, sets eval mode, and freezes gradients. Loads the dev split via `Mimic4DataLoader(config)` and stores `dev_dataset`. Retains `feature_index_map` and the checkpoint config snapshot for downstream use.
+- `_collect_logits()`: Builds a single-worker `DataLoader` on the dev split and, under `torch.no_grad()`, runs a full forward pass to collect per-head logits and labels as flat tensors. Returns `(logits_list, labels_list)` (lists of length T).
+- `calibrate_and_save()`: Calls `_collect_logits()`, then for each target i: constructs mask `~np.isnan(labels_i)`, logs pre-calibration ECE via `_compute_ece_from_logits(logits_i, labels_i, T=1.0, mask)`, fits `T_i` via `_fit_temperature` (log-space L-BFGS), logs post-calibration ECE, and writes `{f"T_{i}": float(T_i)}` to `CALIBRATION_PARAMS_PATH` as JSON (directory created if missing).
+
+**Pure helpers (module-level, unchanged):**
+- `_compute_ece_from_logits(logits, labels, T, mask)`: Expected Calibration Error with adaptive binning.
+- `_fit_temperature(logits, labels, mask)`: Log-space scalar temperature fitting with L-BFGS, clamped to `1e-8` minimum.
+
+**Entry point:**
+`main()` parses `--config`, sets up logging, selects `torch.device("cuda" if available else "cpu")`, instantiates `TemperatureCalibrator`, and calls `calibrate_and_save()`.
+
+**Config keys used:** `CHECKPOINT_DIR`, `DATASET_PATH`, `CALIBRATION_PARAMS_PATH`, `BATCH_SIZE_PER_GPU`.
 
 ---
 

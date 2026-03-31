@@ -151,7 +151,7 @@ HRS/src/preprocessing
 | 5 | `metrics.py` | Metrics + logging | Contains `compute_metrics()` and `MetricsLogger` (encapsulates Parquet schema + atomic appends for training metrics) |
 | 6 | `reward_model_manager.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, loss computation, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
 | 6a | `reward_model_main.py` | Process exit code | DDP entry point via `torchrun`; owns CLI parsing, logging setup, runtime init, resume wiring, and delegates to `RewardModelManager` |
-| 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split using log-space L-BFGS; single GPU |
+| 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split via `TemperatureCalibrator` (log-space L-BFGS); single GPU |
 | 8 | `inference.py` | Probability tensors | Frozen forward pass; consumed by RL agent; single GPU |
 | 9 | `validate_contract.py` | Exit code 0/1 | Standalone schema assertion runner; metadata-only, no tensor construction |
 | 10 | `export_model.py` | `frozen_model.pt` | Serialise frozen model + calibration params + feature index map for RL consumption |
@@ -377,7 +377,7 @@ HRS/
 │       ├── metrics.py                       # step 4 — AUROC/AUPRC/ECE computation + MetricsLogger (Parquet logging)
 │       ├── reward_model_main.py             # step 5 — DDP entrypoint launched by torchrun
 │       ├── reward_model_manager.py                         # RewardModelManager class: loss computation, curriculum, epoch loop, checkpointing
-│       ├── calibrate.py                     # step 6 — temperature scaling on dev split
+│       ├── calibrate.py                     # step 6 — temperature scaling on dev split (TemperatureCalibrator class)
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
 │       │
 │       ├── schema_error.py                  # shared SchemaError exception (class-only file)
