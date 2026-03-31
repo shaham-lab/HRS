@@ -12,7 +12,7 @@ from reward_model import RewardModel  # noqa: E402
 
 
 @pytest.fixture
-def synthetic_data() -> Dict[str, object]:
+def synthetic_tensor_data() -> Dict[str, object]:
     batch_size = 4
     input_dim = 50
     num_targets = 2
@@ -45,35 +45,37 @@ def test_reward_model_initialization():
         RewardModel(input_dim=50, layer_widths=[32, 16], dropout_rates=[0.2], num_targets=2)
 
 
-def test_reward_model_forward_pass(synthetic_data):
+def test_reward_model_forward_pass(synthetic_tensor_data):
     model = RewardModel(
-        input_dim=synthetic_data["input_dim"],
+        input_dim=synthetic_tensor_data["input_dim"],
         layer_widths=[32, 16],
         dropout_rates=[0.2, 0.2],
-        num_targets=synthetic_data["num_targets"],
+        num_targets=synthetic_tensor_data["num_targets"],
     )
 
-    outputs = model(synthetic_data["X"])
+    outputs = model(synthetic_tensor_data["X"])
 
     assert isinstance(outputs, tuple)
-    assert len(outputs) == synthetic_data["num_targets"]
+    assert len(outputs) == synthetic_tensor_data["num_targets"]
     for out in outputs:
-        assert out.shape == (synthetic_data["batch_size"], 1)
+        assert out.shape == (synthetic_tensor_data["batch_size"], 1)
         # Raw logits: ensure not all values are constrained to [0, 1]
         assert ((out < 0) | (out > 1)).any()
 
 
-def test_reward_model_gradient_flow(synthetic_data):
+def test_reward_model_gradient_flow(synthetic_tensor_data):
     model = RewardModel(
-        input_dim=synthetic_data["input_dim"],
+        input_dim=synthetic_tensor_data["input_dim"],
         layer_widths=[32, 16],
         dropout_rates=[0.2, 0.2],
-        num_targets=synthetic_data["num_targets"],
+        num_targets=synthetic_tensor_data["num_targets"],
     )
 
-    logits_list = model(synthetic_data["X"])
+    logits_list = model(synthetic_tensor_data["X"])
     criterion = nn.BCEWithLogitsLoss()
-    loss = sum(criterion(logit, label) for logit, label in zip(logits_list, synthetic_data["labels"]))
+    loss = sum(
+        criterion(logit, label) for logit, label in zip(logits_list, synthetic_tensor_data["labels"])
+    )
     loss.backward()
 
     assert model.backbone[0].weight.grad is not None
