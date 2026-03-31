@@ -26,7 +26,7 @@
 
 ## 1. Overview
 
-The CDSS-ML Reward Model is a supervised feedforward neural network that consumes a fixed-length feature vector derived from `final_cdss_dataset.parquet` — produced by `HRS/src/preprocessing` — and outputs T calibrated probability scores, one per configured classification target. Once trained, the model is frozen and used exclusively as an inference module by the RL agent, which computes a potential-based reward from the delta in output probabilities between consecutive episode states: `R = Σ wᵢ · ΔP(Yᵢ)`. The three most important architectural properties are: masking-aware training (the network trains under random and adversarial feature zeroing to simulate partial information availability at RL inference time), multi-GPU distributed training via PyTorch DDP (training runs across 2 GPUs by default, configurable via `NUM_GPUS`), and full configurability (all hyperparameters, schedule parameters, and architectural dimensions are defined in `config/reward_model.yaml` with no hardcoded values).
+The CDSS-ML Reward Model is a supervised feedforward neural network that consumes a fixed-length feature vector derived from `full_cdss_dataset.parquet` (or the reduced variant `reduced_cdss_dataset.parquet`) — produced by `HRS/src/preprocessing` — and outputs T calibrated probability scores, one per configured classification target. Once trained, the model is frozen and used exclusively as an inference module by the RL agent, which computes a potential-based reward from the delta in output probabilities between consecutive episode states: `R = Σ wᵢ · ΔP(Yᵢ)`. The three most important architectural properties are: masking-aware training (the network trains under random and adversarial feature zeroing to simulate partial information availability at RL inference time), multi-GPU distributed training via PyTorch DDP (training runs across 2 GPUs by default, configurable via `NUM_GPUS`), and full configurability (all hyperparameters, schedule parameters, and architectural dimensions are defined in `config/reward_model.yaml` with no hardcoded values).
 
 The current implementation is deployed on MIMIC-IV clinical data with T=2 targets (in-hospital mortality Y1 and 30-day readmission Y2). See Section 15 for the full MIMIC-IV-specific configuration. See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING_ARCHITECTURE.md` for the upstream pipeline that produces the input dataset.
 
@@ -42,7 +42,7 @@ Target definitions — including column names, population scope, and NaN assignm
 
 ## 3. Data and Inputs
 
-**Source:** `HRS/data/preprocessing/classifications/final_cdss_dataset.parquet` — produced by `combine_dataset.py` (Step 11 of the preprocessing pipeline). The reward model reads this file directly and does not query MIMIC-IV or any intermediate preprocessing artefacts.
+**Source:** `HRS/data/preprocessing/classifications/full_cdss_dataset.parquet` (or `reduced_cdss_dataset.parquet`) — produced by `combine_dataset.py` (and optionally `reduce_dataset.py`). The reward model reads this file directly and does not query MIMIC-IV or any intermediate preprocessing artefacts.
 
 **Schema reference:** The reward model depends on the following columns being present and correctly typed in the dataset file:
 
@@ -85,7 +85,7 @@ The reward model sits downstream of `HRS/src/preprocessing` and upstream of the 
 
 ```
 HRS/src/preprocessing
-    └── data/preprocessing/classifications/final_cdss_dataset.parquet
+    └── data/preprocessing/classifications/full_cdss_dataset.parquet
                     │
                     ▼
         ┌──────────────────────────────────────┐
@@ -118,7 +118,7 @@ HRS/src/preprocessing
 ```
 
 **Dependency rules:**
-- `HRS/src/preprocessing` must have produced `final_cdss_dataset.parquet` before any reward model job runs.
+- `HRS/src/preprocessing` must have produced `full_cdss_dataset.parquet` before any reward model job runs.
 - `Mimic4DataLoader` must pass all schema assertions before `reward_model_manager.py` starts.
 - `calibrate.py` requires `best_model.pt` from a completed training run.
 - The reward model never writes to `HRS/data/preprocessing/` — that directory is read-only from this module's perspective.
@@ -202,7 +202,7 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### Data Structures and Storage Formats
 
-- **Parquet (`final_cdss_dataset.parquet`, input, read-only):** Columnar; predicate pushdown used for `split` filtering. Produced upstream via `fastparquet` append mode — this module reads with `pyarrow`.
+- **Parquet (`full_cdss_dataset.parquet`, input, read-only):** Columnar; predicate pushdown used for `split` filtering. Produced upstream via `fastparquet` append mode — this module reads with `pyarrow`.
 - **YAML (`config/reward_model.yaml`):** All hyperparameters and schedule parameters. Validated by Pydantic. Follows the same convention as `config/preprocessing.yaml`.
 - **PyTorch checkpoint (`best_model.pt`):** Weights (unwrapped from DDP), optimizer state, epoch, curriculum state, config snapshot. Written by rank 0 only. Enables full SLURM resume.
 - **JSON (`calibration_params.json`):** Per-head temperature values, one per target (e.g. `T_0`, `T_1`). Human-readable audit trail.
@@ -234,11 +234,11 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 ### 8.2 Feature Index Map Derivation
 
-At load time, `Mimic4DataLoader` reads the ordered column list from `final_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `reward_model_manager.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
+At load time, `Mimic4DataLoader` reads the ordered column list from `full_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `reward_model_manager.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
 
 #### Checkpoint manager and feature-index validation
 
-Checkpointing and resume logic is encapsulated in `CheckpointManager` (`checkpoint_manager.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from `final_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
+Checkpointing and resume logic is encapsulated in `CheckpointManager` (`checkpoint_manager.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from `full_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
 
 ### 8.3 Multi-GPU Distributed Training
 
@@ -341,7 +341,7 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **No hardcoded values.** Every hyperparameter, architectural dimension, schedule parameter, file path, and GPU count is defined in `config/reward_model.yaml` and validated by Pydantic on startup. Input dimensionality is derived at runtime from the dataset column schema.
 
-**Preprocessing owns dimensionality.** BERT embedding dimensions, PCA reduction choices, and feature count are decisions made in `HRS/src/preprocessing`. The reward model accepts whatever `final_cdss_dataset.parquet` provides.
+**Preprocessing owns dimensionality.** BERT embedding dimensions, PCA reduction choices, and feature count are decisions made in `HRS/src/preprocessing`. The reward model accepts whatever `full_cdss_dataset.parquet` provides.
 
 **Masking is external to the network.** The network receives a flat float32 tensor and has no awareness of masked slots. All masking logic lives in `masking.py`, entirely decoupled from `reward_mode.py`.
 
@@ -397,7 +397,7 @@ HRS/
 └── data/
     ├── preprocessing/                       # [git-ignored] owned by HRS/src/preprocessing
     │   └── classifications/
-    │       └── final_cdss_dataset.parquet   # primary input to reward model (read-only)
+    │       └── full_cdss_dataset.parquet   # primary input to reward model (read-only)
     │
     └── reward_model/                        # [git-ignored] generated by this module
         ├── checkpoints/
@@ -472,7 +472,7 @@ Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each w
 
 > See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module implementation details, full `config/reward_model.yaml` reference, and per-layer memory requirements.
 >
-> See `PREPROCESSING_ARCHITECTURE.md` and `PREPROCESSING_DATA_MODEL.md` for the upstream pipeline that produces `final_cdss_dataset.parquet`.
+> See `PREPROCESSING_ARCHITECTURE.md` and `PREPROCESSING_DATA_MODEL.md` for the upstream pipeline that produces `full_cdss_dataset.parquet`.
 
 ---
 
@@ -496,7 +496,7 @@ This section documents the specific configuration of the Reward Model for the MI
 | Total feature slots | 56 (F1–F56) |
 | Always-visible slots | 5 (F1–F5: demographics, diagnosis history, discharge summary, triage, chief complaint) |
 | Maskable slots (M) | 51 (F6–F56: lab groups, radiology, microbiology panels) |
-| Total input dimensionality D | 8 + (55 × 768) = **42,248** |
+| Total input dimensionality D | 8 + (55 × EMBEDDING_DIM) → **42,248** at EMBEDDING_DIM = 768; **7,048** at EMBEDDING_DIM = 128 |
 
 ### 15.3 Loss Configuration
 

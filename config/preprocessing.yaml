@@ -100,3 +100,9 @@ CLASSIFICATIONS_DIR: "data/preprocessing/classifications"
 
 # Path to the source-file hash registry (used to skip unchanged modules).
 HASH_REGISTRY_PATH: "data/preprocessing/source_hashes.json"
+
+# Dimensionality Reduction (Optional Post-Processing)
+# REDUCTION_ENABLED: true
+# REDUCTION_METHOD: "svd"                 # Options: "svd" or "pca_nonzero"
+# REDUCED_EMBEDDING_DIM: 128
+# REDUCTION_OUTPUT_DIR: data/preprocessing/reduced

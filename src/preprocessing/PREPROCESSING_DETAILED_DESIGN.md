@@ -17,6 +17,7 @@
    - [extract_y_data.py](#extract_y_datapy)
    - [embed_features.py](#embed_featurespy)
    - [combine_dataset.py](#combine_datasetpy)
+   - [reduce_dataset.py](#reduce_datasetpy)
 4. [Embedding Implementation Detail](#4-embedding-implementation-detail)
    - [Model](#model)
    - [Mean Pooling](#mean-pooling)
@@ -26,9 +27,10 @@
    - [GPU Load Balancing](#gpu-load-balancing)
    - [Feature-Level Resume](#feature-level-resume)
    - [Record-Level Resume](#record-level-resume)
-5. [Final Dataset Assembly](#5-final-dataset-assembly)
-6. [Configuration Reference](#6-configuration-reference)
-7. [Memory Requirements](#7-memory-requirements)
+5. [Full Dataset Assembly](#5-full-dataset-assembly)
+6. [Reduced Dataset Processing](#6-reduced-dataset-processing)
+7. [Configuration Reference](#7-configuration-reference)
+8. [Memory Requirements](#8-memory-requirements)
 
 ---
 
@@ -365,7 +367,7 @@ Also callable as `run(config, slice_index)` from `run_pipeline.py`.
 
 ### `combine_dataset.py`
 
-Builds `final_cdss_dataset.parquet` from `data_splits.parquet` as the admission universe.
+Builds `full_cdss_dataset.parquet` from `data_splits.parquet` as the admission universe.
 
 **Algorithm:**
 1. Start with `data_splits.parquet`
@@ -375,11 +377,25 @@ Builds `final_cdss_dataset.parquet` from `data_splits.parquet` as the admission 
 5. Left-join each embedding parquet on `hadm_id`
 6. Build canonical column order from config files via `_build_canonical_columns(config)`: reads lab panel names from `LAB_PANEL_CONFIG_PATH` and microbiology panel names from `MICRO_PANEL_CONFIG_PATH` in insertion order. Column order: `[metadata] + [labels] + [demographic_vec] + [F2-F5 fixed embeddings] + [13 lab group embeddings] + [radiology] + [37 micro panel embeddings]`.
 7. Assert all expected columns are present — raises `ValueError` listing any missing columns if extraction or embedding is incomplete.
-8. Reorder `df` to canonical order and write `final_cdss_dataset.parquet`.
+8. Reorder `df` to canonical order and write `full_cdss_dataset.parquet`.
 
 All joins are **left joins** — admissions missing a non-lab/micro feature receive null for that column. Lab and microbiology embedding columns are always a 768-float array (zero vector for admissions with no events — never null).
 
 **Intentionally excluded:** `labs_features.parquet` (superseded by per-group embedding parquets), all raw text parquets including `micro_<panel>.parquet` (superseded by embedding parquets).
+
+---
+
+### `reduce_dataset.py`
+
+Optional post-processing step that reduces the dimensionality of each embedding column in `full_cdss_dataset.parquet`, producing `reduced_cdss_dataset.parquet` plus persisted transformers and explained-variance artefacts.
+
+See Section 6 for the zero-preserving fitting rules, train-only masking, and memory-streaming strategy.  
+
+**Configuration keys:**  
+- `REDUCTION_ENABLED` (bool) — gate for running the step  
+- `REDUCTION_METHOD` (`"svd"` or `"pca_nonzero"`) — choice of zero-preserving reducer  
+- `REDUCED_EMBEDDING_DIM` (int, default `128`) — target dimensionality for embedding columns  
+- `REDUCTION_OUTPUT_DIR` (str) — destination directory for the reduced parquet and artefacts
 
 ---
 
@@ -658,7 +674,7 @@ The merged result is a valid parquet readable by `pandas`/`pyarrow`.
 
 ---
 
-## 5. Final Dataset Assembly
+## 5. Full Dataset Assembly
 
 ### Join diagram
 
@@ -755,7 +771,20 @@ data_splits.parquet
 
 ---
 
-## 6. Configuration Reference
+## 6. Reduced Dataset Processing
+
+Dimensionality reduction is optional and must preserve the missing-data contract (zero vectors). The reducer is fitted per embedding column with strict constraints:
+
+- **Zero-vector constraint:** Missing features remain the all-zero vector. Mean-centred PCA would shift zeros, so only zero-preserving reducers are allowed:
+  - **Compact SVD (no mean centering):** `TruncatedSVD` with rank = `REDUCED_EMBEDDING_DIM`.
+  - **Non-Zero Masked PCA:** fit PCA only on non-zero rows, then transform and write back into a preallocated zero matrix.
+- **Train-only fitting:** Fit on `is_train == True` rows, then apply to train/dev/test to avoid leakage.
+- **Memory streaming:** Process one embedding column at a time — load column → fit on train rows → transform (batching if needed) → write reduced column → free memory. This keeps RAM under the 64 GB limit for the ~50 GB full dataset.
+- **Outputs:** `reduced_cdss_dataset.parquet` (same column order as full dataset), per-column fitted reducers, and explained variance statistics.
+
+---
+
+## 7. Configuration Reference
 
 All configuration in `config/preprocessing.yaml`. No module reads this file directly — `run_pipeline.py` loads it and passes the dict to each module's `run(config)`.
 
@@ -776,6 +805,10 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `BERT_SLICE_INDEX` | int | `0` | Slice index for this job; overridden by `--slice-index` CLI arg |
 | `BERT_FORCE_REEMBED` | bool | `false` | Bypass all slice/feature/record-level resume |
 | `BERT_CHECKPOINT_INTERVAL` | int | `10000` | Rows between within-feature checkpoint appends |
+| `REDUCTION_ENABLED` | bool | `false` | Run `reduce_dataset.py` to emit reduced embeddings |
+| `REDUCTION_METHOD` | str | `"svd"` | `"svd"` = compact SVD (no mean centering; preserves zero vectors); `"pca_nonzero"` = fit PCA on non-zero rows only and scatter results back into a zero-initialised matrix |
+| `REDUCED_EMBEDDING_DIM` | int | `128` | Target embedding dimensionality for all `*_embedding` columns |
+| `REDUCTION_OUTPUT_DIR` | str | `data/preprocessing/classifications/reduced` | Destination for reduced parquet, transformers, and explained-variance stats |
 | `LAB_ADMISSION_WINDOW` | int\|`"full"` | `24` | Hours of lab events from `admittime`; `"full"` = entire admission |
 | `HADM_LINKAGE_STRATEGY` | str | `"drop"` | `"drop"` or `"link"` for null `hadm_id` records in lab/note/chartevents |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | int | `2` | Tolerance in hours for time-window linkage (lab/note/chartevents) |
@@ -793,7 +826,7 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 
 ---
 
-## 7. Memory Requirements
+## 8. Memory Requirements
 
 Memory is expressed as formulas based on config parameters so estimates remain valid as the corpus size changes. Let **A** = total admissions, **S** = `BERT_SLICE_SIZE_PER_GPU`, **G** = number of GPUs per job, **M** = model hidden size (768).
 

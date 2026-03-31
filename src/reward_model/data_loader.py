@@ -8,7 +8,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from dataset_bundle import DatasetBundle
-from parquet_dataset import ParquetDataset
+from .parquet_dataset import ParquetDataset
 from reward_model_config import RewardModelConfig
 from schema_error import SchemaError
 

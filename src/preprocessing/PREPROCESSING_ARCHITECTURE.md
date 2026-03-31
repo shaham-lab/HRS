@@ -9,10 +9,11 @@
 5. [Pipeline Overview](#5-pipeline-overview)
 6. [Module Summary](#6-module-summary)
 7. [Embedding Strategy](#7-embedding-strategy)
-8. [Final Dataset](#8-final-dataset)
-9. [Design Principles](#9-design-principles)
-10. [Directory Structure](#10-directory-structure)
-11. [SLURM Execution](#11-slurm-execution)
+8. [Full Dataset](#8-full-dataset)
+9. [Reduced Dataset](#9-reduced-dataset)
+10. [Design Principles](#10-design-principles)
+11. [Directory Structure](#11-directory-structure)
+12. [SLURM Execution](#12-slurm-execution)
 
 ---
 
@@ -21,7 +22,7 @@
 The CDSS-ML preprocessing pipeline transforms raw MIMIC-IV clinical data into a fixed-schema parquet dataset ready for supervised classification and reinforcement learning.
 
 **Input:** MIMIC-IV v3.1 raw CSV tables  
-**Output:** `final_cdss_dataset.parquet` — one row per hospital admission, 61 columns
+**Output:** `full_cdss_dataset.parquet` — one row per hospital admission, 61 columns
 
 The pipeline is fully configuration-driven, resumable, and runs on a SLURM cluster with multi-GPU embedding support. Features span five clinical domains: demographics, clinical history (prior visits), current-visit structured data, laboratory results (13 groups), and microbiology results (37 panels).
 
@@ -123,8 +124,14 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
                       ▼
               ┌───────────────────┐
               │  combine_dataset   │
-              │ final_cdss_dataset │
-              └───────────────────┘
+              │ full_cdss_dataset │
+              └───────────┬───────┘
+                          │
+                          ▼
+              ┌───────────────────────────────┐
+              │  reduce_dataset (optional)     │
+              │ reduced_cdss_dataset.parquet   │
+              └───────────────────────────────┘
 ```
 
 ### Dependency Rules
@@ -134,6 +141,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 - All `extract_*` → independent of each other, can run in parallel
 - `embed_features` → requires all `extract_*` complete; runs as **14 sequential SLURM jobs**
 - `combine_dataset` → requires all embed slices complete
+- `reduce_dataset` (optional) → runs after `combine_dataset` and consumes `full_cdss_dataset.parquet`
 
 ### Runtime (SLURM, GPU cluster)
 
@@ -142,6 +150,9 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | Preprocessing (steps 0–9) | 1 | ~25 min | ~25 min |
 | Embedding (step 10, 14 slices) | 14 | ≤6 hrs | ≤84 hrs wall, runs sequentially (2 GPUs parallel within each job) |
 | Combine (step 11) | 1 | ~1 min | ~1 min |
+| Dimensionality reduction (step 12, optional) | 1 | ~20–40 min (CPU) | ~20–40 min |
+
+Optional step 12 (`reduce_dataset.py`) runs after combine, streaming one embedding column at a time. Typical runtime is CPU-bound (~20–40 minutes when reducing all embedding columns — 55 by default — to 128 dims with SVD on a 64 GB CPU node) and stays within the existing ≤64 GB RAM envelope because only one column is loaded at a time.
 
 ---
 
@@ -160,7 +171,8 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | 8 | `extract_radiology.py` | `radiology_features.parquet` | Most recent note per admission |
 | 9 | `extract_y_data.py` | `y_labels.parquet` | Y1 + Y2 labels |
 | 10 | `embed_features.py` | 55 embedding parquets | 14 SLURM jobs × 2 GPUs × 20k admissions |
-| 11 | `combine_dataset.py` | `final_cdss_dataset.parquet` | Left-join all features; 61 columns |
+| 11 | `combine_dataset.py` | `full_cdss_dataset.parquet` | Left-join all features; 61 columns |
+| 12 | `reduce_dataset.py` | `reduced_cdss_dataset.parquet` | Column-wise embedding dimensionality reduction; fit on train split only (no leakage) |
 
 Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`), `preprocessing_utils.py` (hashing/IO utilities), `build_lab_text_lines.py` (helper for `extract_labs`), `build_micro_text.py` (helper for `extract_microbiology` — comment cleaning and text construction). `micro_panel_config.yaml` is a version-controlled config file in `config/` — no build step required.
 
@@ -186,9 +198,9 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 
 ---
 
-## 8. Final Dataset
+## 8. Full Dataset
 
-`final_cdss_dataset.parquet` — one row per hospital admission, 61 columns:
+`full_cdss_dataset.parquet` — one row per hospital admission, 61 columns:
 
 | Group | Count | Type |
 |-------|-------|------|
@@ -199,11 +211,17 @@ Supporting scripts: `check_embed_status.py` (state detection for `submit_all.sh`
 | Lab group embeddings (F6–F18, 13 groups) | 13 | float[768] each |
 | Microbiology panel embeddings (F20–F56, 37 panels) | 37 | float[768] each |
 
-Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardcoded list.
+Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardcoded list. The full-dimensionality dataset is approximately 50 GB at 55 × 768 embedding dimensions.
 
 ---
 
-## 9. Design Principles
+## 9. Reduced Dataset
+
+`reduced_cdss_dataset.parquet` — optional post-processing artefact produced by `reduce_dataset.py` after `combine_dataset.py`. Embedding columns are reduced (e.g., to 128 dimensions) via train-only fitting of PCA or TruncatedSVD on non-zero vectors, preserving zero vectors for missing data. Typical size is ~17 GB at 55 × 128 dimensions, enabling alignment with tighter hardware limits while retaining identical schema and column order to the full dataset.
+
+---
+
+## 10. Design Principles
 
 **No target leakage** — prior-visit features use only admissions strictly before current `admittime`. Lab events restricted to current admission window. Post-mortem specimens excluded from all microbiology panels — their presence perfectly predicts Y1 (in-hospital mortality) and would introduce a direct causal shortcut. Imputation statistics computed on train split only, persisted and applied identically to dev/test.
 
@@ -219,7 +237,7 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 
 ---
 
-## 10. Directory Structure
+## 11. Directory Structure
 
 ```
 HRS/
@@ -259,7 +277,7 @@ HRS/
     │       └── [embedding parquets ×55]
     └── classifications/
         ├── y_labels.parquet
-        ├── final_cdss_dataset.parquet
+        ├── full_cdss_dataset.parquet
         ├── lab_panel_config.yaml
         ├── imputation_stats.json
         ├── hadm_linkage_stats.json
@@ -268,7 +286,7 @@ HRS/
 
 ---
 
-## 11. SLURM Execution
+## 12. SLURM Execution
 
 **Cluster:** University HPC cluster — login node and partition names are defined in `config/preprocessing.yaml`.  
 **Partitions:** Two GPU partitions are supported — a standard time-limit partition and a shorter queue-wait partition. Partition names, GPU type, time limits, and GPU count per job are all configurable.

@@ -163,7 +163,7 @@ class RewardModelInference:
 
         The RL agent uses this map to construct correctly masked input tensors
         for each episode step without needing access to
-        ``final_cdss_dataset.parquet``.
+        ``full_cdss_dataset.parquet``.
 
         Returns:
             Dict mapping feature column name to ``(start, end)`` index range

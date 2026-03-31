@@ -28,7 +28,8 @@
    - 3.9 [radiology_features.parquet](#39-radiology_featuresparquet)
    - 3.10 [y_labels.parquet](#310-y_labelsparquet)
    - 3.11 [Embedding parquets × 55](#311-embedding-parquets--55)
-   - 3.12 [final_cdss_dataset.parquet](#312-final_cdss_datasetparquet)
+   - 3.12 [full_cdss_dataset.parquet](#312-full_cdss_datasetparquet)
+   - 3.13 [reduced_cdss_dataset.parquet](#313-reduced_cdss_datasetparquet)
 
 ---
 
@@ -403,7 +404,7 @@ All parquet files use snappy compression unless noted otherwise. All artefacts a
 
 ---
 
-### 3.8 micro\_\<panel\>.parquet × 37
+### 3.9 micro\_\<panel\>.parquet × 37
 
 **Produced by:** `extract_microbiology.py` (Step 7)  
 **Files:** One parquet file per microbiology panel, named `micro_<panel_name>.parquet`  
@@ -591,7 +592,7 @@ All 55 embedding parquet files share the same schema:
 
 ---
 
-### 3.12 final_cdss_dataset.parquet
+### 3.12 full_cdss_dataset.parquet
 
 **Produced by:** `combine_dataset.py` (Step 11)  
 **Row definition:** One row per hospital admission  
@@ -664,3 +665,22 @@ All 55 embedding parquet files share the same schema:
 **Total columns:** 61 (3 metadata + 2 labels + 1 structured + 55 embeddings)
 **Total embedding dimensions per admission:** 55 × 768 = 42,240 float32 values
 **Notes:** The Nullable column reflects the data contract, not the PyArrow schema declaration (PyArrow marks all columns `nullable=True` by default regardless of actual data content). All embedding columns and `demographic_vec` are non-nullable by contract — missing feature text produces a zero vector, never null. `y2_readmission` is the only nullable column (NaN for deceased patients). PyArrow stores `y1_mortality` as int64, `y2_readmission` and `demographic_vec` as float64 (double). All `*_embedding` columns are stored as `list<element: float>` (float32). Downstream consumers should accept these types and cast if needed rather than asserting specific bit-widths. Embedding columns are joined from `EMBEDDINGS_DIR` dynamically — the column list above reflects the expected full dataset. Column order is canonical and enforced by `combine_dataset.py` using `CANONICAL_COLUMNS` derived at runtime from `LAB_PANEL_CONFIG_PATH` and `MICRO_PANEL_CONFIG_PATH` — no column names are hardcoded in `combine_dataset.py`. If any expected column is missing at combine time, `combine_dataset.py` raises `ValueError` listing the missing columns.
+
+---
+
+### 3.13 reduced_cdss_dataset.parquet
+
+**Produced by:** `reduce_dataset.py` (Step 12, optional, runs after `combine_dataset.py`)  
+Documented here for quick reference — generation occurs only after `full_cdss_dataset.parquet` (section 3.12) has been produced.  
+**Row definition:** One row per hospital admission  
+
+**Schema:** Identical to `full_cdss_dataset.parquet`, including canonical column order and data types. All metadata, label, structured, and embedding columns are present; only the embedding vector lengths differ.
+
+**Embedding dimensionality:** Each `*_embedding` column stores `float32[128]` by default (configurable via `REDUCED_EMBEDDING_DIM`). With 55 embedding columns, the total feature vector per admission shrinks from 42,248 floats (8 structured demographics + 55 × 768) to 7,048 floats (8 structured demographics + 55 × 128).
+
+**Artefacts:** Saved alongside the parquet are (1) the fitted reduction transform objects per embedding column for inference-time application and (2) explained variance statistics (JSON/txt) for auditability.
+
+**Primary key:** `hadm_id`  
+**Notes:** The transform for each column is fitted on `is_train == True` rows only to avoid data leakage, then applied to dev/test.
+
+---

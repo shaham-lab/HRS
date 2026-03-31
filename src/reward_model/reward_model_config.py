@@ -41,6 +41,7 @@ class RewardModelConfig(BaseModel):
     MASKING_ADVERSARIAL_K_MAX_FRACTION: float
     NUM_ALWAYS_VISIBLE_FEATURES: int = 5
 
+    EMBEDDING_DIM: int = 768
     INPUT_DIM: Optional[int] = None
     DATASET_PATH: str
     DATASET_ROW_GROUP_CACHE_SIZE: int = 2

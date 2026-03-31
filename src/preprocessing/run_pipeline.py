@@ -147,6 +147,11 @@ def main() -> None:
         help="Run combine_dataset.py",
     )
     parser.add_argument(
+        "--reduce_dataset",
+        action="store_true",
+        help="Run reduce_dataset.py (optional post-processing)",
+    )
+    parser.add_argument(
         "--config",
         default=_CONFIG_PATH,
         help=f"Path to config/preprocessing.yaml (default: {_CONFIG_PATH})",
@@ -214,7 +219,7 @@ def main() -> None:
     _FULL_ORDER = (
         ["create_splits", "build_lab_panel_config"]
         + _EXTRACT_MODULES
-        + ["embed_features", "combine_dataset"]
+        + ["embed_features", "combine_dataset", "reduce_dataset"]
     )
 
     if args.all:
@@ -261,7 +266,31 @@ def main() -> None:
             )
             continue
         config["FORCE_RERUN"] = args.force or (module_name in force_modules)
-        _run_module(module_name, config, idx, n)
+        if module_name == "reduce_dataset":
+            import subprocess
+
+            logger.info("")
+            logger.info("=" * 70)
+            logger.info("  STEP %d/%d — %s", idx, n, module_name)
+            logger.info("=" * 70)
+            t0 = time.time()
+            # Runs in a separate process because reduce_dataset may load heavy deps and
+            # is designed to be callable as a standalone script.
+            subprocess.run(
+                [
+                    sys.executable,
+                    os.path.join(_SCRIPT_DIR, "reduce_dataset.py"),
+                    "--config",
+                    args.config,
+                ],
+                check=True,
+            )
+            elapsed = time.time() - t0
+            logger.info(
+                "  STEP %d/%d — %s completed in %.1fs", idx, n, module_name, elapsed
+            )
+        else:
+            _run_module(module_name, config, idx, n)
 
     total_elapsed = time.time() - t_pipeline_start
     logger.info("")
