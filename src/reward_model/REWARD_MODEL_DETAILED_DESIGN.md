@@ -43,9 +43,9 @@
 
 ## 1. Primary Identifier
 
-The reward model operates at the admission level. `hadm_id` (int64) is the primary key throughout — one row in `final_cdss_dataset.parquet` corresponds to one hospital admission. `subject_id` is present in the dataset but is not used by any reward model module; it is carried through for potential downstream use by the RL agent.
+The reward model operates at the admission level. `hadm_id` (int64) is the primary key throughout — one row in `full_cdss_dataset.parquet` corresponds to one hospital admission. `subject_id` is present in the dataset but is not used by any reward model module; it is carried through for potential downstream use by the RL agent.
 
-The reward model does not perform any identifier linkage. All identifier resolution and null-`hadm_id` handling is completed upstream by `HRS/src/preprocessing`. By the time `final_cdss_dataset.parquet` reaches this module, every row has a valid `hadm_id`.
+The reward model does not perform any identifier linkage. All identifier resolution and null-`hadm_id` handling is completed upstream by `HRS/src/preprocessing`. By the time `full_cdss_dataset.parquet` reaches this module, every row has a valid `hadm_id`.
 
 ---
 
@@ -53,7 +53,7 @@ The reward model does not perform any identifier linkage. All identifier resolut
 
 ### Module boundaries
 
-Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `final_cdss_dataset.parquet` except `mimic4_data_loader.py` (via `Mimic4DataLoader`, a subclass of the generic `DataLoader` base).
+Each Python file corresponds to one pipeline concern. Class definitions live in class-only modules (`reward_model_config.py`, `parquet_dataset.py`, `row_group_block_sampler.py`, `dataset_bundle.py`, `schema_error.py`) and are re-exported by `reward_model_utils.py` for backward compatibility. Inter-module state exchange happens via tensors passed as function arguments within a single process, or via checkpoint files on disk between separate SLURM jobs. No module reads `full_cdss_dataset.parquet` except `mimic4_data_loader.py` (via `Mimic4DataLoader`, a subclass of the generic `DataLoader` base).
 
 ### Class inventory (one class per file)
 
@@ -151,7 +151,7 @@ The process group is initialised with the `nccl` backend at the start of `reward
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
 | `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_utils.py`) |
 | `RewardModelManager.broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (class method on `reward_model_manager.py`) |
-| **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
+| **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `full_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
 | **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
 | **`DatasetBundle(NamedTuple)`** | Class-only module `dataset_bundle.py`. Bundles `train/dev/test` `ParquetDataset` instances plus metadata. Re-exported by `reward_model_utils.py`. |
 
@@ -163,7 +163,7 @@ A helper function belongs in `reward_model_utils.py` if and only if it is used b
 
 The feature index map defines the start and end index within the flat D-dimensional input tensor for each feature slot. It is derived at load time by the dataset-specific data loader from the ordered list of feature columns in the dataset file. The derivation algorithm iterates the ordered column list, skips metadata columns (e.g. primary key, split column) and label columns, and for each remaining feature column assigns a start index equal to the running offset and an end index equal to start plus the column's declared dimension. The result is a dict mapping column name to a `(start, end)` tuple.
 
-The number and breakdown of feature slots, their column names, and their declared dimensions are dataset-specific. For the MIMIC-IV deployment (56 slots, 1 structured vector at 8 dims, 55 BERT embeddings at 768 dims each, D=42,248) see `mimic4_feature_set.md` and Section 11.2 of this document.
+The number and breakdown of feature slots, their column names, and their declared dimensions are dataset-specific. For the MIMIC-IV deployment (56 slots, 1 structured vector at 8 dims, 55 BERT embeddings at EMBEDDING_DIM each, D=42,248 at 768 dims or 7,048 at 128 dims) see `mimic4_feature_set.md` and Section 11.2 of this document.
 
 The dataset-specific data loader validates the expected slot count and per-group breakdown and raises `SchemaError` referencing the upstream data model document if any count does not match. This guards against silent miscounting if the upstream dataset schema changes.
 
@@ -203,7 +203,7 @@ The config snapshot inside the checkpoint is authoritative for architecture reco
 Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `DataLoader` template. `DataLoader.load()` orchestrates open/validate/read/bundle steps via template hooks; dataset-specific logic lives in subclasses. The dataset is never fully materialised into a float32 tensor — batches are read lazily from disk by `ParquetDataset.__getitem__` at training time.
 
 **Algorithm (Mimic4DataLoader implementation):**
-1. Read `final_cdss_dataset.parquet` from `DATASET_PATH` using `pyarrow`. Do not use `fastparquet` — the fastparquet/pyarrow serialisation incompatibility observed in the preprocessing pipeline applies here.
+1. Read `full_cdss_dataset.parquet` from `DATASET_PATH` using `pyarrow`. Do not use `fastparquet` — the fastparquet/pyarrow serialisation incompatibility observed in the preprocessing pipeline applies here.
 2. Validate column presence and order via `Mimic4DataLoader._validate_schema()`; assert all 61 expected columns are present in canonical order from `PREPROCESSING_DATA_MODEL.md` Section 3.12.
 3. Validate labels: `y1_mortality` dtype int8/float32 and non-null; `y2_readmission` dtype float32 with NaN for deceased rows and non-null for survivors (checked inside `_validate_labels`).
 4. Build the feature index map via `Mimic4DataLoader._build_feature_index_map()`. This also validates the 55-embedding count and per-group breakdown — see Section 4.
@@ -331,7 +331,7 @@ The constructor accepts `checkpoint_path` and `calibration_params_path` (or the 
 
 `predict(X)` accepts a float32 tensor of shape `(N, input_dim)`. Under `torch.no_grad()`, it runs a forward pass and returns a tuple of T tensors, each of shape `(N, 1)`, containing calibrated probabilities from `sigmoid(logit_i / T_i)` for each target i. Temperature values are clamped to a minimum of 1e-8 at load time to prevent division by zero.
 
-`get_feature_index_map()` returns the feature index map snapshot so the RL agent can construct correctly masked input tensors for each episode step without needing access to `final_cdss_dataset.parquet`.
+`get_feature_index_map()` returns the feature index map snapshot so the RL agent can construct correctly masked input tensors for each episode step without needing access to `full_cdss_dataset.parquet`.
 
 **Config keys used:** None — all parameters come from the checkpoint and calibration files passed to the constructor.
 
@@ -343,7 +343,7 @@ Standalone CLI tool. Runs only the schema assertions from `Mimic4DataLoader.load
 
 **Algorithm:**
 1. Load config from `--config` argument.
-2. Read `final_cdss_dataset.parquet` column names and dtypes only (schema metadata, no data materialisation).
+2. Read `full_cdss_dataset.parquet` column names and dtypes only (schema metadata, no data materialisation).
 3. Run all column-presence, dtype, and NaN assertions using column statistics from the Parquet footer.
 4. Print a per-assertion pass/fail summary to stdout with the first failing assertion described in full.
 5. Exit code 0 if all assertions pass, code 1 if any fail.
@@ -383,7 +383,7 @@ The `nccl` backend is used for all GPU-to-GPU communication. `nccl` is the only 
 
 ### 6.2 Data Sharding
 
-Only rank 0 loads the dataset from `final_cdss_dataset.parquet` inside `RewardModelManager.__init__`. Rank 0 calls `Mimic4DataLoader(config).load()`, which returns three `ParquetDataset` objects — one per split. These are lightweight wrappers holding a PyArrow file handle and row index lists; no feature data is materialised at load time. Non-rank-0 processes do not touch disk — they receive the `DatasetBundle` object and broadcast `pos_weight` scalars from rank 0 and wait at a barrier while rank 0 loads.
+Only rank 0 loads the dataset from `full_cdss_dataset.parquet` inside `RewardModelManager.__init__`. Rank 0 calls `Mimic4DataLoader(config).load()`, which returns three `ParquetDataset` objects — one per split. These are lightweight wrappers holding a PyArrow file handle and row index lists; no feature data is materialised at load time. Non-rank-0 processes do not touch disk — they receive the `DatasetBundle` object and broadcast `pos_weight` scalars from rank 0 and wait at a barrier while rank 0 loads.
 
 Training data is sharded across GPUs via `RowGroupBlockSampler`. The sampler shuffles at the row group level rather than globally across individual row indices, preserving Parquet row-group locality and preventing I/O thrashing on the `ParquetDataset` LRU cache. Row groups are partitioned round-robin across DDP ranks, ensuring each rank processes a non-overlapping subset of admissions per epoch. Each rank's `DataLoader` calls `ParquetDataset.__getitem__` for its assigned indices, which reads the corresponding row groups lazily from disk via the LRU cache and materialises individual batch tensors on demand. With 2 GPUs and `BATCH_SIZE_PER_GPU = 256`, each GPU materialises 256 samples per step and the effective batch size is 512.
 
@@ -456,7 +456,7 @@ The config snapshot inside the checkpoint is authoritative for architecture reco
 
 **Resume mechanism:**
 
-On `--resume`, the latest checkpoint in `CHECKPOINT_DIR` is identified by epoch number (not filesystem modification time). It is loaded on rank 0. Model, optimiser, scheduler, epoch, and masking schedule are restored. The feature index map snapshot from the checkpoint is compared against the freshly derived map from the current `final_cdss_dataset.parquet`. If they differ, training refuses to resume and raises a descriptive error — this protects against resuming after an upstream dataset change that would make the checkpoint inconsistent with the current data.
+On `--resume`, the latest checkpoint in `CHECKPOINT_DIR` is identified by epoch number (not filesystem modification time). It is loaded on rank 0. Model, optimiser, scheduler, epoch, and masking schedule are restored. The feature index map snapshot from the checkpoint is compared against the freshly derived map from the current `full_cdss_dataset.parquet`. If they differ, training refuses to resume and raises a descriptive error — this protects against resuming after an upstream dataset change that would make the checkpoint inconsistent with the current data.
 
 After loading, rank 0 broadcasts the full model state dict to non-rank-0 processes via `dist.broadcast_object_list()`. A `dist.barrier()` ensures all ranks have received the state before training proceeds.
 
@@ -519,14 +519,14 @@ All keys defined in `config/reward_model.yaml`. Loaded and validated by `load_an
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `full_cdss_dataset.parquet` |
 | `★ DATASET_ROW_GROUP_CACHE_SIZE` | `2` | `parquet_dataset.ParquetDataset` | Number of decompressed Parquet row groups held in the LRU cache per `ParquetDataset` instance; higher values increase RAM usage but reduce re-reads when the DataLoader accesses rows from the same row group across consecutive batches |
 
 ### Paths
 
 | Key | Default | Used by | Description |
 |-----|---------|---------|-------------|
-| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `final_cdss_dataset.parquet` |
+| `DATASET_PATH` | (required) | `mimic4_data_loader.py`, `calibrate.py`, `validate_contract.py` | Absolute path to `full_cdss_dataset.parquet` |
 | `CHECKPOINT_DIR` | `data/reward_model/checkpoints` | `reward_model_manager.py`, `calibrate.py`, `export_model.py` | Checkpoint directory |
 | `METRICS_PATH` | `data/reward_model/training_metrics.parquet` | `reward_model_manager.py` | Per-epoch metrics output |
 | `CALIBRATION_PARAMS_PATH` | `data/reward_model/calibration_params.json` | `calibrate.py`, `inference.py` | Temperature scaling output |
@@ -607,14 +607,14 @@ Y2 = NaN for deceased patients is enforced upstream by `extract_y_data.py` and v
 
 ### 11.2 Feature Slot Summary
 
-| Slots | Count | Always visible | Dim each | Total dims |
-|-------|-------|----------------|----------|-----------|
-| F1 (`demographic_vec`) | 1 | Yes | 8 | 8 |
-| F2–F5 (history/triage embeddings) | 4 | Yes | 768 | 3,072 |
-| F6–F18 (lab group embeddings) | 13 | No (maskable) | 768 | 9,984 |
-| F19 (radiology embedding) | 1 | No (maskable) | 768 | 768 |
-| F20–F56 (microbiology panel embeddings) | 37 | No (maskable) | 768 | 28,416 |
-| **Total** | **56** | **5 always visible** | | **42,248** |
+| Slots | Count | Always visible | Dim each | Total dims (EMBEDDING_DIM = 768) | Total dims (EMBEDDING_DIM = 128) |
+|-------|-------|----------------|----------|-------------------------------|-------------------------------|
+| F1 (`demographic_vec`) | 1 | Yes | 8 | 8 | 8 |
+| F2–F5 (history/triage embeddings) | 4 | Yes | EMBEDDING_DIM | 3,072 | 512 |
+| F6–F18 (lab group embeddings) | 13 | No (maskable) | EMBEDDING_DIM | 9,984 | 1,664 |
+| F19 (radiology embedding) | 1 | No (maskable) | EMBEDDING_DIM | 768 | 128 |
+| F20–F56 (microbiology panel embeddings) | 37 | No (maskable) | EMBEDDING_DIM | 28,416 | 4,736 |
+| **Total** | **56** | **5 always visible** | | **42,248** | **7,048** |
 
 `NUM_ALWAYS_VISIBLE_FEATURES = 5`. Maskable slot count M = 51.
 
@@ -623,13 +623,14 @@ Y2 = NaN for deceased patients is enforced upstream by `extract_y_data.py` and v
 | Key | MIMIC-IV Default | Notes |
 |-----|-----------------|-------|
 | `NUM_TARGETS` | `2` | Y1 mortality + Y2 readmission |
-| `INPUT_DIM` | `42248` | Derived at runtime; validation only |
+| `EMBEDDING_DIM` | `768` | Matches full dataset; set to 128 for reduced dataset |
+| `INPUT_DIM` | `42248` (full) / `7048` (reduced) | Derived at runtime; validation only |
 | `NUM_ALWAYS_VISIBLE_FEATURES` | `5` | F1–F5 positional |
 | `LOSS_WEIGHT_Y1` | `0.75` | 3:1 ratio favouring mortality |
 | `LOSS_WEIGHT_Y2` | `0.25` | |
-| `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | Gradual funnel from D=42,248 |
+| `LAYER_WIDTHS` | `[8192, 2048, 512, 128]` | Gradual funnel from D=42,248 (full) or proportionally generous for reduced |
 | `DROPOUT_RATES` | `[0.4, 0.3, 0.3, 0.2]` | Heavier on wider early layers |
 
 ---
 
-> See `reward_model_architecture.md` for system context, design rationale, pipeline overview, and the upstream pipeline that produces `final_cdss_dataset.parquet`.
+> See `reward_model_architecture.md` for system context, design rationale, pipeline overview, and the upstream pipeline that produces `full_cdss_dataset.parquet`.

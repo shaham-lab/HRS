@@ -6,8 +6,8 @@ from typing import Dict, List, Tuple
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from data_loader import DataLoader
-from schema_error import SchemaError
+from .data_loader import DataLoader
+from .schema_error import SchemaError
 
 logger = logging.getLogger(__name__)
 
@@ -189,7 +189,7 @@ class Mimic4DataLoader(DataLoader):
             if col == "demographic_vec":
                 width = 8
             elif col.endswith("_embedding"):
-                width = 768
+                width = self._config.EMBEDDING_DIM
                 embedding_columns.append(col)
             else:
                 raise SchemaError(
@@ -259,7 +259,7 @@ class Mimic4DataLoader(DataLoader):
         if names != expected_columns:
             raise SchemaError(
                 "Column order mismatch; expected canonical order from PREPROCESSING_DATA_MODEL.md Section 3.12. "
-                "Re-run preprocessing to regenerate final_cdss_dataset.parquet"
+                "Re-run preprocessing to regenerate full_cdss_dataset.parquet"
             )
 
     @staticmethod
