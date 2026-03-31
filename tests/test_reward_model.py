@@ -7,8 +7,8 @@ import torch
 from torch import nn
 
 # Add reward_model module path for direct import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "reward_model"))
-from reward_model import RewardModel  # noqa: E402
+#sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "reward_model"))
+from src.reward_model.reward_model import RewardModel  # noqa: E402
 
 
 @pytest.fixture

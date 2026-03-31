@@ -9,11 +9,11 @@ import pytest
 import torch
 
 # Add reward_model module path for direct import
-sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "reward_model"))
-from mimic4_data_loader import Mimic4DataLoader  # noqa: E402
-from parquet_dataset import ParquetDataset  # noqa: E402
-from reward_model_config import RewardModelConfig  # noqa: E402
-from schema_error import SchemaError  # noqa: E402
+#sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "src", "reward_model"))
+from src.reward_model.mimic4_data_loader import Mimic4DataLoader  # noqa: E402
+from src.reward_model.parquet_dataset import ParquetDataset  # noqa: E402
+from src.reward_model.reward_model_config import RewardModelConfig  # noqa: E402
+from src.reward_model.schema_error import SchemaError  # noqa: E402
 
 
 @pytest.fixture
