@@ -395,7 +395,7 @@ Optional post-processing step that reduces the dimensionality of each embedding 
 
 **Train-only fitting:** Each column's reducer is fitted **only on `is_train == True` rows** to prevent leakage. The fitted object is then applied to train/dev/test splits for that column.
 
-**Memory management:** Columns are processed one at a time. For each embedding column: load column → fit on train rows → transform in batches if needed → write reduced column out → release memory. This avoids materialising the entire ~50 GB dataset in RAM and respects the 64 GB limit.
+**Memory management:** Columns are processed one at a time. For each embedding column: load column → fit on train rows → transform in batches if needed → write reduced column out → release memory. This avoids materializing the entire ~50 GB dataset in RAM and respects the 64 GB limit.
 
 **Outputs:**  
 - `reduced_cdss_dataset.parquet` (canonical column order, reduced embedding widths)  

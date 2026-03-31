@@ -18,7 +18,6 @@ repository root). No module reads preprocessing.yaml directly.
 import argparse
 import logging
 import os
-import subprocess
 import sys
 import time
 
@@ -268,6 +267,8 @@ def main() -> None:
             continue
         config["FORCE_RERUN"] = args.force or (module_name in force_modules)
         if module_name == "reduce_dataset":
+            import subprocess
+
             logger.info("")
             logger.info("=" * 70)
             logger.info("  STEP %d/%d — %s", idx, n, module_name)

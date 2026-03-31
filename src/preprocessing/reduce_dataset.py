@@ -16,6 +16,8 @@ from preprocessing_utils import _load_config
 
 logger = logging.getLogger(__name__)
 
+ZERO_VECTOR_THRESHOLD = 1e-6  # Norm threshold to detect true zero (missing) vectors
+
 
 def _setup_logging() -> None:
     logging.basicConfig(
@@ -87,7 +89,7 @@ def run(config: Dict) -> None:
         # Convert to numpy (list of lists) then stack
         X = np.stack(emb_col.to_numpy()).astype(np.float32)
 
-        nonzero_mask = np.linalg.norm(X, axis=1) > 1e-6
+        nonzero_mask = np.linalg.norm(X, axis=1) > ZERO_VECTOR_THRESHOLD
         fit_mask = is_train & nonzero_mask
         fit_rows = int(fit_mask.sum())
         feature_dim = X.shape[1]
@@ -105,7 +107,10 @@ def run(config: Dict) -> None:
                 n_components,
                 fit_rows,
             )
-            model = PCA(n_components=n_components) if method == "pca_nonzero" else TruncatedSVD(n_components=n_components)
+            if method == "pca_nonzero":
+                model = PCA(n_components=n_components)
+            else:
+                model = TruncatedSVD(n_components=n_components)
             model.fit(X[fit_mask])
             X_reduced = np.zeros((n_rows, target_dim), dtype=np.float32)
             if nonzero_mask.any():
