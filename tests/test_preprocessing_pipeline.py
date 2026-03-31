@@ -13,6 +13,8 @@ import unittest
 
 import numpy as np
 import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
 # Add the preprocessing directory to the path so we can import modules
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'src', 'preprocessing'))
@@ -447,6 +449,76 @@ class TestCombineDataset(unittest.TestCase):
         self.assertIn("split", out.columns)
         self.assertIn("y1_mortality", out.columns)
         self.assertEqual(len(out), 2)
+
+
+class TestReduceDataset(unittest.TestCase):
+    """Tests for reduce_dataset.py dimensionality reduction."""
+
+    def setUp(self):
+        self.tmp = tempfile.mkdtemp()
+        self.classifications_dir = os.path.join(self.tmp, "classifications")
+        self.output_dir = os.path.join(self.tmp, "reduction")
+        os.makedirs(self.classifications_dir)
+        rng = np.random.default_rng(0)
+        embeddings = np.array([
+            rng.random(8),
+            np.zeros(8),
+            rng.random(8),
+            np.zeros(8),
+        ], dtype=np.float32)
+        embedding_array = pa.FixedSizeListArray.from_arrays(
+            pa.array(embeddings.reshape(-1), type=pa.float32()),
+            8,
+        )
+        table = pa.Table.from_arrays(
+            [
+                pa.array([101, 102, 103, 104], type=pa.int64()),
+                pa.array(["train", "train", "dev", "dev"], type=pa.string()),
+                embedding_array,
+            ],
+            names=["hadm_id", "split", "lab_blood_gas_embedding"],
+        )
+        pq.write_table(
+            table,
+            os.path.join(self.classifications_dir, "final_cdss_dataset.parquet"),
+            compression="snappy",
+        )
+
+    def tearDown(self):
+        import shutil
+        shutil.rmtree(self.tmp)
+
+    def test_reduction_preserves_zero_vectors(self):
+        """Zero rows stay zero while non-zero rows are reduced."""
+        import reduce_dataset
+        config = {
+            "REDUCTION_ENABLED": True,
+            "REDUCTION_METHOD": "svd",
+            "REDUCED_EMBEDDING_DIM": 4,
+            "CLASSIFICATIONS_DIR": self.classifications_dir,
+            "REDUCTION_OUTPUT_DIR": self.output_dir,
+        }
+        reduce_dataset.run(config)
+
+        reduced_path = os.path.join(self.output_dir, "reduced_cdss_dataset.parquet")
+        self.assertTrue(os.path.exists(reduced_path))
+        df = pd.read_parquet(reduced_path)
+        embeddings = [list(row) for row in df["lab_blood_gas_embedding"].tolist()]
+        self.assertEqual(len(embeddings), 4)
+        for emb in embeddings:
+            self.assertEqual(len(emb), 4)
+
+        zero_vec = [0.0, 0.0, 0.0, 0.0]
+        self.assertEqual(embeddings[1], zero_vec)
+        self.assertEqual(embeddings[3], zero_vec)
+
+        def _is_zero(vec):
+            return all(abs(x) < 1e-8 for x in vec)
+
+        self.assertFalse(_is_zero(embeddings[0]))
+        self.assertFalse(_is_zero(embeddings[2]))
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, "fitted_transforms.pkl")))
+        self.assertTrue(os.path.exists(os.path.join(self.output_dir, "variance_stats.json")))
 
 
 class TestConfigLoading(unittest.TestCase):

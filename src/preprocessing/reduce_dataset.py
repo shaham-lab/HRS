@@ -62,7 +62,7 @@ def run(config: Dict) -> None:
     logger.info("Loading split column to build training mask…")
     pf = pq.ParquetFile(final_path)
     split_col = pf.read(columns=["split"]).column(0).combine_chunks()
-    split_np = split_col.to_numpy()
+    split_np = split_col.to_numpy(zero_copy_only=False)
     is_train = split_np == "train"
     n_rows = len(is_train)
     logger.info("Rows: %d (train=%d)", n_rows, int(is_train.sum()))
@@ -72,7 +72,7 @@ def run(config: Dict) -> None:
     fitted_transforms: Dict[str, object] = {}
     variance_stats: Dict[str, float] = {}
 
-    for field in pf.schema:
+    for field in pf.schema_arrow:
         col_name = field.name
         logger.info("Processing column: %s", col_name)
         if not col_name.endswith("_embedding"):
@@ -86,7 +86,7 @@ def run(config: Dict) -> None:
         emb_col = col_table.column(0).combine_chunks()
         # Convert to numpy (list of lists) then stack
         try:
-            X = np.stack(emb_col.to_numpy()).astype(np.float32)
+            X = np.stack(emb_col.to_numpy(zero_copy_only=False)).astype(np.float32)
         except ValueError as exc:
             raise ValueError(f"Failed to stack embedding column '{col_name}': {exc}") from exc
 
