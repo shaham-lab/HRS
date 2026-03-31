@@ -7,7 +7,6 @@ import sys
 from typing import Dict
 
 import numpy as np
-import pandas as pd  # noqa: F401  # Imported for parity with other modules (not used directly)
 import pyarrow as pa
 import pyarrow.parquet as pq
 from sklearn.decomposition import PCA, TruncatedSVD
@@ -86,7 +85,7 @@ def run(config: Dict) -> None:
         col_table = pf.read(columns=[col_name])
         emb_col = col_table.column(0).combine_chunks()
         # Convert to numpy (list of lists) then stack
-        X = np.stack(emb_col.to_numpy()).astype(np.float32, copy=False)
+        X = np.stack(emb_col.to_numpy()).astype(np.float32)
 
         nonzero_mask = np.linalg.norm(X, axis=1) > 1e-6
         fit_mask = is_train & nonzero_mask
@@ -111,7 +110,7 @@ def run(config: Dict) -> None:
             model.fit(X[fit_mask])
             X_reduced = np.zeros((n_rows, target_dim), dtype=np.float32)
             if nonzero_mask.any():
-                transformed = model.transform(X[nonzero_mask]).astype(np.float32, copy=False)
+                transformed = model.transform(X[nonzero_mask]).astype(np.float32)
                 X_reduced[nonzero_mask, : transformed.shape[1]] = transformed
             fitted_transforms[col_name] = model
             variance_stats[col_name] = float(getattr(model, "explained_variance_ratio_", np.array([])).sum())
