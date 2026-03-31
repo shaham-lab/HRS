@@ -353,7 +353,7 @@ Documented here for quick reference — generation occurs only after `final_cdss
 
 **Schema:** Identical to `final_cdss_dataset.parquet`, including canonical column order and data types. All metadata, label, structured, and embedding columns are present; only the embedding vector lengths differ.
 
-**Embedding dimensionality:** Each `*_embedding` column stores `float32[128]` by default (configurable via `REDUCED_EMBEDDING_DIM`). With 55 embedding columns, the total feature vector per admission shrinks from 42,248 floats (8 + 55 × 768) to 7,048 floats (8 + 55 × 128).
+**Embedding dimensionality:** Each `*_embedding` column stores `float32[128]` by default (configurable via `REDUCED_EMBEDDING_DIM`). With 55 embedding columns, the total feature vector per admission shrinks from 42,248 floats (8 structured demographics + 55 × 768) to 7,048 floats (8 structured demographics + 55 × 128).
 
 **Artefacts:** Saved alongside the parquet are (1) the fitted reduction transform objects per embedding column for inference-time application and (2) explained variance statistics (JSON/txt) for auditability.
 

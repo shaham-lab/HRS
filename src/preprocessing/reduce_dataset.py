@@ -4,7 +4,7 @@ import logging
 import os
 import pickle
 import sys
-from typing import Dict
+from typing import Dict, List
 
 import numpy as np
 import pyarrow as pa
@@ -67,8 +67,8 @@ def run(config: Dict) -> None:
     n_rows = len(is_train)
     logger.info("Rows: %d (train=%d)", n_rows, int(is_train.sum()))
 
-    arrays: list[pa.Array] = []
-    names: list[str] = []
+    arrays: List[pa.Array] = []
+    names: List[str] = []
     fitted_transforms: Dict[str, object] = {}
     variance_stats: Dict[str, float] = {}
 
@@ -116,8 +116,8 @@ def run(config: Dict) -> None:
             variance_stats[col_name] = float(getattr(model, "explained_variance_ratio_", np.array([])).sum())
 
         flat = X_reduced.reshape(-1)
-        list_array = pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float32()), target_dim)
-        arrays.append(list_array)
+        embedding_array = pa.FixedSizeListArray.from_arrays(pa.array(flat, type=pa.float32()), target_dim)
+        arrays.append(embedding_array)
         names.append(col_name)
 
         del X
