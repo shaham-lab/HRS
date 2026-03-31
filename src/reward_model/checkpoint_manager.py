@@ -5,6 +5,7 @@ from typing import Dict, Optional, Tuple
 import torch
 
 from schema_error import SchemaError
+from reward_model_utils import unwrap_ddp
 
 
 class CheckpointManager:
@@ -21,10 +22,6 @@ class CheckpointManager:
         self.checkpoint_dir = checkpoint_dir
         self.keep_n = keep_n
         self.checkpoint_dir.mkdir(parents=True, exist_ok=True)
-
-    @staticmethod
-    def _unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
-        return model.module if hasattr(model, "module") else model
 
     @staticmethod
     def validate_feature_index_map(
@@ -64,7 +61,7 @@ class CheckpointManager:
         config,
     ) -> Path:
         state = {
-            "model_state_dict": self._unwrap_ddp(model).state_dict(),
+            "model_state_dict": unwrap_ddp(model).state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "scheduler_state_dict": scheduler.state_dict(),
             "epoch": epoch,
@@ -100,7 +97,7 @@ class CheckpointManager:
         config,
     ) -> None:
         state = {
-            "model_state_dict": self._unwrap_ddp(model).state_dict(),
+            "model_state_dict": unwrap_ddp(model).state_dict(),
             "epoch": epoch,
             "best_dev_loss": best_dev_loss,
             "feature_index_map": feature_index_map,

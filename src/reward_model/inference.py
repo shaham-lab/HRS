@@ -24,7 +24,7 @@ from typing import Dict, List, Optional, Tuple
 
 import torch
 
-from reward_mode import RewardModel
+from reward_model import RewardModel
 from reward_model_utils import get_device
 
 logger = logging.getLogger(__name__)

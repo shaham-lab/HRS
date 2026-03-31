@@ -20,7 +20,7 @@
    - [data_loader.py](#data_loaderpy)
    - [checkpoint_manager.py](#checkpoint_managerpy)
    - [mimic4_data_loader.py](#mimic4_data_loaderpy)
-   - [reward_mode.py](#reward_modepy)
+   - [reward_model.py](#reward_modelpy)
    - [masking.py](#maskingpy)
    - [metrics.py](#metricspy)
    - [reward_model_manager.py](#reward_model_managerpy)
@@ -65,12 +65,14 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 | `row_group_block_sampler.py` | `RowGroupBlockSampler` | Sampler that shards row groups round-robin across DDP ranks. |
 | `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, and pos-weights. |
 | `schema_error.py` | `SchemaError` | Custom exception for schema validation failures. |
-| `reward_mode.py` | `RewardModel` | Feedforward MLP with T output heads (one per classification target). |
+| `reward_model.py` | `RewardModel` | Feedforward MLP with T output heads (one per classification target). |
 | `masking.py` | `MaskingSchedule` | Masking curriculum with random/adversarial/none modes. |
 | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model. |
 | `checkpoint_manager.py` | `CheckpointManager` | Manages saving/loading/pruning checkpoints and validates feature index maps on resume. |
 | `inference.py` | `RewardModelInference` | Frozen inference wrapper with calibration parameters. |
+| `metrics.py` | `MetricsLogger` | Encapsulates Parquet appends and schema for training metrics (also houses metric helpers). |
 | `reward_model_manager.py` | `RewardModelManager` | Encapsulates dataset load/broadcast, model + optimizer + scheduler construction, training state, masking curriculum, epoch loop, dev eval, checkpointing. |
+| `calibrate.py` | `TemperatureCalibrator` | Manages dev-split inference and per-head temperature scaling state. |
 
 ### Class vs plain script
 
@@ -78,12 +80,12 @@ Each Python file corresponds to one pipeline concern. Class definitions live in 
 |--------|---------|--------|
 | `data_loader.py` | **Class** (`DataLoader`) | Generic base (no dataset-specific logic); single instantiation per run |
 | `mimic4_data_loader.py` | **Class** (`Mimic4DataLoader`) | MIMIC-IV implementation; validates schema, constructs `DatasetBundle`; single instantiation per run |
-| `reward_mode.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
+| `reward_model.py` | **Class** (`RewardModel`) | Stateful network; instantiated once, called many times via `forward()`; must be wrappable by DDP |
 | `masking.py` | **Class** (`MaskingSchedule`) | Maintains curriculum state across the training loop; epoch advancement is a stateful operation |
-| `metrics.py` | Plain functions | Stateless metrics helpers (`compute_metrics`, `_append_metrics_row`) |
+| `metrics.py` | **Class** (`MetricsLogger`) + Plain functions | Holds persistent metrics path state for Parquet appends; retains stateless metric helpers. |
 | `reward_model_manager.py` | **Class** (`RewardModelManager`) | Holds training state (datasets, model, optimizer, scheduler, masking schedule), epoch loop, checkpointing; owns dev eval helpers |
 | `reward_model_main.py` | Plain script, DDP entry point | CLI parsing, logging setup, runtime init; instantiates `RewardModelManager` and delegates training |
-| `calibrate.py` | Plain script, `run(config)` | Single optimisation pass; no persistent state |
+| `calibrate.py` | **Class** (`TemperatureCalibrator`) + Plain script entry point | Coordinates dev-split inference and temperature scaling with a minimal stateful wrapper |
 | `inference.py` | **Class** (`RewardModelInference`) | Loaded once, called repeatedly per RL step; holds frozen weights and calibration params in memory |
 | `validate_contract.py` | Plain script, CLI tool | One-shot assertion run; exits with code 0 (pass) or 1 (fail) |
 | `export_model.py` | Plain script, CLI tool | One-shot serialisation; no shared state |
@@ -147,7 +149,7 @@ The process group is initialised with the `nccl` backend at the start of `reward
 | `load_and_validate_config(path)` | Load `reward_model.yaml`, validate with Pydantic, return config object (defined in `reward_model_config.py`, re-exported) |
 | `get_device(local_rank)` | Return `torch.device('cuda', local_rank)` or `cpu` with CUDA availability check |
 | `sigmoid_crossover(epoch, total_epochs, start_ratios, end_ratios, midpoint)` | Compute current masking mode probabilities for a given epoch (implemented in `masking.py`) |
-| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_manager.py`) |
+| `unwrap_ddp(model)` | Return `model.module` if wrapped in DDP, else `model` directly (implemented in `reward_model_utils.py`) |
 | `RewardModelManager.broadcast_tensor(tensor, src_rank)` | Broadcast a scalar tensor from `src_rank` to all ranks via process group (class method on `reward_model_manager.py`) |
 | **`ParquetDataset(Dataset)`** | Class-only module `parquet_dataset.py`. Lazy row-group reads from `final_cdss_dataset.parquet`; constructor accepts open PyArrow file handle, split row indices, the feature index map, and `DATASET_ROW_GROUP_CACHE_SIZE`. Holds an LRU cache of at most `DATASET_ROW_GROUP_CACHE_SIZE` decompressed row groups in memory at any time. `__getitem__(i)` resolves the row group containing row `i`, reads it from the LRU cache or from disk, slices the requested row, concatenates feature columns in index map order into a float32 tensor, and returns `(X, y1, y2)`. `__len__` returns the number of rows in the split. Re-exported by `reward_model_utils.py`. |
 | **`RowGroupBlockSampler(Sampler)`** | Class-only module `row_group_block_sampler.py`. Row-group-aware sampler to preserve Parquet row-group locality and partition row groups round-robin across DDP ranks. Re-exported by `reward_model_utils.py`. |
@@ -216,7 +218,7 @@ Houses the MIMIC-IV `Mimic4DataLoader` implementation built on the generic `Data
 
 ---
 
-### `reward_mode.py`
+### `reward_model.py`
 
 Defines the `RewardModel` class — a feedforward MLP with a gradual funnel and T independent sigmoid output heads, one per classification target.
 
@@ -258,11 +260,11 @@ The constructor accepts the `feature_index_map`, `num_always_visible` (integer �
 
 ### `metrics.py`
 
-Plain module-level functions. No class, no state.
+Contains pure metric helpers plus the `MetricsLogger` class.
 
 `compute_metrics(logits_list, labels_list, masked=False)` applies sigmoid to each logits tensor, constructs per-target valid-sample masks, and computes AUROC, AUPRC, and ECE for each target using scikit-learn. Returns a dict keyed by target index: `{0: {'auroc': ..., 'auprc': ..., 'ece': ...}, 1: {...}, ...}`. The `masked` flag is included in the returned dict as a tag so callers can distinguish masked-input metrics from unmasked-input metrics in the epoch log. ECE uses equal-mass binning (adaptive bin edges via `np.percentile`) rather than equal-width binning, to produce reliable calibration estimates under class imbalance. Called on the dev split by rank 0 at epoch end using unmasked inputs. Also called on training batches for diagnostic AUROC tracking — see Section 6.4.
 
-`_append_metrics_row(metrics_path, row, num_targets)` appends one epoch of metrics to the Parquet file at `metrics_path` using an atomic write (write temp, rename). Creates the file with the correct schema if it does not exist. Rank 0 only.
+`MetricsLogger(Path, num_targets)` owns the persistent `training_metrics.parquet` path and appends rows using an atomic write (write temp, rename). Creates the file with the correct schema if it does not exist. Rank 0 only.
 
 **Config keys used:** None directly; the caller supplies already-computed values.
 
@@ -300,20 +302,22 @@ Plain script and DDP entry point launched by `torchrun`. It wires CLI/runtime co
 
 ### `calibrate.py`
 
-Applies temperature scaling to the best trained model. Plain script with `run(config)` entry point. Single GPU — no DDP.
+Temperature-scaling calibration is owned by the `TemperatureCalibrator` class. Single GPU — no DDP.
 
-**Algorithm:**
-1. Load `best_model.pt` from `CHECKPOINT_DIR`. Extract model state dict and the config snapshot from the checkpoint (not the current `config/reward_model.yaml` — the checkpoint config is authoritative for architecture).
-2. Instantiate `RewardModel` from the checkpoint config snapshot. Load state dict. Move to device. Call `model.eval()`.
-3. Load the dev split from `final_cdss_dataset.parquet`.
-4. Run a full forward pass on the dev split with `torch.no_grad()` to collect raw logits for all T targets.
-5. For each target i: construct the valid-sample mask `~torch.isnan(labels_i)`. Optimise scalar temperature `T_i` in log-space — define `log_T = torch.nn.Parameter(torch.zeros(1))` and recover `T = exp(log_T)` inside the closure. This guarantees T > 0 throughout optimisation, avoiding erratic gradients at the clamp boundary that occur with direct optimisation of T. Minimise negative log-likelihood on the valid-sample subset using L-BFGS. Return `max(exp(log_T).item(), 1e-8)` as the fitted temperature for target i.
-6. Log pre- and post-calibration ECE for all T heads for audit.
-7. Write `{'T_0': float, 'T_1': float, ..., 'T_{T-1}': float}` to `CALIBRATION_PARAMS_PATH` as JSON.
-7. Log pre- and post-calibration ECE for both heads for audit.
-8. Log the calibration parameters and export path.
+**Class: `TemperatureCalibrator`**
 
-**Config keys used:** `CHECKPOINT_DIR`, `DATASET_PATH`, `CALIBRATION_PARAMS_PATH`.
+- `__init__(config, device)`: Loads `best_model.pt`, reconstructs the `RewardModel` from the checkpoint snapshot (checkpoint config is authoritative for architecture), moves it to `device`, sets eval mode, and freezes gradients. Loads the dev split via `Mimic4DataLoader(config)` and stores `dev_dataset`. Retains `feature_index_map` and the checkpoint config snapshot for downstream use.
+- `_collect_logits()`: Builds a single-worker `DataLoader` on the dev split and, under `torch.no_grad()`, runs a full forward pass to collect per-head logits and labels as flat tensors. Returns `(logits_list, labels_list)` (lists of length T).
+- `calibrate_and_save()`: Calls `_collect_logits()`, then for each target i: constructs mask `~np.isnan(labels_i)`, logs pre-calibration ECE via `_compute_ece_from_logits(logits_i, labels_i, T=1.0, mask)`, fits `T_i` via `_fit_temperature` (log-space L-BFGS), logs post-calibration ECE, and writes `{f"T_{i}": float(T_i)}` to `CALIBRATION_PARAMS_PATH` as JSON (directory created if missing).
+
+**Pure helpers (module-level, unchanged):**
+- `_compute_ece_from_logits(logits, labels, T, mask)`: Expected Calibration Error with adaptive binning.
+- `_fit_temperature(logits, labels, mask)`: Log-space scalar temperature fitting with L-BFGS, clamped to `1e-8` minimum.
+
+**Entry point:**
+`main()` parses `--config`, sets up logging, selects `torch.device("cuda" if available else "cpu")`, instantiates `TemperatureCalibrator`, and calls `calibrate_and_save()`.
+
+**Config keys used:** `CHECKPOINT_DIR`, `DATASET_PATH`, `CALIBRATION_PARAMS_PATH`, `BATCH_SIZE_PER_GPU`.
 
 ---
 
@@ -355,7 +359,7 @@ Standalone CLI tool. Produces a self-contained artefact that `inference.py` can 
 **Algorithm:**
 1. Load `best_model.pt` from `CHECKPOINT_DIR`.
 2. Load `calibration_params.json` from `CALIBRATION_PARAMS_PATH`.
-3. Construct an export dict: model state dict (unwrapped from DDP if needed via `unwrap_ddp()`), feature index map snapshot, T calibration temperature values (one per target), model architecture config (layer widths, dropout), and input dimensionality.
+3. Construct an export dict: model state dict, feature index map snapshot, T calibration temperature values (one per target), model architecture config (layer widths, dropout), and input dimensionality.
 4. Write to `EXPORT_PATH` as a PyTorch `.pt` file.
 5. Log the export path and total model parameter count.
 

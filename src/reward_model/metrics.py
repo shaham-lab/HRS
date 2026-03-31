@@ -74,70 +74,73 @@ def compute_metrics(
     return result
 
 
-def _append_metrics_row(metrics_path: Path, row: Dict, num_targets: int = 2) -> None:
-    """Append one epoch's metrics to *metrics_path* (rank 0 only).
+class MetricsLogger:
+    def __init__(self, metrics_path: Path, num_targets: int) -> None:
+        self.metrics_path = metrics_path
+        self.num_targets = num_targets
 
-    Uses an atomic write (write to temp file, rename) so that a SLURM
-    preemption mid-write cannot corrupt the Parquet file.  If the file does
-    not yet exist it is created with the correct schema.
+    def append_row(self, row: Dict) -> None:
+        """Append one epoch's metrics to *metrics_path* (rank 0 only).
 
-    Columns written (Architecture §9):
-        epoch, wall_time_s, masking_random_pct, masking_adversarial_pct,
-        masking_none_pct, loss_total,
-        loss_target_<i>, auroc_target_<i>, auprc_target_<i>, ece_target_<i>
-        for each i in 0..num_targets-1.
+        Uses an atomic write (write to temp file, rename) so that a SLURM
+        preemption mid-write cannot corrupt the Parquet file. If the file does
+        not yet exist it is created with the correct schema.
 
-    Args:
-        metrics_path: Path to ``training_metrics.parquet``.
-        row: Dict mapping column name to scalar value for this epoch.
-        num_targets: Number of classification targets T.
-    """
-    import pyarrow as pa
-    import pyarrow.parquet as pq
+        Columns written (Architecture §9):
+            epoch, wall_time_s, masking_random_pct, masking_adversarial_pct,
+            masking_none_pct, loss_total,
+            loss_target_<i>, auroc_target_<i>, auprc_target_<i>, ece_target_<i>
+            for each i in 0..num_targets-1.
+        """
+        import pyarrow as pa
+        import pyarrow.parquet as pq
 
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    columns = [
-        "epoch",
-        "wall_time_s",
-        "masking_random_pct",
-        "masking_adversarial_pct",
-        "masking_none_pct",
-        "loss_total",
-    ]
-    for i in range(num_targets):
-        columns += [
-            f"loss_target_{i}",
-            f"auroc_target_{i}",
-            f"auprc_target_{i}",
-            f"ece_target_{i}",
+        metrics_path = self.metrics_path
+        num_targets = self.num_targets
+
+        metrics_path.parent.mkdir(parents=True, exist_ok=True)
+        columns = [
+            "epoch",
+            "wall_time_s",
+            "masking_random_pct",
+            "masking_adversarial_pct",
+            "masking_none_pct",
+            "loss_total",
         ]
+        for i in range(num_targets):
+            columns += [
+                f"loss_target_{i}",
+                f"auroc_target_{i}",
+                f"auprc_target_{i}",
+                f"ece_target_{i}",
+            ]
 
-    schema_fields = [
-        ("epoch", pa.int64()),
-        ("wall_time_s", pa.float64()),
-        ("masking_random_pct", pa.float64()),
-        ("masking_adversarial_pct", pa.float64()),
-        ("masking_none_pct", pa.float64()),
-        ("loss_total", pa.float64()),
-    ]
-    for i in range(num_targets):
-        schema_fields += [
-            (f"loss_target_{i}", pa.float64()),
-            (f"auroc_target_{i}", pa.float64()),
-            (f"auprc_target_{i}", pa.float64()),
-            (f"ece_target_{i}", pa.float64()),
+        schema_fields = [
+            ("epoch", pa.int64()),
+            ("wall_time_s", pa.float64()),
+            ("masking_random_pct", pa.float64()),
+            ("masking_adversarial_pct", pa.float64()),
+            ("masking_none_pct", pa.float64()),
+            ("loss_total", pa.float64()),
         ]
-    schema = pa.schema(schema_fields)
+        for i in range(num_targets):
+            schema_fields += [
+                (f"loss_target_{i}", pa.float64()),
+                (f"auroc_target_{i}", pa.float64()),
+                (f"auprc_target_{i}", pa.float64()),
+                (f"ece_target_{i}", pa.float64()),
+            ]
+        schema = pa.schema(schema_fields)
 
-    new_row = {name: [row[name]] for name in columns}
-    new_table = pa.table(new_row, schema=schema)
+        new_row = {name: [row[name]] for name in columns}
+        new_table = pa.table(new_row, schema=schema)
 
-    if metrics_path.exists():
-        existing = pq.read_table(metrics_path)
-        table = pa.concat_tables([existing, new_table])
-    else:
-        table = new_table
+        if metrics_path.exists():
+            existing = pq.read_table(metrics_path)
+            table = pa.concat_tables([existing, new_table])
+        else:
+            table = new_table
 
-    tmp_path = metrics_path.with_suffix(".parquet.tmp")
-    pq.write_table(table, tmp_path)
-    os.replace(tmp_path, metrics_path)
+        tmp_path = metrics_path.with_suffix(".parquet.tmp")
+        pq.write_table(table, tmp_path)
+        os.replace(tmp_path, metrics_path)

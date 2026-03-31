@@ -5,7 +5,6 @@ RewardModelManager class. The torchrun entry point lives in
 ``reward_model_main.py``.
 """
 
-import argparse
 import logging
 import time
 from contextlib import nullcontext
@@ -18,64 +17,16 @@ from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from checkpoint_manager import CheckpointManager
-from metrics import _append_metrics_row, compute_metrics
+from metrics import MetricsLogger, compute_metrics
 from mimic4_data_loader import Mimic4DataLoader
 from masking import MaskingSchedule
 from reward_model import RewardModel
 from dataset_bundle import DatasetBundle
 from reward_model_config import RewardModelConfig
 from row_group_block_sampler import RowGroupBlockSampler
+from reward_model_utils import unwrap_ddp
 
 logger = logging.getLogger(__name__)
-
-
-def unwrap_ddp(model: torch.nn.Module) -> torch.nn.Module:
-    """Unwrap a DDP-wrapped model to its underlying module."""
-    return model.module if hasattr(model, "module") else model
-
-
-def _resume_from_checkpoint(
-    args: argparse.Namespace,
-    checkpoint_manager: CheckpointManager,
-    feature_index_map: Dict[str, Tuple[int, int]],
-    config: RewardModelConfig,
-    rank: int,
-    is_ddp: bool,
-) -> Tuple[Optional[dict], int, float]:
-    start_epoch = 0
-    best_dev_loss = float("inf")
-    ckpt_state: Optional[dict] = None
-
-    if args.resume:
-        latest = checkpoint_manager.find_latest()
-        if latest is None:
-            raise RuntimeError("Resume requested but no checkpoint found")
-        if rank == 0:
-            ckpt_state = checkpoint_manager.load(latest, feature_index_map)
-        if is_ddp:
-            obj_state: list = [ckpt_state]
-            dist.broadcast_object_list(obj_state, src=0)
-            ckpt_state = obj_state[0]
-            dist.barrier()
-        if ckpt_state is None:
-            raise RuntimeError("Checkpoint state could not be loaded")
-        start_epoch = ckpt_state["epoch"] + 1
-        best_dev_loss = ckpt_state.get("best_dev_loss", best_dev_loss)
-
-    return ckpt_state, start_epoch, best_dev_loss
-
-
-def _maybe_load_states(
-    model: torch.nn.Module,
-    optimizer: torch.optim.Optimizer,
-    scheduler: torch.optim.lr_scheduler.LRScheduler,
-    ckpt_state: Optional[dict],
-) -> None:
-    if ckpt_state is None:
-        return
-    unwrap_ddp(model).load_state_dict(ckpt_state["model_state_dict"])
-    optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
-    scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
 
 
 class RewardModelManager:
@@ -101,10 +52,13 @@ class RewardModelManager:
         self.dev_dataset = self.bundle.dev_dataset
         self.input_dim: int = self.bundle.input_dim
 
+        if self.rank == 0:
+            logger.info("Successfully loaded datasets and broadcasted positive weights.")
+
         self.checkpoint_manager = CheckpointManager(
             Path(self.config.CHECKPOINT_DIR), self.config.CHECKPOINT_KEEP_N
         )
-        self.metrics_path = Path(self.config.METRICS_PATH)
+        self.metrics_logger = MetricsLogger(Path(self.config.METRICS_PATH), self.config.NUM_TARGETS)
 
         self.model = self._build_model()
         self.optimizer = self._build_optimizer()
@@ -112,6 +66,34 @@ class RewardModelManager:
         self.masking_schedule: Optional[MaskingSchedule] = None
         self.train_loader: Optional[DataLoader] = None
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+
+        if self.rank == 0:
+            logger.info(f"Initialized RewardModel with input_dim={self.input_dim} and DDP={self.is_ddp}")
+
+    def _maybe_load_states(self, ckpt_state: Optional[dict]) -> None:
+        if ckpt_state is None:
+            return
+        unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
+        self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+        self.scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+
+    def resume_from_checkpoint(self) -> Tuple[dict, int, float]:
+        latest = self.checkpoint_manager.find_latest()
+        if latest is None:
+            raise RuntimeError("Resume requested but no checkpoint found")
+        ckpt_state: Optional[dict] = None
+        if self.rank == 0:
+            ckpt_state = self.checkpoint_manager.load(latest, self.feature_index_map)
+        if self.is_ddp:
+            obj_state: list = [ckpt_state]
+            dist.broadcast_object_list(obj_state, src=0)
+            ckpt_state = obj_state[0]
+            dist.barrier()
+        if ckpt_state is None:
+            raise RuntimeError("Checkpoint state could not be loaded")
+        start_epoch = ckpt_state["epoch"] + 1
+        best_dev_loss = ckpt_state.get("best_dev_loss", float("inf"))
+        return ckpt_state, start_epoch, best_dev_loss
 
     def broadcast_tensor(self, tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
         """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""
@@ -289,7 +271,9 @@ class RewardModelManager:
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
         start_step = start_epoch * steps_per_epoch
         self.scheduler = self._build_lr_scheduler(steps_per_epoch, start_step)
-        _maybe_load_states(self.model, self.optimizer, self.scheduler, ckpt_state)
+        self._maybe_load_states(ckpt_state)
+        if self.rank == 0:
+            logger.info(f"Training state setup complete. Resuming from epoch {start_epoch}.")
 
     def _build_masking_schedule(self, ckpt_state: Optional[dict]) -> MaskingSchedule:
         if ckpt_state is not None:
@@ -390,6 +374,9 @@ class RewardModelManager:
         epochs_without_improve = 0
         last_epoch_completed = start_epoch - 1
 
+        if self.rank == 0:
+            logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
+
         for epoch in range(start_epoch, self.config.MAX_EPOCHS):
             if self.train_loader is None:
                 break
@@ -427,13 +414,19 @@ class RewardModelManager:
                     row[f"auroc_target_{i}"] = dev_metrics[f"auroc_target_{i}"]
                     row[f"auprc_target_{i}"] = dev_metrics[f"auprc_target_{i}"]
                     row[f"ece_target_{i}"] = dev_metrics[f"ece_target_{i}"]
-                _append_metrics_row(self.metrics_path, row, num_targets=T)
+                logger.info(
+                    f"Epoch {epoch} completed in {time.time() - epoch_start:.2f}s | "
+                    f"Dev Loss: {dev_metrics['loss_total']:.4f} | "
+                    f"Masking (R/A/N): {probs[0]*100:.0f}%/{probs[1]*100:.0f}%/{probs[2]*100:.0f}%"
+                )
+                self.metrics_logger.append_row(row)
 
                 current_dev_loss = dev_metrics["loss_total"]
                 improved = current_dev_loss < best_dev_loss
                 if improved:
                     best_dev_loss = current_dev_loss
                     epochs_without_improve = 0
+                    logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
                     self.checkpoint_manager.save_epoch_checkpoint(
                         self.model,
                         self.optimizer,
@@ -453,6 +446,10 @@ class RewardModelManager:
                     self.checkpoint_manager.prune_old_checkpoints()
                 else:
                     epochs_without_improve += 1
+                    logger.info(
+                        f"Dev loss did not improve. Early stopping patience: "
+                        f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
+                    )
 
                 should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
             else:
@@ -464,6 +461,8 @@ class RewardModelManager:
                 should_stop = bool(stop_tensor.item())
 
             if should_stop:
+                if self.rank == 0:
+                    logger.info(f"Early stopping triggered at epoch {epoch}.")
                 break
 
             if self.is_ddp:
@@ -486,4 +485,9 @@ class RewardModelManager:
         if self.is_ddp:
             dist.barrier()
 
+        if self.rank == 0:
+            logger.info(
+                f"Training finished. Last completed epoch: {last_epoch_completed}, "
+                f"Best Dev Loss: {best_dev_loss:.4f}"
+            )
         return last_epoch_completed, best_dev_loss

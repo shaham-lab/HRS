@@ -10,7 +10,9 @@ import torch.distributed as dist
 
 from reward_model_config import load_and_validate_config
 from reward_model_utils import get_device
-from reward_model_manager import RewardModelManager, _resume_from_checkpoint
+from reward_model_manager import RewardModelManager
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_args() -> argparse.Namespace:
@@ -36,7 +38,7 @@ def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
     configured_gpus = int(num_gpus)
     available_gpus = torch.cuda.device_count()
     if configured_gpus == 1 or available_gpus < 2:
-        logging.warning("Insufficient CUDA devices for DDP — running in single-process mode")
+        logger.warning("Insufficient CUDA devices for DDP — running in single-process mode")
         return 0, 0, 1, False
 
     rank = int(os.environ.get("RANK", "0"))
@@ -44,7 +46,7 @@ def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
 
     if world_size <= 1:
-        logging.warning("WORLD_SIZE <= 1 — running in single-process mode")
+        logger.warning("WORLD_SIZE <= 1 — running in single-process mode")
         return 0, 0, 1, False
 
     torch.cuda.set_device(local_rank)
@@ -68,9 +70,12 @@ def main() -> int:
     rank, local_rank, world_size, is_ddp, device = _init_runtime(config)
 
     manager = RewardModelManager(config, rank, local_rank, world_size, is_ddp, device)
-    ckpt_state, start_epoch, best_dev_loss = _resume_from_checkpoint(
-        args, manager.checkpoint_manager, manager.feature_index_map, config, rank, is_ddp
-    )
+    ckpt_state = None
+    start_epoch = 0
+    best_dev_loss = float("inf")
+
+    if args.resume:
+        ckpt_state, start_epoch, best_dev_loss = manager.resume_from_checkpoint()
     manager.setup_training_state(ckpt_state, start_epoch)
     manager.train_epochs(start_epoch, best_dev_loss)
 

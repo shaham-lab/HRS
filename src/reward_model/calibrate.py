@@ -23,10 +23,8 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader
 
-from reward_mode import RewardModel
-from parquet_dataset import ParquetDataset
-from reward_model_config import RewardModelConfig,load_and_validate_config
-from reward_model_utils import get_device
+from reward_model import RewardModel
+from reward_model_config import RewardModelConfig, load_and_validate_config
 from mimic4_data_loader import Mimic4DataLoader
 
 logger = logging.getLogger(__name__)
@@ -89,57 +87,6 @@ def _load_model_from_checkpoint(
 # ---------------------------------------------------------------------------
 # Forward pass
 # ---------------------------------------------------------------------------
-
-
-def _run_forward_pass(
-    model: RewardModel,
-    dataset: ParquetDataset,
-    device: torch.device,
-    batch_size: int,
-) -> Tuple[List[np.ndarray], List[np.ndarray]]:
-    """Run a full forward pass over *dataset* with ``torch.no_grad()``.
-
-    Iterates the dataset in a ``DataLoader`` with ``num_workers=0`` (no worker
-    processes) — calibration is single-pass on a single GPU and spawning
-    workers adds overhead without benefit.  Accumulates raw (un-calibrated)
-    logits for all T heads together with ground-truth labels.  No masking is
-    applied — the full feature vector is passed to the model.
-
-    Args:
-        model: Frozen ``RewardModel`` in eval mode on ``device``.
-        dataset: ``ParquetDataset`` instance for the target split (typically
-            the dev split).
-        device: Device on which batch tensors are placed before the forward
-            pass.
-        batch_size: Number of samples per DataLoader batch.  Pass
-            ``config.BATCH_SIZE_PER_GPU`` from ``run()``.
-
-    Returns:
-        Two-tuple of lists, each of length T (number of model heads):
-
-        - *logits_list* — Raw logits per target, each a flat NumPy array of
-          shape ``(N,)``, float32.
-        - *labels_list* — Ground-truth labels per target, each a flat NumPy
-          array of shape ``(N,)``, float32, with NaN where a target is not
-          applicable for a sample.
-    """
-    num_targets = len(model.heads)
-    dataloader = DataLoader(dataset, batch_size=batch_size, num_workers=0, shuffle=False)
-
-    all_logits: List[List[np.ndarray]] = [[] for _ in range(num_targets)]
-    all_labels: List[List[np.ndarray]] = [[] for _ in range(num_targets)]
-
-    with torch.no_grad():
-        for batch in dataloader:
-            X = batch[0].to(device)
-            model_outputs = model(X)
-            for i in range(num_targets):
-                all_logits[i].append(model_outputs[i].detach().cpu().numpy().reshape(-1))
-                all_labels[i].append(batch[i + 1].cpu().numpy().reshape(-1))
-
-    logits_list = [np.concatenate(all_logits[i], axis=0) for i in range(num_targets)]
-    labels_list = [np.concatenate(all_labels[i], axis=0) for i in range(num_targets)]
-    return logits_list, labels_list
 
 
 # ---------------------------------------------------------------------------
@@ -255,57 +202,66 @@ def _compute_ece_from_logits(
 # ---------------------------------------------------------------------------
 
 
-def run(config: RewardModelConfig) -> None:
-    """Run temperature scaling calibration on the dev split.
+class TemperatureCalibrator:
+    """Manages dev-split forward pass and per-head temperature scaling."""
 
-    Algorithm (Detailed Design §5, calibrate.py):
+    def __init__(self, config: RewardModelConfig, device: torch.device):
+        self.config = config
+        self.device = device
 
-    1. Load ``best_model.pt`` from ``CHECKPOINT_DIR``.  Extract model state
-       dict and config snapshot; instantiate ``RewardModel`` from the
-       checkpoint config snapshot (not the current YAML).
-    2. Load the dev split from ``DATASET_PATH`` via ``Mimic4DataLoader(config).load()``.
-    3. Run a full forward pass with ``torch.no_grad()`` to collect raw logits
-       for all T heads.
-    4. For each target i in range(T): construct the valid-sample mask
-       (``~np.isnan(labels_list[i])``), fit ``T_i`` via L-BFGS on NLL.
-    5. Log pre- and post-calibration ECE for all heads for audit.
-    6. Write ``{f"T_{i}": float(T_i) for i in range(T)}`` to
-       ``CALIBRATION_PARAMS_PATH`` as JSON.
+        checkpoint_path = Path(self.config.CHECKPOINT_DIR) / "best_model.pt"
+        self.model, self.feature_index_map, self.config_snapshot = _load_model_from_checkpoint(
+            checkpoint_path, self.device
+        )
+        self.num_targets = self.config_snapshot.get("NUM_TARGETS", 2)
 
-    Config keys used: ``CHECKPOINT_DIR``, ``DATASET_PATH``,
-    ``CALIBRATION_PARAMS_PATH``.
+        bundle = Mimic4DataLoader(self.config).load()
+        self.dev_dataset = bundle.dev_dataset
 
-    Args:
-        config: Validated ``RewardModelConfig`` instance.
-    """
-    device = get_device(local_rank=0)
-    checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
-    model, feature_index_map, config_snapshot = _load_model_from_checkpoint(checkpoint_path, device)
-    num_targets = config_snapshot.get("NUM_TARGETS", 2)
+    def _collect_logits(self) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
+        """Run dev forward pass to collect logits and labels per head."""
+        dataloader = DataLoader(
+            self.dev_dataset, batch_size=self.config.BATCH_SIZE_PER_GPU, num_workers=0, shuffle=False
+        )
+        all_logits: List[List[torch.Tensor]] = [[] for _ in range(self.num_targets)]
+        all_labels: List[List[torch.Tensor]] = [[] for _ in range(self.num_targets)]
 
-    bundle = Mimic4DataLoader(config).load()
-    logits_list, labels_list = _run_forward_pass(
-        model,
-        bundle.dev_dataset,
-        device,
-        config.BATCH_SIZE_PER_GPU,
-    )
+        with torch.no_grad():
+            for batch in dataloader:
+                X = batch[0].to(self.device)
+                model_outputs = self.model(X)
+                for i in range(self.num_targets):
+                    all_logits[i].append(model_outputs[i].detach().cpu().reshape(-1))
+                    all_labels[i].append(batch[i + 1].detach().cpu().reshape(-1))
 
-    temperatures: List[float] = []
-    for i in range(num_targets):
-        mask_i = ~np.isnan(labels_list[i])
-        pre_ece = _compute_ece_from_logits(logits_list[i], labels_list[i], 1.0, mask_i)
-        logger.info("Pre-calibration ECE — target %d: %.6f", i, pre_ece)
-        T_i = _fit_temperature(logits_list[i], labels_list[i], mask_i)
-        temperatures.append(T_i)
-        post_ece = _compute_ece_from_logits(logits_list[i], labels_list[i], T_i, mask_i)
-        logger.info("Post-calibration ECE — target %d: %.6f (T=%.6f)", i, post_ece, T_i)
+        logits_list = [torch.cat(all_logits[i], dim=0) for i in range(self.num_targets)]
+        labels_list = [torch.cat(all_labels[i], dim=0) for i in range(self.num_targets)]
+        return logits_list, labels_list
 
-    params = {f"T_{i}": float(T_i) for i, T_i in enumerate(temperatures)}
-    calibration_path = Path(config.CALIBRATION_PARAMS_PATH)
-    calibration_path.parent.mkdir(parents=True, exist_ok=True)
-    calibration_path.write_text(json.dumps(params))
-    logger.info("Wrote calibration parameters to %s: %s", calibration_path, params)
+    def calibrate_and_save(self) -> None:
+        """Fit per-head temperatures, log ECE, and write calibration JSON."""
+        logits_list, labels_list = self._collect_logits()
+
+        temperatures: List[float] = []
+        for i in range(self.num_targets):
+            logits_np = logits_list[i].cpu().numpy()
+            labels_np = labels_list[i].cpu().numpy()
+            mask_i = ~np.isnan(labels_np)
+
+            pre_ece = _compute_ece_from_logits(logits_np, labels_np, 1.0, mask_i)
+            logger.info("Pre-calibration ECE — target %d: %.6f", i, pre_ece)
+
+            T_i = _fit_temperature(logits_np, labels_np, mask_i)
+            temperatures.append(T_i)
+
+            post_ece = _compute_ece_from_logits(logits_np, labels_np, T_i, mask_i)
+            logger.info("Post-calibration ECE — target %d: %.6f (T=%.6f)", i, post_ece, T_i)
+
+        params = {f"T_{i}": float(T_i) for i, T_i in enumerate(temperatures)}
+        calibration_path = Path(self.config.CALIBRATION_PARAMS_PATH)
+        calibration_path.parent.mkdir(parents=True, exist_ok=True)
+        calibration_path.write_text(json.dumps(params))
+        logger.info("Wrote calibration parameters to %s: %s", calibration_path, params)
 
 
 def main() -> int:
@@ -318,7 +274,9 @@ def main() -> int:
 
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s %(message)s")
     config = load_and_validate_config(args.config)
-    run(config)
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    calibrator = TemperatureCalibrator(config, device)
+    calibrator.calibrate_and_save()
     return 0
 
 

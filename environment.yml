@@ -22,6 +22,7 @@ dependencies:
   - ipykernel
   - tqdm
   - fastparquet
+  - pytest
   - pip
   - pip:
       - pydantic==2.10.3
