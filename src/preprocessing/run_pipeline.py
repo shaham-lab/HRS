@@ -274,6 +274,8 @@ def main() -> None:
             logger.info("  STEP %d/%d — %s", idx, n, module_name)
             logger.info("=" * 70)
             t0 = time.time()
+            # Runs in a separate process because reduce_dataset may load heavy deps and
+            # is designed to be callable as a standalone script.
             subprocess.run(
                 [
                     sys.executable,

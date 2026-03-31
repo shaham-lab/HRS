@@ -87,7 +87,10 @@ def run(config: Dict) -> None:
         col_table = pf.read(columns=[col_name])
         emb_col = col_table.column(0).combine_chunks()
         # Convert to numpy (list of lists) then stack
-        X = np.stack(emb_col.to_numpy()).astype(np.float32)
+        try:
+            X = np.stack(emb_col.to_numpy()).astype(np.float32)
+        except ValueError as exc:
+            raise ValueError(f"Failed to stack embedding column '{col_name}': {exc}") from exc
 
         nonzero_mask = np.linalg.norm(X, axis=1) > ZERO_VECTOR_THRESHOLD
         fit_mask = is_train & nonzero_mask
@@ -116,6 +119,13 @@ def run(config: Dict) -> None:
             if nonzero_mask.any():
                 transformed = model.transform(X[nonzero_mask]).astype(np.float32)
                 X_reduced[nonzero_mask, : transformed.shape[1]] = transformed
+                if transformed.shape[1] < target_dim:
+                    logger.warning(
+                        "%s reduced to %d components (requested %d); remaining columns zero-padded",
+                        col_name,
+                        transformed.shape[1],
+                        target_dim,
+                    )
             fitted_transforms[col_name] = model
             var_ratio = getattr(model, "explained_variance_ratio_", None)
             if var_ratio is None:
