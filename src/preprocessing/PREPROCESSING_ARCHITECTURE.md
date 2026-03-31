@@ -151,7 +151,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 | Combine (step 11) | 1 | ~1 min | ~1 min |
 
 Optional step 12 (`reduce_dataset.py`) runs after combine and streams one embedding column at a time; runtime depends on the selected reduction method and target dimensionality.
-Typical runtime is CPU-bound (tens of minutes when reducing all embedding columns — 55 by default — to 128 dims with SVD) and stays within the existing ≤64 GB RAM envelope because only one column is loaded at a time.
+Typical runtime is CPU-bound (~20–40 minutes when reducing all embedding columns — 55 by default — to 128 dims with SVD on the reference hardware) and stays within the existing ≤64 GB RAM envelope because only one column is loaded at a time.
 
 ---
 

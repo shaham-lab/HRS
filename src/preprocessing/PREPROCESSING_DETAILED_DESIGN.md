@@ -804,7 +804,7 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `BERT_FORCE_REEMBED` | bool | `false` | Bypass all slice/feature/record-level resume |
 | `BERT_CHECKPOINT_INTERVAL` | int | `10000` | Rows between within-feature checkpoint appends |
 | `REDUCTION_ENABLED` | bool | `false` | Run `reduce_dataset.py` to emit reduced embeddings |
-| `REDUCTION_METHOD` | str | `"svd"` | `"svd"` = compact SVD (no mean centering); `"pca_nonzero"` = mask non-zero rows |
+| `REDUCTION_METHOD` | str | `"svd"` | `"svd"` = compact SVD (no mean centering; preserves zero vectors); `"pca_nonzero"` = fit PCA on non-zero rows only and scatter results back into a zero-initialised matrix |
 | `REDUCED_EMBEDDING_DIM` | int | `128` | Target embedding dimensionality for all `*_embedding` columns |
 | `REDUCTION_OUTPUT_DIR` | str | `data/preprocessing/classifications/reduced` | Destination for reduced parquet, transformers, and explained-variance stats |
 | `LAB_ADMISSION_WINDOW` | int\|`"full"` | `24` | Hours of lab events from `admittime`; `"full"` = entire admission |
