@@ -111,6 +111,7 @@ HRS/
 │       ├── extract_y_data.py
 │       ├── embed_features.py
 │       ├── combine_dataset.py
+│       ├── reduce_dataset.py
 │       ├── preprocessing_utils.py
 │       ├── pipeline_job.sh             # Slurm: all steps except embed_features
 │       ├── labs_extract_job.sh         # Slurm: extract_labs only
@@ -144,7 +145,7 @@ HRS/
             ├── imputation_stats.json
             ├── lab_panel_config.yaml
             ├── hadm_linkage_stats.json
-            └── final_cdss_dataset.parquet
+            └── full_cdss_dataset.parquet
 ```
 
 ---
@@ -178,6 +179,15 @@ from this file.
 | `BERT_MAX_GPUS`        | `int` or `null`   | Number of GPUs to use per embed slice job. `null` defaults to 2. Controls how many GPU processes are spawned inside each `embed_job.sh` Slurm job.                                   | `2`                                              |
 | `BERT_SLICE_SIZE_PER_GPU` | `int`          | Number of admissions each GPU processes per embed slice. Together with `BERT_MAX_GPUS` and the total admission count, determines how many Slurm embed slice jobs are created: `ceil(total_admissions / (BERT_SLICE_SIZE_PER_GPU × BERT_MAX_GPUS))`. | `20000`                                          |
 
+### Dimensionality Reduction
+
+| Key                     | Type    | Description                                                                                                                         | Example                              |
+| ----------------------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------ |
+| `REDUCTION_ENABLED`     | `bool`  | Boolean to enable or disable the reduction step (default: `true`).                                                                  | `true`                               |
+| `REDUCTION_METHOD`      | `str`   | The algorithm to use: `"svd"` for Compact SVD, or `"pca_nonzero"`.                                                                 | `"svd"`                              |
+| `REDUCED_EMBEDDING_DIM` | `int`   | The target dimension for the reduced embeddings.                                                                                    | `128`                                |
+| `REDUCTION_OUTPUT_DIR`  | `str`   | Path to save the reduced dataset and fitted transforms.                                                                             | `"data/preprocessing/reduced"`       |
+
 ---
 
 ## 4. Running the pipeline
@@ -205,6 +215,7 @@ python src/preprocessing/run_pipeline.py --extract_radiology
 python src/preprocessing/run_pipeline.py --extract_y_data
 python src/preprocessing/run_pipeline.py --embed_features
 python src/preprocessing/run_pipeline.py --combine_dataset
+python src/preprocessing/run_pipeline.py --reduce_dataset
 ```
 
 Multiple steps can be combined in a single invocation:
@@ -254,7 +265,8 @@ create_splits
   └─► extract_radiology           │
   └─► extract_y_data             ─┘
         └─► embed_features
-              └─► combine_dataset
+               └─► combine_dataset
+                     └─► reduce_dataset  (optional)
 ```
 
 **`create_splits` must complete first.** `build_lab_panel_config` must run
@@ -416,7 +428,8 @@ python src/preprocessing/inspect_data.py --config /path/to/preprocessing.yaml
 | `lab_panel_config.yaml`                | `data/preprocessing/classifications/` | YAML    | `build_lab_panel_config`  | Defines the 13 lab group names and their constituent itemids, derived from `d_labitems`                                                     |
 | `micro_panel_config.yaml`              | `config/`                             | YAML    | version-controlled         | Defines the 37 microbiology panel names. Each panel entry includes a human-readable `description` field (e.g. `"Microbiology panel: blood culture"`) and a `combos` list of `[test_name, spec_type_desc]` pairs. Path declared via `MICRO_PANEL_CONFIG_PATH` in `config/preprocessing.yaml`. |
 | `hadm_linkage_stats.json`              | `data/preprocessing/classifications/` | JSON    | all modules               | Per-module counts of null hadm_id records: dropped, linked, ambiguous-resolved, unresolvable                                               |
-| `final_cdss_dataset.parquet`           | `data/preprocessing/classifications/` | Parquet | `combine_dataset`         | One row per admission; all features and labels joined. Includes demographics, all 5 non-lab embedding columns, and all 13 lab group embedding columns as independent columns. `labs_features.parquet` (long-format raw event data) is excluded — it is superseded by the 13 per-group embedding parquets. The 13 lab group embeddings are discovered and joined automatically by `combine_dataset.py` via dynamic parquet discovery in `EMBEDDINGS_DIR`. |
+| `full_cdss_dataset.parquet`            | `data/preprocessing/classifications/` | Parquet | `combine_dataset`         | One row per admission; all features and labels joined. Includes demographics, all 5 non-lab embedding columns, and all 13 lab group embedding columns as independent columns (768-dim embeddings, high memory footprint). `labs_features.parquet` (long-format raw event data) is excluded — it is superseded by the 13 per-group embedding parquets. The 13 lab group embeddings are discovered and joined automatically by `combine_dataset.py` via dynamic parquet discovery in `EMBEDDINGS_DIR`. |
+| `reduced_cdss_dataset.parquet`         | `data/preprocessing/reduced/`         | Parquet | `reduce_dataset`          | One row per admission; same schema as `full_cdss_dataset.parquet` but with all embedding columns reduced to `REDUCED_EMBEDDING_DIM` dimensions (e.g. 128-dim, low memory footprint). Fitted transforms are also saved to `REDUCTION_OUTPUT_DIR` for reproducibility. |
 
 ---
 
