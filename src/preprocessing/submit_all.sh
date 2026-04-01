@@ -141,8 +141,19 @@ else
     echo "  Combine : job $COMBINE_JOB (src/preprocessing/combine_job.sh)"
 fi
 
+# Always submit reduce (with dependency on combine)
+if [[ -n "${COMBINE_JOB:-}" ]]; then
+    REDUCE_JOB=$(sbatch --parsable \
+        --dependency=afterok:"$COMBINE_JOB" \
+        src/preprocessing/reduce_job.sh)
+    echo "  Reduce  : job $REDUCE_JOB (src/preprocessing/reduce_job.sh, depends on $COMBINE_JOB)"
+else
+    REDUCE_JOB=$(sbatch --parsable src/preprocessing/reduce_job.sh)
+    echo "  Reduce  : job $REDUCE_JOB (src/preprocessing/reduce_job.sh)"
+fi
+
 echo ""
 if [[ $EMBED_STATUS_CODE -eq 0 ]]; then
-    echo "All embeddings already complete — submitted combine only."
-    echo "To cancel: scancel $COMBINE_JOB"
+    echo "All embeddings already complete — submitted combine and reduce only."
+    echo "To cancel: scancel $COMBINE_JOB $REDUCE_JOB"
 fi

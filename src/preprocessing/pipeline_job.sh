@@ -22,11 +22,11 @@ conda activate hrs
 cd ~/Python/HRS/
 mkdir -p logs
 
-# Run all pipeline steps except embed_features
-# embed_features runs separately via embed_job.sh with 2 GPUs
+# Run all pipeline steps except embed_features, combine_dataset, and reduce_dataset
+# embed_features, combine_dataset, and reduce_dataset run separately via their own job scripts
 python ./src/preprocessing/run_pipeline.py \
     --config config/preprocessing.yaml \
     --all \
-    --skip-modules embed_features
+    --skip-modules embed_features combine_dataset reduce_dataset
 
 echo "End: $(date)"
