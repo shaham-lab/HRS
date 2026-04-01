@@ -113,11 +113,12 @@ HRS/
 │       ├── combine_dataset.py
 │       ├── reduce_dataset.py
 │       ├── preprocessing_utils.py
-│       ├── pipeline_job.sh             # Slurm: all steps except embed_features
+│       ├── pipeline_job.sh             # Slurm: all steps except embed_features, combine_dataset, and reduce_dataset
 │       ├── labs_extract_job.sh         # Slurm: extract_labs only
 │       ├── micro_extract_job.sh        # Slurm: extract_microbiology only
 │       ├── embed_job.sh                # Slurm: embed one GPU slice
 │       ├── combine_job.sh              # Slurm: combine_dataset
+│       ├── reduce_job.sh              # Slurm: reduce_dataset (optional, CPU-bound)
 │       └── submit_all.sh              # Slurm: auto-submit entrypoint
 │
 └── data/
@@ -283,12 +284,13 @@ For HPC environments, four Slurm shell scripts are provided in
 separate job types because embedding is GPU-intensive and must be
 checkpointed across many slices:
 
-| Script             | Slurm resources          | What it does                                                                                        |
-| ------------------ | ------------------------ | --------------------------------------------------------------------------------------------------- |
-| `pipeline_job.sh`  | 4 CPUs, 64 GB RAM        | Runs the full `run_pipeline.py --all --skip-modules embed_features` (all steps except embedding).   |
-| `embed_job.sh`     | 2 GPUs, 8 CPUs, 64 GB RAM | Runs `embed_features.py --slice-index <i>` for one slice of admissions.                            |
-| `combine_job.sh`   | 4 CPUs, 32 GB RAM        | Runs `run_pipeline.py --modules combine_dataset` once all embedding slices are complete.            |
-| `submit_all.sh`    | —                        | Auto-detect state and submit the correct subset of jobs with `afterok` dependency chaining.         |
+| Script             | Slurm resources           | What it does                                                                                                                              |
+| ------------------ | ------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------- |
+| `pipeline_job.sh`  | 4 CPUs, 64 GB RAM         | Runs the core extraction pipeline: `run_pipeline.py --all --skip-modules embed_features combine_dataset reduce_dataset`.                  |
+| `embed_job.sh`     | 2 GPUs, 8 CPUs, 64 GB RAM | Runs `embed_features.py --slice-index <i>` for one slice of admissions.                                                                  |
+| `combine_job.sh`   | 4 CPUs, 32 GB RAM         | Runs `run_pipeline.py --modules combine_dataset` once all embedding slices are complete.                                                  |
+| `reduce_job.sh`    | 128 GB RAM                | A CPU-bound job (128GB RAM) that runs the optional dimensionality reduction step (`run_pipeline.py --reduce_dataset`).                    |
+| `submit_all.sh`    | —                         | Auto-detect state and submit the correct subset of jobs with `afterok` dependency chaining.                                               |
 
 #### Recommended workflow: `submit_all.sh`
 
@@ -302,12 +304,12 @@ bash src/preprocessing/submit_all.sh
 It checks the current pipeline state, then submits only the jobs that still
 need to run:
 
-| State detected                              | Jobs submitted                                             |
-| ------------------------------------------- | ---------------------------------------------------------- |
-| Nothing done yet                            | `pipeline_job` → N embed slices (chained) → `combine_job` |
-| Preprocessing done, embedding incomplete    | Remaining embed slices (chained) → `combine_job`           |
-| All embeddings complete                     | `combine_job` only                                         |
-| Everything complete                         | Nothing — prints status and exits                          |
+| State detected                              | Jobs submitted                                                            |
+| ------------------------------------------- | ------------------------------------------------------------------------- |
+| Nothing done yet                            | `pipeline_job` → N embed slices (chained) → `combine_job` → `reduce_job` |
+| Preprocessing done, embedding incomplete    | Remaining embed slices (chained) → `combine_job` → `reduce_job`          |
+| All embeddings complete                     | `combine_job` → `reduce_job`                                             |
+| Everything complete                         | Nothing — prints status and exits                                         |
 
 Re-run `submit_all.sh` at any time; it always resumes from where the pipeline
 left off without duplicating work.
@@ -325,7 +327,15 @@ With the default settings (`BERT_SLICE_SIZE_PER_GPU: 20000`, `BERT_MAX_GPUS: 2`)
 and ~546 k admissions this produces **14 slices**. Each slice is submitted as a
 separate `embed_job.sh` job. Slices are chained sequentially with
 `--dependency=afterok` to prevent concurrent write conflicts on the parquet
-checkpoint files.
+checkpoint files. After all 14 embed slices finish, `submit_all.sh` submits the
+`combine` job, and then immediately queues the `reduce` job with an `afterok`
+dependency on the `combine` job:
+
+```text
+embed_slice_0 ... embed_slice_13
+   └──(afterok)── combine
+                     └──(afterok)── reduce
+```
 
 To submit an individual embed slice manually:
 
