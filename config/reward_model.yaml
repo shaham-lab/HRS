@@ -35,7 +35,10 @@ MASKING_ADVERSARIAL_K_MAX_FRACTION: 0.7
 NUM_ALWAYS_VISIBLE_FEATURES: 5
 
 INPUT_DIM: 42248
-DATASET_PATH: data/preprocessing/classifications/final_cdss_dataset.parquet
+#DATASET_PATH: data/preprocessing/classifications/final_cdss_dataset.parquet
+# Inside your reward model config
+DATASET_PATH: "data/preprocessing/reduced/reduced_cdss_dataset.parquet"
+EMBEDDING_DIM: 128
 DATASET_ROW_GROUP_CACHE_SIZE: 2
 DATALOADER_NUM_WORKERS: 2
 

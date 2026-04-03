@@ -6,8 +6,8 @@ from typing import Dict, List, Tuple
 import pyarrow as pa
 import pyarrow.parquet as pq
 
-from .data_loader import DataLoader
-from .schema_error import SchemaError
+from data_loader import DataLoader
+from schema_error import SchemaError
 
 logger = logging.getLogger(__name__)
 
