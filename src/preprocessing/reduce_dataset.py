@@ -3,7 +3,7 @@ import json
 import logging
 import os
 import pickle
-import sys
+from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
@@ -55,9 +55,15 @@ def run(config: Dict) -> None:
     if not output_dir:
         raise ValueError("REDUCTION_OUTPUT_DIR missing from configuration")
     os.makedirs(output_dir, exist_ok=True)
-    reduced_path = os.path.join(output_dir, "reduced_cdss_dataset.parquet")
-    transforms_path = os.path.join(output_dir, "fitted_transforms.pkl")
-    variance_path = os.path.join(output_dir, "variance_stats.json")
+    output_dir_path = Path(output_dir)
+    reduced_path = output_dir_path / "reduced_cdss_dataset.parquet"
+    transforms_path = output_dir_path / "fitted_transforms.pkl"
+    variance_path = output_dir_path / "variance_stats.json"
+
+    for stale in (reduced_path, transforms_path, variance_path):
+        if stale.exists():
+            stale.unlink()
+            logger.info("Removed stale output: %s", stale)
 
     logger.info("Loading split column to build training mask…")
     pf = pq.ParquetFile(final_path)
@@ -132,8 +138,10 @@ def run(config: Dict) -> None:
             else:
                 variance_stats[col_name] = float(np.array(var_ratio).sum())
 
-        flattened_embeddings = X_reduced.reshape(-1)
-        embedding_array = pa.FixedSizeListArray.from_arrays(pa.array(flattened_embeddings, type=pa.float32()), target_dim)
+        embedding_array = pa.array(
+            [row.tolist() for row in X_reduced],
+            type=pa.list_(pa.float32()),
+        )
         arrays.append(embedding_array)
         names.append(col_name)
 

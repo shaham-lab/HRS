@@ -155,7 +155,7 @@ class RewardModelManager:
         if warmup_steps > 0:
             warmup = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
-                start_factor=0.0,
+                start_factor=1e-8,
                 end_factor=1.0,
                 total_iters=warmup_steps,
             )
