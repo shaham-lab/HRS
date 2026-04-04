@@ -15,7 +15,12 @@ Expected config keys:
     MIMIC_DATA_DIR       – root directory containing MIMIC-IV tables
     FEATURES_DIR         – output directory for feature parquets
     PREPROCESSING_DIR    – directory containing data_splits.parquet
-    CLASSIFICATIONS_DIR  – output directory for hadm_linkage_stats.json
+    CLASSIFICATIONS_DIR  – output directory for classification artefacts
+
+Optional config keys (with defaults):
+    STATS_DIR            – output directory for imputation_stats.json and
+                           hadm_linkage_stats.json
+                           (default: PREPROCESSING_DIR/stats)
 
 Optional config keys:
     HADM_LINKAGE_STRATEGY        – "drop" (default) or "link"; how to handle
@@ -52,6 +57,14 @@ _CHART_WEIGHT_ITEMS: list[tuple[int, str]] = [
 ]
 _CHART_WEIGHT_ITEMIDS: list[int] = [i for i, _ in _CHART_WEIGHT_ITEMS]
 _CHART_WEIGHT_UNIT: dict[int, str] = {i: u for i, u in _CHART_WEIGHT_ITEMS}
+
+# Physiological bounds for OMR vitals filtering and BMI clipping
+_HEIGHT_MIN_CM = 45.0
+_HEIGHT_MAX_CM = 230.0
+_WEIGHT_MIN_KG = 2.0
+_WEIGHT_MAX_KG = 500.0
+_BMI_MIN = 5.0
+_BMI_MAX = 100.0
 
 # Age bins boundaries (left-closed)
 _AGE_BINS = [18, 30, 45, 65, 75, 200]
@@ -122,6 +135,11 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
     omr_height.loc[inches_mask, "result_value"] = (
         omr_height.loc[inches_mask, "result_value"] * 2.54
     )
+    # Remove physiologically impossible height values
+    omr_height = omr_height[
+        (omr_height["result_value"] >= _HEIGHT_MIN_CM) &
+        (omr_height["result_value"] <= _HEIGHT_MAX_CM)
+    ]
 
     # Fix 3: Normalise weight to kg
     omr_weight["result_value"] = pd.to_numeric(omr_weight["result_value"], errors="coerce").astype(float)
@@ -129,31 +147,79 @@ def _extract_omr_vitals(omr: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataF
     omr_weight.loc[lbs_mask, "result_value"] = (
         omr_weight.loc[lbs_mask, "result_value"] * 0.453592
     )
-    # Keep only plausible weights: > 0 kg
-    omr_weight = omr_weight[omr_weight["result_value"] > 0]
+    omr_weight = omr_weight[
+        (omr_weight["result_value"] >= _WEIGHT_MIN_KG) &
+        (omr_weight["result_value"] <= _WEIGHT_MAX_KG)
+    ]
 
     omr_bmi["result_value"] = pd.to_numeric(omr_bmi["result_value"], errors="coerce").astype(float)
+    omr_bmi = omr_bmi[
+        (omr_bmi["result_value"] >= _BMI_MIN) &
+        (omr_bmi["result_value"] <= _BMI_MAX)
+    ]
 
-    def _latest_before_admit(vital_df: pd.DataFrame, col: str) -> pd.DataFrame:
-        # Join on subject_id, keep rows where chartdate <= admittime
+    def _closest_to_admittime(vital_df: pd.DataFrame, col: str) -> pd.DataFrame:
+        """
+        Select the measurement closest to admittime per admission.
+        Primary: closest record before or on admittime.
+        Fallback: closest record after admittime when no prior
+        record exists.
+        Tie-breaking: pre-admission preferred over post-admission.
+        """
         merged = admissions.merge(vital_df, on="subject_id", how="left")
-        merged = merged[
-            merged["chartdate"].isna()
-            | (merged["chartdate"] <= merged["admittime"])
-        ]
-        # Take the latest
-        latest = (
-            merged.sort_values("chartdate")
-            .groupby(["subject_id", "hadm_id"])["result_value"]
-            .last()
-            .reset_index()
+        merged = merged[merged["chartdate"].notna()]
+        merged["admitdate"] = pd.to_datetime(
+            merged["admittime"]
+        ).dt.normalize()
+        merged["diff_days"] = (
+            merged["chartdate"] - merged["admitdate"]
+        ).dt.days
+
+        # Pre-admission: diff_days <= 0 (on or before admittime)
+        pre = merged[merged["diff_days"] <= 0].copy()
+        pre["abs_diff"] = pre["diff_days"].abs()
+
+        # Post-admission fallback: diff_days > 0
+        post = merged[merged["diff_days"] > 0].copy()
+        post["abs_diff"] = post["diff_days"]
+
+        # Select closest pre-admission per admission
+        pre_closest = (
+            pre.sort_values("abs_diff")
+            .groupby(["subject_id", "hadm_id"])
+            .first()
+            .reset_index()[["subject_id", "hadm_id",
+                            "result_value"]]
             .rename(columns={"result_value": col})
         )
-        return latest
 
-    h = _latest_before_admit(omr_height, "omr_height_cm")
-    w = _latest_before_admit(omr_weight, "omr_weight_kg")
-    b = _latest_before_admit(omr_bmi, "omr_bmi")
+        # Select closest post-admission per admission
+        post_closest = (
+            post.sort_values("abs_diff")
+            .groupby(["subject_id", "hadm_id"])
+            .first()
+            .reset_index()[["subject_id", "hadm_id",
+                            "result_value"]]
+            .rename(columns={"result_value": col})
+        )
+
+        # Merge: pre takes priority, post fills gaps
+        result = admissions[["subject_id", "hadm_id"]].copy()
+        result = result.merge(pre_closest,
+                              on=["subject_id", "hadm_id"],
+                              how="left")
+        gap_mask = result[col].isna()
+        if gap_mask.any():
+            result.loc[gap_mask, col] = result[gap_mask].merge(
+                post_closest,
+                on=["subject_id", "hadm_id"],
+                how="left"
+            )[col].values
+        return result
+
+    h = _closest_to_admittime(omr_height, "omr_height_cm")
+    w = _closest_to_admittime(omr_weight, "omr_weight_kg")
+    b = _closest_to_admittime(omr_bmi, "omr_bmi")
 
     result = admissions[["subject_id", "hadm_id"]].copy()
     for df in [h, w, b]:
@@ -363,7 +429,7 @@ def _compute_age(patients: pd.DataFrame, admissions: pd.DataFrame) -> pd.DataFra
 
 
 def _compute_imputation_stats(
-    df: pd.DataFrame, splits: pd.DataFrame, classifications_dir: str
+    df: pd.DataFrame, splits: pd.DataFrame, stats_dir: str
 ) -> dict[str, dict[str, float]]:
     """Compute per-stratum height/weight stats from train split only."""
     train_mask = splits["split"] == "train"
@@ -394,8 +460,8 @@ def _compute_imputation_stats(
     }
     stats["__global__"] = global_stats
 
-    os.makedirs(classifications_dir, exist_ok=True)
-    stats_path = os.path.join(classifications_dir, "imputation_stats.json")
+    os.makedirs(stats_dir, exist_ok=True)
+    stats_path = os.path.join(stats_dir, "imputation_stats.json")
     with open(stats_path, "w", encoding="utf-8") as fh:
         json.dump(stats, fh, indent=2)
     logger.info("Saved imputation statistics to %s", stats_path)
@@ -435,14 +501,14 @@ def _impute_vectorised(
 
 
 def _write_linkage_stats(
-    linkage_stats: dict, classifications_dir: str
+    linkage_stats: dict, stats_dir: str
 ) -> None:
     """Merge *linkage_stats* into the existing hadm_linkage_stats.json file.
 
     Creates the file (and directory) if it does not yet exist.
     """
-    os.makedirs(classifications_dir, exist_ok=True)
-    stats_json_path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
+    os.makedirs(stats_dir, exist_ok=True)
+    stats_json_path = os.path.join(stats_dir, "hadm_linkage_stats.json")
     existing_stats: dict = {}
     if os.path.exists(stats_json_path):
         with open(stats_json_path, "r", encoding="utf-8") as fh:
@@ -509,6 +575,12 @@ def _impute_vitals(
     n_missing_w_before = int(df["weight_kg"].isna().sum())
     df["height_cm"] = _impute_vectorised(df, "height_cm", stats, rng)
     df["weight_kg"] = _impute_vectorised(df, "weight_kg", stats, rng)
+    df["height_cm"] = df["height_cm"].clip(
+        lower=_HEIGHT_MIN_CM, upper=_HEIGHT_MAX_CM
+    )
+    df["weight_kg"] = df["weight_kg"].clip(
+        lower=_WEIGHT_MIN_KG, upper=_WEIGHT_MAX_KG
+    )
     logger.info("  Imputed %d height values, %d weight values",
                 n_missing_h_before, n_missing_w_before)
 
@@ -518,6 +590,16 @@ def _impute_vitals(
         height_m = df.loc[still_missing_bmi, "height_cm"] / 100.0
         weight_kg = df.loc[still_missing_bmi, "weight_kg"]
         df.loc[still_missing_bmi, "bmi"] = weight_kg / (height_m ** 2)
+
+    # Clip BMI to physiological range
+    df["bmi"] = df["bmi"].clip(lower=_BMI_MIN, upper=_BMI_MAX)
+    n_clipped = (df["bmi"] == _BMI_MAX).sum() + \
+                (df["bmi"] == _BMI_MIN).sum()
+    if n_clipped > 0:
+        logger.warning(
+            "Clipped %d BMI values outside [%.0f, %.0f]",
+            n_clipped, _BMI_MIN, _BMI_MAX,
+        )
     return df
 
 
@@ -534,6 +616,9 @@ def run(config: dict) -> None:
     features_dir = config["FEATURES_DIR"]
     preprocessing_dir = config["PREPROCESSING_DIR"]
     classifications_dir = config["CLASSIFICATIONS_DIR"]
+    stats_dir = config.get("STATS_DIR",
+                           os.path.join(preprocessing_dir, "stats"))
+    os.makedirs(stats_dir, exist_ok=True)
     registry_path = config.get("HASH_REGISTRY_PATH", "")
     hadm_linkage_strategy = config.get("HADM_LINKAGE_STRATEGY", "drop").lower()
     hadm_linkage_tolerance_hours = int(config.get("HADM_LINKAGE_TOLERANCE_HOURS", 1))
@@ -623,7 +708,7 @@ def run(config: dict) -> None:
         # ------------------------------------------------------------------ #
         # Write hadm_linkage_stats.json
         # ------------------------------------------------------------------ #
-        _write_linkage_stats(linkage_stats, classifications_dir)
+        _write_linkage_stats(linkage_stats, stats_dir)
 
         # ------------------------------------------------------------------ #
         # Merge vitals and add missingness flags
@@ -637,7 +722,7 @@ def run(config: dict) -> None:
         # ------------------------------------------------------------------ #
         pbar.set_description("extract_demographics — computing imputation statistics (train split only)")
         logger.info("Computing imputation statistics from train split…")
-        stats = _compute_imputation_stats(df, splits, classifications_dir)
+        stats = _compute_imputation_stats(df, splits, stats_dir)
         logger.info("  Imputation stats computed for %d strata", len(stats))
         pbar.update(1)
 

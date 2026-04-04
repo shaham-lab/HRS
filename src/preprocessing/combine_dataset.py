@@ -176,10 +176,13 @@ def run(config: dict) -> None:
     embeddings_dir = str(config["EMBEDDINGS_DIR"])
     classifications_dir = str(config["CLASSIFICATIONS_DIR"])
     preprocessing_dir = str(config["PREPROCESSING_DIR"])
+    full_dir = config.get("FULL_DATASET_DIR",
+                          os.path.join(preprocessing_dir, "full"))
+    os.makedirs(full_dir, exist_ok=True)
 
     # Remove any stale output file from a previous killed run before starting,
     # so a partial file can never be mistaken for a completed one.
-    output_path = str(os.path.join(classifications_dir, "final_cdss_dataset.parquet"))
+    output_path = str(os.path.join(full_dir, "full_cdss_dataset.parquet"))
     if os.path.exists(output_path):
         os.remove(output_path)
         logger.info("Removed existing output file: %s", output_path)
@@ -189,7 +192,7 @@ def run(config: dict) -> None:
         "Merge y_labels",
         "Merge feature parquets",
         "Merge embedding parquets",
-        "Validate and save final_cdss_dataset.parquet",
+        "Validate and save full_cdss_dataset.parquet",
     ]
     with tqdm(total=len(steps), desc="combine_dataset", unit="step", dynamic_ncols=True) as pbar:
         # ------------------------------------------------------------------ #
@@ -235,7 +238,7 @@ def run(config: dict) -> None:
         # ------------------------------------------------------------------ #
         # Verify split column is present
         # ------------------------------------------------------------------ #
-        pbar.set_description("combine_dataset — saving final_cdss_dataset.parquet")
+        pbar.set_description("combine_dataset — saving full_cdss_dataset.parquet")
         if "split" not in base.columns:
             raise RuntimeError(
                 "The 'split' column is missing from the final dataset. "

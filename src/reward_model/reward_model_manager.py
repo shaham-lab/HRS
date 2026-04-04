@@ -4,7 +4,7 @@ Houses data loading, masking curriculum, model/optimizer construction, and the
 RewardModelManager class. The torchrun entry point lives in
 ``reward_model_main.py``.
 """
-
+import math
 import logging
 import time
 from contextlib import nullcontext
@@ -126,6 +126,12 @@ class RewardModelManager:
         bundle, pos_weights = self._load_and_broadcast_dataset()
         if bundle is None:
             raise RuntimeError("Dataset must be available on all ranks after broadcast")
+        pos_weights = [math.sqrt(w) for w in pos_weights]
+        if self.rank == 0:
+            logger.info(
+                "pos_weight after sqrt scaling: y1=%.4f  y2=%.4f",
+                pos_weights[0], pos_weights[1]
+            )
         return bundle, pos_weights
 
     def _build_model(self) -> torch.nn.Module:
@@ -194,6 +200,27 @@ class RewardModelManager:
                 loss_i = loss_fn(logits.view(-1)[mask], labels.view(-1)[mask].float())
             component_losses.append(loss_i)
             total_loss = total_loss + w * loss_i
+
+        #For debugging purpose
+        if torch.isnan(total_loss) or torch.isinf(total_loss):
+            logger.error("NaN/Inf total_loss=%.4f", float(total_loss))
+            for i, (logits, labels, loss_i) in enumerate(
+                    zip(logits_list, labels_list, component_losses)
+            ):
+                logger.error(
+                    "  target_%d: loss=%.4f "
+                    "logits min=%.4f max=%.4f has_nan=%s | "
+                    "labels min=%.4f max=%.4f has_nan=%s",
+                    i,
+                    float(loss_i),
+                    float(logits.min()), float(logits.max()),
+                    str(torch.isnan(logits).any().item()),
+                    float(labels[~torch.isnan(labels)].min())
+                    if (~torch.isnan(labels)).any() else float("nan"),
+                    float(labels[~torch.isnan(labels)].max())
+                    if (~torch.isnan(labels)).any() else float("nan"),
+                    str(torch.isnan(labels).all().item()),
+                )
 
         return total_loss, component_losses
 
@@ -272,6 +299,15 @@ class RewardModelManager:
         start_step = start_epoch * steps_per_epoch
         self.scheduler = self._build_lr_scheduler(steps_per_epoch, start_step)
         self._maybe_load_states(ckpt_state)
+        if self.rank == 0 and self.train_loader is not None:
+            steps = len(self.train_loader)
+            logger.info(
+                "Train loader: %d batches/epoch, batch_size=%d, "
+                "effective_batch=%d",
+                steps,
+                self.config.BATCH_SIZE_PER_GPU,
+                self.config.BATCH_SIZE_PER_GPU * self.world_size,
+            )
         if self.rank == 0:
             logger.info(f"Training state setup complete. Resuming from epoch {start_epoch}.")
 
@@ -358,10 +394,27 @@ class RewardModelManager:
         logits_list = list(self.model(X))
         loss_total, component_losses = self.compute_loss(logits_list, labels)
         loss_total.backward()
+        #for debugging
+        layer_norms = {}
+        total_sq = 0.0
+        for name, param in self.model.named_parameters():
+            if param.grad is not None:
+                norm = param.grad.data.norm(2).item()
+                layer_norms[name] = norm
+                total_sq += math.pow(norm,2)
+        grad_norm = math.sqrt(total_sq)
+        logger.debug("grad_norm=%.4f", grad_norm)
+        # Log top 5 layers by gradient norm every batch
+        top_layers = sorted(
+            layer_norms.items(), key=lambda x: x[1], reverse=True)[:5]
+        logger.info(
+            "grad_norm=%.2f | top layers: %s",
+            grad_norm,
+            " | ".join(f"{n}={v:.2f}" for n, v in top_layers))
 
         self.optimizer.step()
 
-        return (float(loss_total.detach().item()),) + tuple(
+        return (float(loss_total.detach().item()), grad_norm) + tuple(
             float(l.detach().item()) for l in component_losses
         )
 
@@ -376,6 +429,15 @@ class RewardModelManager:
 
         if self.rank == 0:
             logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
+            probs_start = self.masking_schedule.get_mode_probabilities(start_epoch)
+            logger.info(
+                "Masking schedule at epoch %d: Random=%.0f%%  "
+                "Adversarial=%.0f%%  None=%.0f%%",
+                start_epoch,
+                probs_start[0] * 100,
+                probs_start[1] * 100,
+                probs_start[2] * 100,
+            )
 
         for epoch in range(start_epoch, self.config.MAX_EPOCHS):
             if self.train_loader is None:
@@ -386,12 +448,45 @@ class RewardModelManager:
 
             epoch_start = time.time()
 
-            for batch in self.train_loader:
+            batch_losses = []
+            for batch_idx, batch in enumerate(self.train_loader):
                 X = batch[0].to(self.device, non_blocking=True)
                 labels = [batch[i + 1].to(self.device, non_blocking=True) for i in range(T)]
 
-                self._run_train_batch(X, labels, epoch)
+                loss_vals = self._run_train_batch(X, labels, epoch)
+                total_loss = loss_vals[0]
+                grad_norm = loss_vals[1]
+                #for debugging
+                if self.rank == 0 and batch_idx % 1 == 0:  # every batch
+                    lr = self.scheduler.get_last_lr()[0]
+                    logger.info(
+                        "Epoch %d | batch %d/%d | loss=%.4f | "
+                        "grad_norm=%.4f | lr=%.2e",
+                        epoch, batch_idx, len(self.train_loader),
+                        total_loss, grad_norm, lr,
+                    )
                 self.scheduler.step()
+                batch_losses.append(loss_vals[0])
+
+                # Log every 50 batches on rank 0
+                if self.rank == 0 and batch_idx % 50 == 0:
+                    lr = self.scheduler.get_last_lr()[0]
+                    logger.info(
+                        "Epoch %d | batch %d/%d | loss=%.4f | lr=%.2e",
+                        epoch,
+                        batch_idx,
+                        len(self.train_loader),
+                        loss_vals[0],
+                        lr,
+                    )
+                    # Early NaN detection
+                    if torch.isnan(torch.tensor(loss_vals[0])):
+                        logger.error(
+                            "NaN loss at epoch %d batch %d — "
+                            "stopping training.",
+                            epoch, batch_idx,
+                        )
+                        break
 
             if self.is_ddp:
                 dist.barrier()
@@ -415,9 +510,22 @@ class RewardModelManager:
                     row[f"auprc_target_{i}"] = dev_metrics[f"auprc_target_{i}"]
                     row[f"ece_target_{i}"] = dev_metrics[f"ece_target_{i}"]
                 logger.info(
-                    f"Epoch {epoch} completed in {time.time() - epoch_start:.2f}s | "
-                    f"Dev Loss: {dev_metrics['loss_total']:.4f} | "
-                    f"Masking (R/A/N): {probs[0]*100:.0f}%/{probs[1]*100:.0f}%/{probs[2]*100:.0f}%"
+                    "Epoch %d | %.1fs | Loss=%.4f | "
+                    "Y1: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
+                    "Y2: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
+                    "Mask R/A/N=%.0f%%/%.0f%%/%.0f%%",
+                    epoch,
+                    time.time() - epoch_start,
+                    dev_metrics["loss_total"],
+                    dev_metrics["auroc_target_0"],
+                    dev_metrics["auprc_target_0"],
+                    dev_metrics["ece_target_0"],
+                    dev_metrics["auroc_target_1"],
+                    dev_metrics["auprc_target_1"],
+                    dev_metrics["ece_target_1"],
+                    probs[0] * 100,
+                    probs[1] * 100,
+                    probs[2] * 100,
                 )
                 self.metrics_logger.append_row(row)
 

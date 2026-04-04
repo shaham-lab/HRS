@@ -44,12 +44,14 @@ def run(config: Dict) -> None:
         raise ValueError(f"Unsupported REDUCTION_METHOD: {method}")
     target_dim = int(config.get("REDUCED_EMBEDDING_DIM", 128))
 
-    classifications_dir = config.get("CLASSIFICATIONS_DIR")
-    if not classifications_dir:
-        raise ValueError("CLASSIFICATIONS_DIR missing from configuration")
-    final_path = os.path.join(classifications_dir, "final_cdss_dataset.parquet")
+    preprocessing_dir = config.get("PREPROCESSING_DIR")
+    full_dir = config.get("FULL_DATASET_DIR",
+                          os.path.join(preprocessing_dir, "full") if preprocessing_dir else None)
+    if not full_dir:
+        raise ValueError("FULL_DATASET_DIR (or PREPROCESSING_DIR) missing from configuration")
+    final_path = os.path.join(full_dir, "full_cdss_dataset.parquet")
     if not os.path.exists(final_path):
-        raise FileNotFoundError(f"final_cdss_dataset.parquet not found at {final_path}")
+        raise FileNotFoundError(f"full_cdss_dataset.parquet not found at {final_path}")
 
     output_dir = config.get("REDUCTION_OUTPUT_DIR")
     if not output_dir:

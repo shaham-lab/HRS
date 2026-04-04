@@ -500,8 +500,8 @@ def _inspect_lab_panel_config(classifications_dir: str) -> None:
         print(f"  {group_name}: {len(items)} itemids")
 
 
-def _inspect_hadm_linkage_stats(classifications_dir: str) -> None:
-    path = os.path.join(classifications_dir, "hadm_linkage_stats.json")
+def _inspect_hadm_linkage_stats(stats_dir: str) -> None:
+    path = os.path.join(stats_dir, "hadm_linkage_stats.json")
     _print_header("hadm_linkage_stats.json", path)
     if not os.path.exists(path):
         print("NOT FOUND — will be created after pipeline runs.")
@@ -552,7 +552,9 @@ def main() -> None:
     _inspect_radiology(mimic_dir, note_dir)
     _inspect_triage(mimic_dir, ed_dir)
     _inspect_edstays(mimic_dir, ed_dir)
-    _inspect_hadm_linkage_stats(config.get("CLASSIFICATIONS_DIR", ""))
+    preprocessing_dir = config.get("PREPROCESSING_DIR", "")
+    default_stats_dir = os.path.join(preprocessing_dir, "stats") if preprocessing_dir else ""
+    _inspect_hadm_linkage_stats(config.get("STATS_DIR", default_stats_dir))
 
     print("\n" + "=" * 70)
     print("Inspection complete.")

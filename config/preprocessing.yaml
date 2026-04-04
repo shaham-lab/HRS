@@ -97,6 +97,8 @@ PREPROCESSING_DIR: "data/preprocessing"
 FEATURES_DIR: "data/preprocessing/features"
 EMBEDDINGS_DIR: "data/preprocessing/features/embeddings"
 CLASSIFICATIONS_DIR: "data/preprocessing/classifications"
+STATS_DIR: data/preprocessing/stats
+FULL_DATASET_DIR: data/preprocessing/full
 
 # Path to the source-file hash registry (used to skip unchanged modules).
 HASH_REGISTRY_PATH: "data/preprocessing/source_hashes.json"
