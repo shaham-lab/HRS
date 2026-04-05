@@ -26,7 +26,7 @@
 
 ## 1. Overview
 
-The CDSS-ML Reward Model is a supervised feedforward neural network that consumes a fixed-length feature vector derived from `full_cdss_dataset.parquet` (or the reduced variant `reduced_cdss_dataset.parquet`) — produced by `HRS/src/preprocessing` — and outputs T calibrated probability scores, one per configured classification target. Once trained, the model is frozen and used exclusively as an inference module by the RL agent, which computes a potential-based reward from the delta in output probabilities between consecutive episode states: `R = Σ wᵢ · ΔP(Yᵢ)`. The three most important architectural properties are: masking-aware training (the network trains under random and adversarial feature zeroing to simulate partial information availability at RL inference time), multi-GPU distributed training via PyTorch DDP (training runs across 2 GPUs by default, configurable via `NUM_GPUS`), and full configurability (all hyperparameters, schedule parameters, and architectural dimensions are defined in `config/reward_model.yaml` with no hardcoded values).
+The CDSS-ML Reward Model is a supervised feedforward neural network that consumes a fixed-length feature vector derived from `full_cdss_dataset.parquet` (or the reduced variant `reduced_cdss_dataset.parquet`) — produced by `HRS/src/preprocessing` — and outputs T calibrated probability scores, one per configured classification target. Once trained, the model is frozen and used exclusively as an inference module by the RL agent, which computes a potential-based reward from the delta in output probabilities between consecutive episode states: `R = Σ wᵢ · ΔP(Yᵢ)`. The three most important architectural properties are: masking-aware training (the network trains under random and adversarial feature zeroing to simulate partial information availability at RL inference time), multi-GPU distributed training via PyTorch DDP (enabled automatically when more than one GPU is available via `torchrun`), and full configurability (all hyperparameters, schedule parameters, and architectural dimensions are defined in `config/reward_model.yaml` with no hardcoded values).
 
 The current implementation is deployed on MIMIC-IV clinical data with T=2 targets (in-hospital mortality Y1 and 30-day readmission Y2). See Section 15 for the full MIMIC-IV-specific configuration. See `reward_model_design.docx` for the full design rationale. See `PREPROCESSING_ARCHITECTURE.md` for the upstream pipeline that produces the input dataset.
 
@@ -96,12 +96,11 @@ HRS/src/preprocessing
                        │
                        ▼
          ┌──────────────────────────────────────┐
-         │   reward_model_main.py (torchrun, NUM_GPUS=2)│  DDP entry; instantiates RewardModelManager
+         │   reward_model_main.py (torchrun)      │  DDP entry; instantiates RewardModelManager
          │   └── RewardModelManager (reward_model_manager.py)         │  masking curriculum, epoch loop,
          │                                       │  forward/backward, early stopping,
-         │   GPU 0 ──── mini-batch shard 0       │  checkpointing (rank 0 only)
-         │   GPU 1 ──── mini-batch shard 1       │
-         │       └── all-reduce gradients        │
+         │   GPU 0 ──── mini-batch (single GPU)  │  checkpointing (rank 0 only)
+         │       (DDP: shards across all GPUs)   │
          └──────────────┬───────────────────────┘
                        │  best_model.pt (rank 0)
                        ▼
@@ -128,7 +127,7 @@ HRS/src/preprocessing
 | Phase | Estimated time | Notes |
 |-------|---------------|-------|
 | Data loading and validation | 2–5 min | Parquet read + schema assertions |
-| Training | Hours–days | 2-GPU DDP; adversarial batches cost 2× per batch |
+| Training | Hours–days | Adversarial batches cost 2× per batch |
 | Calibration | < 5 min | Single forward pass on dev split, single GPU |
 
 ---
@@ -137,18 +136,17 @@ HRS/src/preprocessing
 
 | # | Module | Output | Notes |
 |---|--------|--------|-------|
-| — | `schema_error.py` | `SchemaError` exception | Class-only module; re-exported by `reward_model_utils.py` |
-| — | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model; re-exported by `reward_model_utils.py` |
-| — | `parquet_dataset.py` | `ParquetDataset` | Lazy Parquet reader with LRU row-group cache; re-exported by `reward_model_utils.py` |
-| — | `row_group_block_sampler.py` | `RowGroupBlockSampler` | Row-group-aware DDP sampler; re-exported by `reward_model_utils.py` |
-| — | `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, pos-weights; re-exported by `reward_model_utils.py` |
-| — | `checkpoint_manager.py` | `CheckpointManager` | Owns all checkpoint read/write/prune; validates feature index map on resume |
-| — | `reward_model_utils.py` | Shared helpers + re-exports | No class definitions; re-exports all class-only modules for backward compatibility |
+| — | `reward_model_config.py` | `RewardModelConfig` | Pydantic config model |
+| — | `parquet_dataset.py` | `ParquetDataset` | Lazy Parquet reader with LRU row-group cache |
+| — | `row_group_block_sampler.py` | `RowGroupBlockSampler` | Row-group-aware DDP sampler |
+| — | `dataset_bundle.py` | `DatasetBundle` | Named tuple bundling datasets, feature index map, pos-weights, label names |
+| — | `checkpoint_manager.py` | `CheckpointManager` | Owns all checkpoint read/write (`best_model_train.pt`, `best_model.pt`) |
+| — | `reward_model_utils.py` | Shared helpers | `get_device()` and `unwrap_ddp()` |
 | 1 | `data_loader.py` | Abstract `DataLoader` base | Template method for open → validate → build index map → split → bundle; subclassed by dataset-specific loaders |
 | 2 | `mimic4_data_loader.py` | `DatasetBundle` + feature index map | `Mimic4DataLoader` implementation; enforces upstream data contract and raises on failure with reference to `PREPROCESSING_DATA_MODEL.md` |
 | 3 | `reward_mode.py` | `RewardModel` class | MLP definition only — no training logic; T output heads (T=2 for MIMIC-IV); wrapped in `DistributedDataParallel` by `reward_model_manager.py` |
 | 4 | `masking.py` | Masked input tensors | Reads feature index map; implements random (variable k per sample), adversarial (top-k by RMS gradient norm), and no-mask modes; always-visible slots never masked |
-| 5 | `metrics.py` | Metrics + logging | Contains `compute_metrics()` and `MetricsLogger` (encapsulates Parquet schema + atomic appends for training metrics) |
+| 5 | `metrics.py` | Metrics + logging | Contains `compute_metrics()` and `MetricsLogger` (appends per-epoch rows to `training_metrics.csv`) |
 | 6 | `reward_model_manager.py` | Checkpoint files | Contains `RewardModelManager` class; handles dataset loading/broadcast, model/optimizer/scheduler build, loss computation, masking curriculum, epoch loop, dev eval, checkpointing, and metrics |
 | 6a | `reward_model_main.py` | Process exit code | DDP entry point via `torchrun`; owns CLI parsing, logging setup, runtime init, resume wiring, and delegates to `RewardModelManager` |
 | 7 | `calibrate.py` | `calibration_params.json` | Per-head temperature scaling on dev split via `TemperatureCalibrator` (log-space L-BFGS); single GPU |
@@ -171,11 +169,10 @@ graph TD
   Mimic4DataLoader --> RowGroupBlockSampler
   ParquetDataset --> FeatureIndexMap
   MaskingSchedule --> FeatureIndexMap
-  CheckpointManager -->|validates| FeatureIndexMap
   CheckpointManager -->|persists state dicts from| RewardModel
 ```
 
-Edges show module-level dependencies (train orchestrates all) and class-level dependencies (e.g., `CheckpointManager` validates the feature index map produced by `Mimic4DataLoader` and persisted with `RewardModel` state).
+Edges show module-level dependencies (train orchestrates all).
 
 Supporting scripts (not in the training pipeline): `validate_contract.py` (standalone schema assertion runner without training), `export_model.py` (serialise frozen model for RL consumption).
 
@@ -204,9 +201,10 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 - **Parquet (`full_cdss_dataset.parquet`, input, read-only):** Columnar; predicate pushdown used for `split` filtering. Produced upstream via `fastparquet` append mode — this module reads with `pyarrow`.
 - **YAML (`config/reward_model.yaml`):** All hyperparameters and schedule parameters. Validated by Pydantic. Follows the same convention as `config/preprocessing.yaml`.
-- **PyTorch checkpoint (`best_model.pt`):** Weights (unwrapped from DDP), optimizer state, epoch, curriculum state, config snapshot. Written by rank 0 only. Enables full SLURM resume.
+- **PyTorch checkpoint (`best_model_train.pt`):** Model weights (unwrapped from DDP), optimizer state, epoch, best dev loss. Written by rank 0 on every dev loss improvement. Enables full SLURM resume.
+- **PyTorch checkpoint (`best_model.pt`):** Model weights, epoch, best dev loss. Written by rank 0 on every dev loss improvement. Used for calibration and export.
 - **JSON (`calibration_params.json`):** Per-head temperature values, one per target (e.g. `T_0`, `T_1`). Human-readable audit trail.
-- **Parquet (`training_metrics.parquet`):** Per-epoch metrics written by rank 0. Columnar for downstream analysis.
+- **CSV (`training_metrics.csv`):** Per-epoch metrics written by rank 0.
 
 ### What Was Explicitly Rejected
 
@@ -236,13 +234,13 @@ Python 3.11+. CUDA 12.x required for GPU training. `torchrun` is used as the DDP
 
 At load time, `Mimic4DataLoader` reads the ordered column list from `full_cdss_dataset.parquet` and constructs a feature index map in memory: `{'demographic_vec': (0, 8), 'diag_history_embedding': (8, 776), ...}`. This map is passed to `masking.py` and `reward_model_manager.py` and never written to disk. The canonical column order is defined in `PREPROCESSING_DATA_MODEL.md` Section 3.12 — any upstream change to feature count or order is automatically reflected at reward model load time.
 
-#### Checkpoint manager and feature-index validation
+#### Checkpoint manager
 
-Checkpointing and resume logic is encapsulated in `CheckpointManager` (`checkpoint_manager.py`). It owns writing `epoch_<N>.pt` and `best_model.pt`, and it snapshots the feature index map alongside weights, optimizer state, and config. On `--resume`, `CheckpointManager.validate_feature_index_map()` compares the checkpoint snapshot to the freshly derived map from `full_cdss_dataset.parquet`; a mismatch raises immediately and aborts the resume to prevent running with shifted feature boundaries after an upstream schema change.
+Checkpointing and resume logic is encapsulated in `CheckpointManager` (`checkpoint_manager.py`). It owns writing `best_model_train.pt` (model + optimizer state for resume) and `best_model.pt` (model weights only for inference). The LR scheduler and masking schedule are not saved — both are rebuilt from config on resume and the scheduler is fast-forwarded to the correct step.
 
 ### 8.3 Multi-GPU Distributed Training
 
-Training uses PyTorch `DistributedDataParallel` (DDP) launched via `torchrun`. The number of GPUs is controlled by `NUM_GPUS` in `config/reward_model.yaml` (default: 2). `torchrun` spawns one process per GPU, each with a unique `rank`. Each process loads a full copy of the model. A `RowGroupBlockSampler` shards the training data across ranks at the row-group level — shuffling row groups rather than individual row indices — to preserve Parquet row-group locality and prevent I/O thrashing on the `ParquetDataset` LRU cache. Gradients are all-reduced across GPUs after each backward pass. Checkpointing, metric logging, and masking curriculum state are managed by rank 0 only to avoid duplicate writes.
+Training uses PyTorch `DistributedDataParallel` (DDP) launched via `torchrun`. The number of GPUs is determined by `--nproc_per_node` in `reward_job.sh` and the `--gres=gpu:N` SLURM allocation. DDP is enabled automatically when more than one GPU is available; otherwise training falls back to single-process mode. `torchrun` spawns one process per GPU, each with a unique `rank`. Each process loads a full copy of the model. A `RowGroupBlockSampler` shards the training data across ranks at the row-group level — shuffling row groups rather than individual row indices — to preserve Parquet row-group locality and prevent I/O thrashing on the `ParquetDataset` LRU cache. Gradients are all-reduced across GPUs after each backward pass. Checkpointing, metric logging, and masking curriculum state are managed by rank 0 only to avoid duplicate writes.
 
 The `nccl` backend is used for GPU-to-GPU communication, consistent with best practice for PyTorch DDP on CUDA hardware. If only 1 GPU is available, training runs in single-process mode without DDP wrapping.
 
@@ -268,9 +266,9 @@ Total loss: `L = Σᵢ wᵢ * L_Yᵢ` summed over all T targets. Weights are nor
 
 ### 8.6 Neural Network Architecture
 
-The network is a feedforward MLP with a gradual funnel. Under DDP, each GPU holds a full model copy (~1.32 GB for Hidden 1 alone at float32). With 2 GPUs and AdamW optimizer state, total GPU memory per device is approximately 14–18 GB at batch size 256 per GPU (512 effective). The recommended mitigation if memory is exceeded is PCA reduction of BERT embeddings (768 → 256) applied in `HRS/src/preprocessing` — input reduces to ~14,088 dims with no architectural change to this module.
+The network is a feedforward MLP with a gradual funnel. Under DDP, each GPU holds a full model copy. At the reduced-dataset default (D=7,048, EMBEDDING_DIM=128), Hidden 1 (7,048 × 8,192) occupies ~220 MB at float32. Total model parameters are approximately 76M (~290 MB); with AdamW optimizer state (~3×), memory is well under 4 GB per GPU at batch size 1,024. For the full dataset (D=42,248, EMBEDDING_DIM=768), Hidden 1 alone occupies ~1.32 GB and requires a GPU with ≥ 24 GB VRAM. The recommended mitigation if memory is exceeded is PCA reduction of BERT embeddings (768 → 256) applied in `HRS/src/preprocessing` — input reduces to ~14,088 dims with no architectural change to this module.
 
-The number of output heads T equals the number of configured classification targets. All layer widths and dropout rates are configurable in `config/reward_model.yaml`. Dropout is configured per layer (`DROPOUT_RATES` as a list) to allow heavier regularisation on wider early layers. The first hidden layer width should be adjusted when D changes significantly from the MIMIC-IV default (42,248).
+The number of output heads T equals the number of configured classification targets. All layer widths and dropout rates are configurable in `config/reward_model.yaml`. Dropout is configured per layer (`DROPOUT_RATES` as a list) to allow heavier regularisation on wider early layers. The first hidden layer width should be adjusted when D changes significantly from the current default.
 
 | Layer | In | Out | Activation | Dropout rate |
 |-------|----|-----|------------|--------------|
@@ -290,16 +288,21 @@ Temperature scaling is applied on the dev split after training converges, on a s
 
 **Frozen model:** `HRS/data/reward_model/checkpoints/best_model.pt` — PyTorch state dict (unwrapped from DDP), calibration parameters, feature index map snapshot, and config. Loaded by `inference.py` for the RL agent.
 
-**Training metrics:** `HRS/data/reward_model/training_metrics.parquet` — written by rank 0.
+**Training metrics:** `HRS/data/reward_model/training_metrics.csv` — written by rank 0 (one row per epoch, appended).
 
-| Column group | Columns | Type |
-|---|---|---|
-| Epoch metadata | `epoch`, `wall_time_s`, `masking_random_pct`, `masking_adversarial_pct`, `masking_none_pct` | int / float32 |
-| Loss | `loss_total`, `loss_target_0`, `loss_target_1`, ..., `loss_target_{T-1}` | float32 |
-| Per-target performance (unmasked — dev) | `auroc_target_i`, `auprc_target_i`, `ece_target_i` for each i | float32 |
-| Per-target performance (masked — train diagnostic) | `auroc_target_i_masked`, `auprc_target_i_masked` for each i | float32 |
+| Column | Type | Notes |
+|--------|------|-------|
+| `epoch` | int | Epoch index |
+| `time(seconds)` | int | Wall time for this epoch |
+| `loss_total` | float | Weighted total dev loss |
+| `loss_<label>` | float | Per-target dev loss (one column per label name) |
+| `auroc_<label>` | float | Per-target AUROC on dev split |
+| `auprc_<label>` | float | Per-target AUPRC on dev split |
+| `ece_<label>` | float | Per-target ECE on dev split |
 
-Dev metrics (unmasked) are the primary signals for early stopping and progress monitoring. Training masked metrics are diagnostic — they track the gap between masked and unmasked AUROC as the curriculum evolves.
+For the MIMIC-IV default (T=2, labels `y1_mortality` and `y2_readmission`), the columns are: `epoch`, `time(seconds)`, `loss_total`, `loss_y1_mortality`, `auroc_y1_mortality`, `auprc_y1_mortality`, `ece_y1_mortality`, `loss_y2_readmission`, `auroc_y2_readmission`, `auprc_y2_readmission`, `ece_y2_readmission`.
+
+All metrics are computed on the dev split (unmasked) and are the primary signals for early stopping and progress monitoring.
 
 ---
 
@@ -311,21 +314,21 @@ This module processes de-identified MIMIC-IV data under the PhysioNet data use a
 
 ## 11. Performance
 
-**Dominant bottleneck — Hidden 1 weight matrix.** The D × 8,192 matrix (where D is the total input dimensionality) occupies ~1.32 GB at float32 per GPU for the MIMIC-IV default D=42,248. Under DDP with `nccl` all-reduce, each GPU holds a full model copy — memory savings from 2-GPU DDP come from halving the per-GPU effective batch size, not from splitting model weights. With AdamW optimizer state (~3× parameter size), Hidden 1 alone requires ~5 GB per GPU before activations.
+**Dominant bottleneck — Hidden 1 weight matrix.** The D × 8,192 matrix occupies ~220 MB at float32 for the current default D=7,048 (reduced dataset, EMBEDDING_DIM=128). For the full dataset (D=42,248, EMBEDDING_DIM=768), Hidden 1 alone occupies ~1.32 GB per GPU. Under DDP with `nccl` all-reduce, each GPU holds a full model copy — memory savings from multi-GPU DDP come from halving the per-GPU effective batch size, not from splitting model weights. With AdamW optimizer state (~3× parameter size), the full model at D=7,048 requires well under 4 GB per GPU before activations.
 
-**Effective batch size with DDP.** With `batch_size = 256` per GPU and 2 GPUs, the effective batch size is 512. Each GPU processes 256 samples per forward/backward pass. At batch size 256 per GPU, estimated total GPU memory per device is 14–18 GB.
+**Effective batch size with DDP.** With `BATCH_SIZE_PER_GPU = 1024` and 2 GPUs, the effective batch size is 2,048. Each GPU processes 1,024 samples per forward/backward pass.
 
-**Adversarial masking cost.** Each adversarial batch requires two forward/backward passes (first with `no_sync()`, second with all-reduce). At the default end-state curriculum (33% adversarial), ~33% of batches cost 2×. Wall time per epoch is logged in `training_metrics.parquet` by rank 0.
+**Adversarial masking cost.** Each adversarial batch requires two forward/backward passes (first with `no_sync()`, second with all-reduce). At the default end-state curriculum (33% adversarial), ~33% of batches cost 2×. Wall time per epoch is logged in `training_metrics.csv` by rank 0.
 
 **Scaling knobs:**
 
 | Knob | Config key | Effect |
 |------|-----------|--------|
-| GPU count | `NUM_GPUS` | Linear throughput scaling up to available GPUs |
-| Reduce Hidden 1 width | `layer_widths[0]` | Cuts first-layer parameters quadratically |
-| Reduce batch size per GPU | `batch_size` | Reduces per-GPU activation memory |
-| PCA in preprocessing | Applied in `HRS/src/preprocessing` | Reduces input to ~14,088 dims; no network change |
-| Reduce adversarial ratio | `masking_end_ratios` | Reduces proportion of double-pass batches |
+| GPU count | `--nproc_per_node` in `reward_job.sh` | Linear throughput scaling; DDP auto-enabled when > 1 GPU |
+| Reduce Hidden 1 width | `LAYER_WIDTHS[0]` | Cuts first-layer parameters quadratically |
+| Reduce batch size per GPU | `BATCH_SIZE_PER_GPU` | Reduces per-GPU activation memory |
+| PCA in preprocessing | Applied in `HRS/src/preprocessing` | Reduces input dims; no network change |
+| Reduce adversarial ratio | `MASKING_END_RATIOS` | Reduces proportion of double-pass batches |
 
 **Throughput:** Not yet characterised on target hardware. Anticipated bottleneck is Hidden 1 forward pass (dense matrix multiply), not I/O — the dataset fits in RAM via lazy `ParquetDataset` loading.
 
@@ -335,7 +338,7 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 ## 12. Design Principles
 
-**No leakage across splits.** All statistics derived from data — `pos_weight_y1`, `pos_weight_y2`, temperature scaling parameters — are computed from `split = 'train'` rows only, computed on rank 0, broadcast to all ranks, and frozen for the training run. The split assignment is read from the upstream dataset; this module never re-splits data.
+**No leakage across splits.** All statistics derived from data — `pos_weights` (one per target), temperature scaling parameters — are computed from `split = 'train'` rows only, computed on rank 0, broadcast to all ranks, and frozen for the training run. The split assignment is read from the upstream dataset; this module never re-splits data.
 
 **Hard contracts, hard failures.** Upstream schema violations raise immediately in `Mimic4DataLoader` with descriptive error messages referencing `PREPROCESSING_DATA_MODEL.md` by section and the producing module by name.
 
@@ -347,11 +350,11 @@ See `REWARD_MODEL_DETAILED_DESIGN.md` for per-module memory requirements and ful
 
 **Feature boundaries are derived, not declared.** The feature index map is constructed at load time from the canonical column order in `PREPROCESSING_DATA_MODEL.md` Section 3.12. No separate index map config file exists.
 
-**One class per file.** Each class definition lives in its own `*.py` module (for example, `RewardModelConfig` in `reward_model_config.py`, `ParquetDataset` in `parquet_dataset.py`). Shared helpers and constants (for example, `ALWAYS_VISIBLE_SLOTS`, `get_device()`) live in `reward_model_utils.py` alongside the backward-compatibility re-exports for the class modules.
+**One class per file.** Each class definition lives in its own `*.py` module (for example, `RewardModelConfig` in `reward_model_config.py`, `ParquetDataset` in `parquet_dataset.py`). Shared helpers (`get_device()`, `unwrap_ddp()`) live in `reward_model_utils.py`.
 
 **Rank 0 owns all I/O.** Under DDP, only rank 0 writes checkpoints, metrics, and logs. All ranks participate in forward/backward passes and gradient all-reduce. This prevents duplicate writes and ensures a consistent checkpoint state.
 
-**Resumability.** Every checkpoint saves model weights (unwrapped from DDP), optimizer state, current epoch, curriculum schedule state, and a full config snapshot. Re-running `reward_model_manager.py --resume` via `torchrun` continues from the last checkpoint. Schema validation runs on every start regardless of resume status.
+**Resumability.** `best_model_train.pt` saves model weights (unwrapped from DDP), optimizer state, current epoch, and best dev loss. The LR scheduler and masking schedule are not saved — both are rebuilt from config on resume and the scheduler is fast-forwarded to the correct step. Re-running with `--resume` via `torchrun` continues from the last checkpoint. Schema validation runs on every start regardless of resume status.
 
 ---
 
@@ -374,18 +377,17 @@ HRS/
 │       ├── mimic4_data_loader.py           # step 1 — load, validate schema, derive feature index map
 │       ├── reward_mode.py                   # step 2 — RewardModel MLP definition
 │       ├── masking.py                       # step 3 — random / adversarial / no-mask modes
-│       ├── metrics.py                       # step 4 — AUROC/AUPRC/ECE computation + MetricsLogger (Parquet logging)
+│       ├── metrics.py                       # step 4 — AUROC/AUPRC/ECE computation + MetricsLogger (CSV logging)
 │       ├── reward_model_main.py             # step 5 — DDP entrypoint launched by torchrun
 │       ├── reward_model_manager.py                         # RewardModelManager class: loss computation, curriculum, epoch loop, checkpointing
 │       ├── calibrate.py                     # step 6 — temperature scaling on dev split (TemperatureCalibrator class)
 │       ├── inference.py                     # step 7 — frozen forward pass for RL agent
 │       │
-│       ├── schema_error.py                  # shared SchemaError exception (class-only file)
 │       ├── reward_model_config.py           # Pydantic RewardModelConfig + loader (class-only file)
 │       ├── parquet_dataset.py               # ParquetDataset class (lazy Parquet reader)
 │       ├── row_group_block_sampler.py       # RowGroupBlockSampler class (row-group-aware sampler)
 │       ├── dataset_bundle.py                # DatasetBundle NamedTuple (train/dev/test bundle)
-│       ├── reward_model_utils.py            # shared helpers + re-exports (no class definitions)
+│       ├── reward_model_utils.py            # shared helpers: get_device(), unwrap_ddp()
 │       │
 │       ├── reward_job.sh                    # SLURM: training job (2× GPU, 64G)
 │       ├── calibrate_job.sh                 # SLURM: calibration job (1× GPU, 32G)
@@ -401,9 +403,9 @@ HRS/
     │
     └── reward_model/                        # [git-ignored] generated by this module
         ├── checkpoints/
-        │   ├── best_model.pt
-        │   └── epoch_<N>.pt
-        ├── training_metrics.parquet
+        │   ├── best_model_train.pt          # model + optimizer state (for resume)
+        │   └── best_model.pt               # model weights only (for calibration / export)
+        ├── training_metrics.csv
         └── calibration_params.json
 ```
 
@@ -413,11 +415,11 @@ HRS/
 
 ### Cluster and Environment
 
-University HPC cluster running SLURM — same cluster as `HRS/src/preprocessing`. Partition names, GPU type, time limits, and RAM are defined in `config/reward_model.yaml`. Two GPUs per training job (default; controlled by `NUM_GPUS`). GPU with ≥24 GB VRAM recommended per device. CUDA 12.x, Python 3.11+.
+University HPC cluster running SLURM — same cluster as `HRS/src/preprocessing`. Partition names, GPU type, time limits, and RAM are defined in `reward_job.sh`. The GPU count is set by `--nproc_per_node` in `reward_job.sh` and the `--gres=gpu:N` SLURM allocation; DDP is enabled automatically when more than one GPU is available. GPU with ≥24 GB VRAM recommended when using the full dataset (D=42,248). CUDA 12.x, Python 3.11+.
 
 ### Capacity Sizing
 
-Under DDP with 2 GPUs, each GPU holds a full model copy. For the MIMIC-IV default (D=42,248): Hidden 1 weight matrix (42,248 × 8,192, ~1.32 GB float32) plus AdamW optimizer state requires ~5 GB per GPU before activations. At batch size 256 per GPU, total estimated GPU memory per device is 14–18 GB. A 24 GB GPU (A100 or equivalent) provides sufficient headroom. If memory is exceeded, apply PCA (768 → 256) in `HRS/src/preprocessing` — input reduces to ~14,088 dims, Hidden 1 to ~231 MB, with no changes to this module.
+Under DDP, each GPU holds a full model copy. For the current reduced dataset (D=7,048, EMBEDDING_DIM=128): Hidden 1 (7,048 × 8,192, ~220 MB float32) and full model (~290 MB); with AdamW optimizer state (~3×), well under 4 GB per GPU at batch size 1,024. For the full dataset (D=42,248, EMBEDDING_DIM=768): Hidden 1 alone occupies ~1.32 GB; with AdamW and activations, 14–18 GB per GPU at batch size 1,024; a 24 GB GPU (A100 or equivalent) is recommended. If memory is exceeded, apply PCA (768 → 256) in `HRS/src/preprocessing` — input reduces to ~14,088 dims, Hidden 1 to ~231 MB, with no changes to this module.
 
 ### Scripts
 
@@ -452,8 +454,8 @@ torchrun --nproc_per_node=2 src/reward_model/reward_model_main.py \
 [validate_contract.py]
           │  assertions pass
           ▼
-[reward_job.sh]  (torchrun, 2 GPUs)
-   rank 0 + rank 1 ── SLURM preemption ──► [reward_job.sh --resume]
+[reward_job.sh]  (torchrun, N GPUs)
+   all ranks ── SLURM preemption ──► [reward_job.sh --resume]
           │  best_model.pt written by rank 0
           └──(afterok)──► [calibrate_job.sh]  (single GPU)
                                    │  calibration_params.json written
@@ -466,7 +468,7 @@ torchrun --nproc_per_node=2 src/reward_model/reward_model_main.py \
 
 ### Resume Guarantee
 
-Re-running `reward_job.sh --resume` relaunches `torchrun` with 2 workers. Each worker loads the latest checkpoint from `data/reward_model/checkpoints/`, restores optimizer state and curriculum schedule, and continues from the saved epoch. Schema validation via `Mimic4DataLoader` runs on every start regardless of resume status. Only rank 0 reads and writes the checkpoint — rank 1 receives the loaded state via DDP process group initialisation.
+Re-running `reward_job.sh --resume` relaunches `torchrun`. Rank 0 reads `best_model_train.pt` from `data/reward_model/checkpoints/` and broadcasts the checkpoint state to all ranks via `dist.broadcast_object_list`. All ranks restore model and optimizer state, then continue from the saved epoch. The LR scheduler and masking schedule are rebuilt from config and fast-forwarded to the correct step. Schema validation via `Mimic4DataLoader` runs on every start regardless of resume status. Only rank 0 writes checkpoints and metrics.
 
 ---
 
@@ -496,7 +498,7 @@ This section documents the specific configuration of the Reward Model for the MI
 | Total feature slots | 56 (F1–F56) |
 | Always-visible slots | 5 (F1–F5: demographics, diagnosis history, discharge summary, triage, chief complaint) |
 | Maskable slots (M) | 51 (F6–F56: lab groups, radiology, microbiology panels) |
-| Total input dimensionality D | 8 + (55 × EMBEDDING_DIM) → **42,248** at EMBEDDING_DIM = 768; **7,048** at EMBEDDING_DIM = 128 |
+| Total input dimensionality D | 8 + (55 × EMBEDDING_DIM) → **7,048** at EMBEDDING_DIM = 128 (current default, reduced dataset); **42,248** at EMBEDDING_DIM = 768 (full dataset) |
 
 ### 15.3 Loss Configuration
 
@@ -521,7 +523,7 @@ where `w₁` and `w₂` are RL agent reward weights (distinct from training loss
 
 | Layer | In | Out | Dropout |
 |-------|----|-----|---------|
-| Hidden 1 | 42,248 | 8,192 | 0.4 |
+| Hidden 1 | 7,048 (reduced) / 42,248 (full) | 8,192 | 0.4 |
 | Hidden 2 | 8,192 | 2,048 | 0.3 |
 | Hidden 3 | 2,048 | 512 | 0.3 |
 | Hidden 4 | 512 | 128 | 0.2 |

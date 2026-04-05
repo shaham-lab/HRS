@@ -1,6 +1,7 @@
 name: hrs
 channels:
   - conda-forge
+  - bioconda
   - defaults
 dependencies:
   - python=3.13
@@ -23,6 +24,8 @@ dependencies:
   - tqdm
   - fastparquet
   - pytest
+  - snakemake
+  - snakemake-executor-plugin-slurm
   - pip
   - pip:
       - pydantic==2.10.3

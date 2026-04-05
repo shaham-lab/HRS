@@ -50,15 +50,15 @@ class RewardModelManager:
         self.feature_index_map: Dict[str, Tuple[int, int]] = self.bundle.feature_index_map
         self.train_dataset = self.bundle.train_dataset
         self.dev_dataset = self.bundle.dev_dataset
-        self.input_dim: int = self.bundle.input_dim
+        self.label_names: list = self.bundle.label_names
 
         if self.rank == 0:
             logger.info("Successfully loaded datasets and broadcasted positive weights.")
 
         self.checkpoint_manager = CheckpointManager(
-            Path(self.config.CHECKPOINT_DIR), self.config.CHECKPOINT_KEEP_N
+            Path(self.config.CHECKPOINT_DIR)
         )
-        self.metrics_logger = MetricsLogger(Path(self.config.METRICS_PATH), self.config.NUM_TARGETS)
+        self.metrics_logger = MetricsLogger(Path(self.config.METRICS_PATH), self.label_names)
 
         self.model = self._build_model()
         self.optimizer = self._build_optimizer()
@@ -68,14 +68,7 @@ class RewardModelManager:
         self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
 
         if self.rank == 0:
-            logger.info(f"Initialized RewardModel with input_dim={self.input_dim} and DDP={self.is_ddp}")
-
-    def _maybe_load_states(self, ckpt_state: Optional[dict]) -> None:
-        if ckpt_state is None:
-            return
-        unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
-        self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
-        self.scheduler.load_state_dict(ckpt_state["scheduler_state_dict"])
+            logger.info(f"Initialized RewardModel with input_dim={self.config.INPUT_DIM} and DDP={self.is_ddp}")
 
     def resume_from_checkpoint(self) -> Tuple[dict, int, float]:
         latest = self.checkpoint_manager.find_latest()
@@ -83,7 +76,7 @@ class RewardModelManager:
             raise RuntimeError("Resume requested but no checkpoint found")
         ckpt_state: Optional[dict] = None
         if self.rank == 0:
-            ckpt_state = self.checkpoint_manager.load(latest, self.feature_index_map)
+            ckpt_state = self.checkpoint_manager.load(latest)
         if self.is_ddp:
             obj_state: list = [ckpt_state]
             dist.broadcast_object_list(obj_state, src=0)
@@ -135,13 +128,7 @@ class RewardModelManager:
         return bundle, pos_weights
 
     def _build_model(self) -> torch.nn.Module:
-        model = RewardModel(
-            input_dim=self.input_dim,
-            layer_widths=self.config.LAYER_WIDTHS,
-            dropout_rates=self.config.DROPOUT_RATES,
-            activation=self.config.ACTIVATION,
-            num_targets=self.config.NUM_TARGETS,
-        ).to(self.device)
+        model = RewardModel(self.config).to(self.device)
         if self.is_ddp:
             model = DistributedDataParallel(model, device_ids=[self.local_rank])
         return model
@@ -154,14 +141,14 @@ class RewardModelManager:
             betas=(self.config.ADAM_BETA1, self.config.ADAM_BETA2),
         )
 
-    def _build_lr_scheduler(self, steps_per_epoch: int, start_step: int) -> torch.optim.lr_scheduler.LRScheduler:
+    def _build_lr_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LRScheduler:
         warmup_steps = max(self.config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
         total_steps = max(self.config.MAX_EPOCHS * max(steps_per_epoch, 1), 1)
 
         if warmup_steps > 0:
             warmup = torch.optim.lr_scheduler.LinearLR(
                 self.optimizer,
-                start_factor=1e-8,
+                start_factor=0.01,
                 end_factor=1.0,
                 total_iters=warmup_steps,
             )
@@ -176,8 +163,6 @@ class RewardModelManager:
                 self.optimizer, T_max=total_steps, eta_min=self.config.LR_MIN
             )
 
-        for _ in range(start_step):
-            scheduler.step()
         return scheduler
 
     def compute_loss(
@@ -290,15 +275,19 @@ class RewardModelManager:
         return result
 
     def setup_training_state(self, ckpt_state: Optional[dict], start_epoch: int) -> None:
-        self.masking_schedule = self._build_masking_schedule(ckpt_state)
+        self.masking_schedule = self._build_masking_schedule()
         self.train_loader = self._build_train_loader()
         if self.is_ddp and self.train_loader is None:
             raise RuntimeError("Train dataset unavailable for DDP training")
 
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
         start_step = start_epoch * steps_per_epoch
-        self.scheduler = self._build_lr_scheduler(steps_per_epoch, start_step)
-        self._maybe_load_states(ckpt_state)
+        self.scheduler = self._build_lr_scheduler(steps_per_epoch)
+        if ckpt_state is not None:
+            unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
+            self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+        for _ in range(start_step):
+            self.scheduler.step()
         if self.rank == 0 and self.train_loader is not None:
             steps = len(self.train_loader)
             logger.info(
@@ -311,36 +300,8 @@ class RewardModelManager:
         if self.rank == 0:
             logger.info(f"Training state setup complete. Resuming from epoch {start_epoch}.")
 
-    def _build_masking_schedule(self, ckpt_state: Optional[dict]) -> MaskingSchedule:
-        if ckpt_state is not None:
-            ms = ckpt_state["masking_schedule_state"]
-            return MaskingSchedule(
-                feature_index_map=self.feature_index_map,
-                start_ratios=ms["start_ratios"],
-                end_ratios=ms["end_ratios"],
-                transition_shape=ms["transition_shape"],
-                transition_midpoint_epoch=ms["transition_midpoint_epoch"],
-                total_epochs=ms["total_epochs"],
-                num_always_visible=ms["num_always_visible"],
-                random_k_min_fraction=ms["random_k_min_fraction"],
-                random_k_max_fraction=ms["random_k_max_fraction"],
-                adversarial_k_min_fraction=ms["adversarial_k_min_fraction"],
-                adversarial_k_max_fraction=ms["adversarial_k_max_fraction"],
-            )
-
-        return MaskingSchedule(
-            feature_index_map=self.feature_index_map,
-            start_ratios=self.config.MASKING_START_RATIOS,
-            end_ratios=self.config.MASKING_END_RATIOS,
-            transition_shape=self.config.MASKING_TRANSITION_SHAPE,
-            transition_midpoint_epoch=self.config.MASKING_TRANSITION_MIDPOINT_EPOCH,
-            total_epochs=self.config.MAX_EPOCHS,
-            num_always_visible=self.config.NUM_ALWAYS_VISIBLE_FEATURES,
-            random_k_min_fraction=self.config.MASKING_RANDOM_K_MIN_FRACTION,
-            random_k_max_fraction=self.config.MASKING_RANDOM_K_MAX_FRACTION,
-            adversarial_k_min_fraction=self.config.MASKING_ADVERSARIAL_K_MIN_FRACTION,
-            adversarial_k_max_fraction=self.config.MASKING_ADVERSARIAL_K_MAX_FRACTION,
-        )
+    def _build_masking_schedule(self) -> MaskingSchedule:
+        return MaskingSchedule(self.config, self.feature_index_map)
 
     def _build_train_loader(self) -> Optional[DataLoader]:
         if self.train_dataset is None:
@@ -376,9 +337,9 @@ class RewardModelManager:
             )
             X_grad = X.clone().requires_grad_(True)
             with context:
-                # forward pass to calculate gradients
-                logits_list = list(self.model(X_grad))
-                loss_total, _ = self.compute_loss(logits_list, labels)
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits_list = list(self.model(X_grad))
+                    loss_total, _ = self.compute_loss(logits_list, labels)
                 loss_total.backward()
 
             gradients = X_grad.grad.detach()
@@ -391,8 +352,9 @@ class RewardModelManager:
                 X = self.masking_schedule.apply_random_mask(X)
 
         # forward step with masked (or unmasked) input
-        logits_list = list(self.model(X))
-        loss_total, component_losses = self.compute_loss(logits_list, labels)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            logits_list = list(self.model(X))
+            loss_total, component_losses = self.compute_loss(logits_list, labels)
         loss_total.backward()
         #for debugging
         layer_norms = {}
@@ -498,17 +460,14 @@ class RewardModelManager:
 
                 row: Dict = {
                     "epoch": epoch,
-                    "wall_time_s": float(time.time() - epoch_start),
-                    "masking_random_pct": probs[0] * 100.0,
-                    "masking_adversarial_pct": probs[1] * 100.0,
-                    "masking_none_pct": probs[2] * 100.0,
+                    "time(seconds)": int(time.time() - epoch_start),
                     "loss_total": dev_metrics["loss_total"],
                 }
-                for i in range(T):
-                    row[f"loss_target_{i}"] = dev_metrics[f"loss_target_{i}"]
-                    row[f"auroc_target_{i}"] = dev_metrics[f"auroc_target_{i}"]
-                    row[f"auprc_target_{i}"] = dev_metrics[f"auprc_target_{i}"]
-                    row[f"ece_target_{i}"] = dev_metrics[f"ece_target_{i}"]
+                for i, name in enumerate(self.label_names):
+                    row[f"loss_{name}"] = dev_metrics[f"loss_target_{i}"]
+                    row[f"auroc_{name}"] = dev_metrics[f"auroc_target_{i}"]
+                    row[f"auprc_{name}"] = dev_metrics[f"auprc_target_{i}"]
+                    row[f"ece_{name}"] = dev_metrics[f"ece_target_{i}"]
                 logger.info(
                     "Epoch %d | %.1fs | Loss=%.4f | "
                     "Y1: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
@@ -535,23 +494,17 @@ class RewardModelManager:
                     best_dev_loss = current_dev_loss
                     epochs_without_improve = 0
                     logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
-                    self.checkpoint_manager.save_epoch_checkpoint(
+                    self.checkpoint_manager.save_train_checkpoint(
                         self.model,
                         self.optimizer,
-                        self.scheduler,
                         epoch,
                         best_dev_loss,
-                        self.feature_index_map if self.feature_index_map is not None else {},
-                        self.config,
                     )
                     self.checkpoint_manager.save_best_model(
                         self.model,
                         epoch,
                         best_dev_loss,
-                        self.feature_index_map if self.feature_index_map is not None else {},
-                        self.config,
                     )
-                    self.checkpoint_manager.prune_old_checkpoints()
                 else:
                     epochs_without_improve += 1
                     logger.info(
@@ -581,14 +534,11 @@ class RewardModelManager:
         if self.is_ddp:
             dist.barrier()
         if self.rank == 0:
-            self.checkpoint_manager.save_epoch_checkpoint(
+            self.checkpoint_manager.save_train_checkpoint(
                 self.model,
                 self.optimizer,
-                self.scheduler,
                 last_epoch_completed if last_epoch_completed >= 0 else 0,
                 best_dev_loss,
-                self.feature_index_map if self.feature_index_map is not None else {},
-                self.config,
             )
         if self.is_ddp:
             dist.barrier()

@@ -13,7 +13,7 @@
 9. [Reduced Dataset](#9-reduced-dataset)
 10. [Design Principles](#10-design-principles)
 11. [Directory Structure](#11-directory-structure)
-12. [SLURM Execution](#12-slurm-execution)
+12. [Pipeline Execution](#12-pipeline-execution)
 
 ---
 
@@ -139,7 +139,7 @@ F1–F5 are always available to both the classifier and MDP agent. F6–F56 are 
 - `create_splits` → must run first
 - `build_lab_panel_config` → must run before `extract_labs`; `micro_panel_config.yaml` is version-controlled and requires no build step
 - All `extract_*` → independent of each other, can run in parallel
-- `embed_features` → requires all `extract_*` complete; runs as **14 sequential SLURM jobs**
+- `embed_features` → requires all `extract_*` complete; runs as **14 sequential Snakemake-managed SLURM jobs** (sequential to avoid concurrent parquet append conflicts)
 - `combine_dataset` → requires all embed slices complete
 - `reduce_dataset` (optional) → runs after `combine_dataset` and consumes `full_cdss_dataset.parquet`
 
@@ -243,16 +243,15 @@ Embedding columns are discovered dynamically from `EMBEDDINGS_DIR` — no hardco
 HRS/
 ├── config/
 │   ├── preprocessing.yaml              # All configuration — single source of truth
-│   └── micro_panel_config.yaml         # Microbiology panel definitions (version-controlled)
+│   ├── micro_panel_config.yaml         # Microbiology panel definitions (version-controlled)
+│   └── snakemake/
+│       └── slurm/
+│           └── config.yaml             # Snakemake SLURM executor profile
 ├── src/preprocessing/
-│   ├── pipeline_job.sh                 # SLURM: preprocessing (no GPU, 64G)
-│   ├── embed_job.sh                    # SLURM: one embed slice (2× L4 GPU, 64G)
-│   ├── combine_job.sh                  # SLURM: combine (no GPU, 32G)
-│   ├── submit_all.sh                   # Auto-submit with state detection
-│   ├── micro_extract_job.sh            # SLURM: extract_microbiology only
-│   ├── labs_extract_job.sh             # SLURM: extract_labs only
-│   ├── run_pipeline.py                 # Orchestrator CLI
-│   ├── check_embed_status.py           # State detection for submit_all.sh
+│   ├── Snakefile                       # Pipeline DAG — replaces submit_all.sh and all .sh job scripts
+│   ├── submit_pipeline.sh              # One-line Snakemake launcher
+│   ├── run_pipeline.py                 # Per-module executor (called by Snakemake rules)
+│   ├── check_embed_status.py           # Embedding state validator
 │   ├── preprocessing_utils.py          # Shared utilities
 │   ├── build_lab_panel_config.py       # Step 0a
 │   ├── create_splits.py                # Step 1
@@ -266,6 +265,7 @@ HRS/
 │   ├── extract_y_data.py               # Step 9
 │   ├── embed_features.py               # Step 10 — accepts --slice-index
 │   ├── combine_dataset.py              # Step 11
+│   ├── reduce_dataset.py               # Step 12 (optional)
 │   ├── build_lab_text_lines.py         # Helper for extract_labs
 │   └── build_micro_text.py             # Helper for extract_microbiology
 └── data/preprocessing/                 # Generated artefacts (git-ignored)
@@ -275,18 +275,24 @@ HRS/
     │   ├── [feature parquets ×8]
     │   └── embeddings/
     │       └── [embedding parquets ×55]
-    └── classifications/
-        ├── y_labels.parquet
-        ├── full_cdss_dataset.parquet
-        ├── lab_panel_config.yaml
-        ├── imputation_stats.json
-        ├── hadm_linkage_stats.json
-        └── micro_linkage_stats.json
+    ├── classifications/
+    │   ├── lab_panel_config.yaml
+    │   └── y_labels.parquet
+    ├── stats/
+    │   ├── imputation_stats.json
+    │   ├── hadm_linkage_stats.json
+    │   └── micro_linkage_stats.json
+    ├── full/
+    │   └── full_cdss_dataset.parquet
+    └── reduced/
+        ├── reduced_cdss_dataset.parquet
+        ├── fitted_transforms.pkl
+        └── variance_stats.json
 ```
 
 ---
 
-## 12. SLURM Execution
+## 12. Pipeline Execution
 
 **Cluster:** University HPC cluster — login node and partition names are defined in `config/preprocessing.yaml`.  
 **Partitions:** Two GPU partitions are supported — a standard time-limit partition and a shorter queue-wait partition. Partition names, GPU type, time limits, and GPU count per job are all configurable.
@@ -299,45 +305,61 @@ The safe per-GPU admission limit is ~20,000 admissions per 2-GPU job, giving ~40
 |-----------------|------------------------------------------|-----------------|--------------|
 | Computed at runtime | 20,000 | 40,000 | **14** (based on current corpus) |
 
-### Scripts
+### Per-Rule SLURM Resources
 
-All SLURM scripts live in `src/preprocessing/` alongside the Python modules they invoke.
+| Rule | Partition | CPUs | Memory | GPUs | Time limit |
+|------|-----------|------|--------|------|------------|
+| create_splits | cpu1T-24h | 8 | 32G | 0 | 8h |
+| build_lab_panel_config | cpu1T-24h | 8 | 32G | 0 | 8h |
+| extract_* (×8) | cpu1T-24h | 48 | 64G | 0 | 24h |
+| embed_features (per slice) | B200-4h | 8 | 64G | 2 | 4h |
+| combine_dataset | cpu1T-24h | 48 | 256G | 0 | 24h |
+| reduce_dataset | cpu1T-24h | 48 | 128G | 0 | 24h |
 
-| Script | GPUs | Purpose |
-|--------|------|---------|
-| `pipeline_job.sh` | 0 | Steps 0a–9 (CPU only) |
-| `micro_extract_job.sh` | 0 | `extract_microbiology` only (CPU) — run before `submit_all.sh` |
-| `labs_extract_job.sh` | 0 | `extract_labs` only (CPU) — run before `submit_all.sh` |
-| `embed_job.sh` | 2 | One admission slice — takes `--slice-index N` (passed by `submit_all.sh`) |
-| `combine_job.sh` | 0 | Step 11 — combine only (CPU) |
-| `submit_all.sh` | — | Detects state, submits all pending slices chained via `--dependency=afterok` |
+### Resumability
 
-`extract_labs` and `extract_microbiology` must be submitted as dedicated SLURM jobs before running `submit_all.sh`. `submit_all.sh` handles embedding and combine only — it will exit with an error if extraction parquets are missing, printing the exact command to run. Use `check_embed_status.py` to verify extraction completeness before submitting embed jobs.
+Snakemake detects completed steps by output file existence and
+timestamps — no manual state detection required. Re-running
+`submit_pipeline.sh` always picks up from where the pipeline
+left off. Incomplete outputs from killed jobs are automatically
+rerun via `rerun-incomplete: true` in the Snakemake profile.
 
-### Auto-submit State Detection and Job Chaining
+> See `PREPROCESSING_DETAILED_DESIGN.md` for full per-module
+> implementation details, embedding internals, and configuration
+> reference.
 
+### Running the Pipeline
 ```bash
-cd ~/Python/HRS
-bash src/preprocessing/submit_all.sh
+# Full pipeline — submits all pending jobs automatically:
+bash src/preprocessing/submit_pipeline.sh
+
+# Dry run — preview what would run without submitting:
+bash src/preprocessing/submit_pipeline.sh --dry-run
+
+# Force rerun a specific module (e.g. after fixing demographics):
+bash src/preprocessing/submit_pipeline.sh \
+  --forcerun extract_demographics
+
+# Run up to a specific target:
+bash src/preprocessing/submit_pipeline.sh \
+  --until combine_dataset
 ```
 
-`check_embed_status.py` scans embedding parquets for total row count, determines which slices are complete, and exits with:
-- **2** → preprocessing incomplete → submits pipeline → 14 embed slices → combine
-- **1** → embedding incomplete or extraction incomplete →  
-  if extraction incomplete: prints error with command to run extraction job and exits;  
-  if extraction complete: submits all embed slices → combine
-- **0** → all embeddings complete → submits combine only
+### Parallelism
 
-The 14 embed slice jobs are submitted as a dependency chain:
+All extraction rules are independent and run as parallel SLURM
+jobs simultaneously. Snakemake coordinates all dependencies
+automatically — no manual job chaining required.
+extract_demographics ─┐
+extract_diag_history  ─┤
+extract_discharge_    ─┤ (all parallel)
+extract_triage_       ─┤──► embed slices (sequential) ──► combine ──► reduce
+extract_labs          ─┤
+extract_microbiology  ─┤
+extract_radiology     ─┤
+extract_y_data        ─┘
 
-```
-embed_slice_0
-    └──(afterok)── embed_slice_1
-                       └──(afterok)── embed_slice_2
-                                          └──(afterok)── ... embed_slice_13
-                                                                   └──(afterok)── combine
-```
-
-Re-running `submit_all.sh` is always safe. Each slice job detects its already-completed rows via record-level resume and skips them, so a re-submitted slice only processes what remains.
+Embed slices run sequentially to avoid concurrent parquet append
+conflicts.
 
 > See `PREPROCESSING_DETAILED_DESIGN.md` for full per-module implementation details, embedding internals, admission-slice batching design, and configuration reference.

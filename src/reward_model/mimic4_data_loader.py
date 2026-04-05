@@ -7,7 +7,6 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from data_loader import DataLoader
-from schema_error import SchemaError
 
 logger = logging.getLogger(__name__)
 
@@ -164,9 +163,9 @@ class Mimic4DataLoader(DataLoader):
         survivor_mask = mortality == 0.0
 
         if readmit[deceased_mask].notna().any():
-            raise SchemaError("y2_readmission must be NaN for deceased rows; produced by extract_y_data.py")
+            raise ValueError("y2_readmission must be NaN for deceased rows; produced by extract_y_data.py")
         if survivor_mask.any() and readmit[survivor_mask].isna().any():
-            raise SchemaError("y2_readmission must be non-null for survivors; produced by extract_y_data.py")
+            raise ValueError("y2_readmission must be non-null for survivors; produced by extract_y_data.py")
 
     def _build_feature_index_map(self, parquet_file: pq.ParquetFile) -> Dict[str, Tuple[int, int]]:
         columns = parquet_file.schema_arrow.names
@@ -177,7 +176,7 @@ class Mimic4DataLoader(DataLoader):
             feature_columns.append(name)
 
         if "demographic_vec" not in feature_columns:
-            raise SchemaError(
+            raise ValueError(
                 "demographic_vec column missing from dataset; expected per PREPROCESSING_DATA_MODEL.md Section 3.12"
             )
 
@@ -192,7 +191,7 @@ class Mimic4DataLoader(DataLoader):
                 width = self._config.EMBEDDING_DIM
                 embedding_columns.append(col)
             else:
-                raise SchemaError(
+                raise ValueError(
                     f"Unexpected feature column '{col}' encountered while building index map; "
                     "expected only demographic_vec and *_embedding columns per PREPROCESSING_DATA_MODEL.md Section 3.12"
                 )
@@ -201,7 +200,7 @@ class Mimic4DataLoader(DataLoader):
 
         missing_expected = set(self._EXPECTED_COLUMNS) - set(columns)
         if missing_expected:
-            raise SchemaError(
+            raise ValueError(
                 f"Missing expected columns {sorted(missing_expected)} per PREPROCESSING_DATA_MODEL.md Section 3.12"
             )
 
@@ -213,7 +212,7 @@ class Mimic4DataLoader(DataLoader):
         if len(embedding_columns) != 55 or (
             history_count != 4 or lab_count != 13 or radiology_count != 1 or micro_count != 37
         ):
-            raise SchemaError(
+            raise ValueError(
                 "Embedding column breakdown mismatch — expected 55 embedding columns with counts "
                 "(history/triage=4, lab=13, radiology=1, microbiology=37) as defined in "
                 "PREPROCESSING_DATA_MODEL.md Section 3.12"
@@ -231,7 +230,7 @@ class Mimic4DataLoader(DataLoader):
         pos_y1 = float((y1 == 1).sum())
         neg_y1 = float((y1 == 0).sum())
         if pos_y1 == 0 or neg_y1 == 0:
-            raise SchemaError("y1_mortality must contain both positive and negative examples")
+            raise ValueError("y1_mortality must contain both positive and negative examples")
         pos_weight_y1 = neg_y1 / pos_y1
 
         survivors = train_y_df[train_y_df["y1_mortality"] == 0]
@@ -239,7 +238,7 @@ class Mimic4DataLoader(DataLoader):
         pos_y2 = float((y2 == 1).sum())
         neg_y2 = float((y2 == 0).sum())
         if pos_y2 == 0 or neg_y2 == 0:
-            raise SchemaError("y2_readmission must contain both positive and negative examples for survivors")
+            raise ValueError("y2_readmission must contain both positive and negative examples for survivors")
         pos_weight_y2 = neg_y2 / pos_y2
 
         return [float(pos_weight_y1), float(pos_weight_y2)]
@@ -257,7 +256,7 @@ class Mimic4DataLoader(DataLoader):
     def _validate_column_order(schema: pa.Schema, expected_columns: List[str]) -> None:
         names = schema.names
         if names != expected_columns:
-            raise SchemaError(
+            raise ValueError(
                 "Column order mismatch; expected canonical order from PREPROCESSING_DATA_MODEL.md Section 3.12. "
                 "Re-run preprocessing to regenerate full_cdss_dataset.parquet"
             )
@@ -268,13 +267,13 @@ class Mimic4DataLoader(DataLoader):
         name = "y1_mortality"
         field = schema.field(name)
         if not pa.types.is_integer(field.type):
-            raise SchemaError(f"{name} dtype mismatch; expected integer type (actual: int64) produced by extract_y_data.py")
+            raise ValueError(f"{name} dtype mismatch; expected integer type (actual: int64) produced by extract_y_data.py")
 
         #validate y2
         name = "y2_readmission"
         field = schema.field(name)
         if not pa.types.is_floating(field.type):
-            raise SchemaError(f"{name} dtype mismatch; expected floating type (actual: float64/double) produced by extract_y_data.py")
+            raise ValueError(f"{name} dtype mismatch; expected floating type (actual: float64/double) produced by extract_y_data.py")
 
 
     @staticmethod
@@ -283,13 +282,13 @@ class Mimic4DataLoader(DataLoader):
         for name in embedding_columns:
             field = schema.field(name)
             if not (pa.types.is_list(field.type) and pa.types.is_float32(field.type.value_type)):
-                raise SchemaError(f"{name} type mismatch; expected list<float32> produced by combine_dataset.py")
+                raise ValueError(f"{name} type mismatch; expected list<float32> produced by combine_dataset.py")
 
     @staticmethod
     def _validate_demographic_vec(schema: pa.Schema) -> None:
         field = schema.field("demographic_vec")
         if not (pa.types.is_list(field.type) and pa.types.is_floating(field.type.value_type)):
-            raise SchemaError("demographic_vec type mismatch; expected list<float64> produced by combine_dataset.py")
+            raise ValueError("demographic_vec type mismatch; expected list<float64> produced by combine_dataset.py")
 
     @staticmethod
     def _validate_null_counts(parquet_file: pq.ParquetFile, columns: List[str]) -> None:
@@ -299,7 +298,7 @@ class Mimic4DataLoader(DataLoader):
             for rg in range(parquet_file.metadata.num_row_groups):
                 stats = parquet_file.metadata.row_group(rg).column(idx).statistics
                 if stats is None or not stats.has_null_count:
-                    raise SchemaError(
+                    raise ValueError(
                         f"Missing null-count statistics for column {col}; "
                         "cannot validate null counts — re-run preprocessing "
                         "to regenerate statistics"
@@ -307,4 +306,4 @@ class Mimic4DataLoader(DataLoader):
                 nulls += stats.null_count
             if nulls != 0:
                 producer = "combine_dataset.py" if col.endswith("_embedding") else "extract_y_data.py"
-                raise SchemaError(f"Null values found in {col} produced by {producer}")
+                raise ValueError(f"Null values found in {col} produced by {producer}")

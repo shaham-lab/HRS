@@ -7,8 +7,6 @@ from typing import Dict, List, Optional, Union
 import yaml
 from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
-from schema_error import SchemaError
-
 
 class RewardModelConfig(BaseModel):
     LAYER_WIDTHS: List[int]
@@ -18,7 +16,6 @@ class RewardModelConfig(BaseModel):
 
     MAX_EPOCHS: int
     BATCH_SIZE_PER_GPU: int
-    NUM_GPUS: int = 2
     LEARNING_RATE: float
     WEIGHT_DECAY: float
     ADAM_BETA1: float
@@ -26,7 +23,6 @@ class RewardModelConfig(BaseModel):
     LR_WARMUP_EPOCHS: int
     LR_MIN: float
     EARLY_STOPPING_PATIENCE: int
-    CHECKPOINT_KEEP_N: int
 
     LOSS_WEIGHTS: List[float]
     POS_WEIGHTS: Optional[List[float]] = Field(default=None)
@@ -131,4 +127,4 @@ def load_and_validate_config(path: str) -> RewardModelConfig:
     try:
         return RewardModelConfig(**data)
     except ValidationError as exc:
-        raise SchemaError(f"Invalid reward model configuration: {exc}") from exc
+        raise ValueError(f"Invalid reward model configuration: {exc}") from exc

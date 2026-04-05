@@ -9,8 +9,8 @@ applies the correct masking mode to each mini-batch.  Three modes:
                 (Shaham et al. 2016, adapted for discrete feature-slot masking)
   none        — return X unchanged
 
-The probability of each mode evolves via a sigmoid crossover schedule driven by
-``sigmoid_crossover()`` defined in this module.
+The probability of each mode evolves via a sigmoid crossover schedule computed
+in ``MaskingSchedule.get_mode_probabilities``.
 
 See Detailed Design §5 (masking.py) and §6.3 (adversarial masking under DDP).
 """
@@ -23,24 +23,7 @@ from typing import Dict, List, Tuple
 import numpy as np
 import torch
 
-
-def sigmoid_crossover(
-    epoch: int,
-    total_epochs: int,
-    start_ratios: Dict[str, float],
-    end_ratios: Dict[str, float],
-    midpoint: float,
-) -> Tuple[float, float, float]:
-    """Compute masking probabilities for the given epoch using a sigmoid crossover."""
-    clamped_epoch = max(0, min(epoch, total_epochs))
-    scale = max(total_epochs * 0.1, 1.0)
-    progress = 1.0 / (1.0 + math.exp(-(clamped_epoch - midpoint) / scale))
-    probs = []
-    for key in ("random", "adversarial", "none"):
-        start = start_ratios[key]
-        end = end_ratios[key]
-        probs.append(start + (end - start) * progress)
-    return (probs[0], probs[1], probs[2])
+from reward_model_config import RewardModelConfig
 
 
 logger = logging.getLogger(__name__)
@@ -49,71 +32,35 @@ logger = logging.getLogger(__name__)
 class MaskingSchedule:
     """Curriculum masking schedule: random, adversarial, and no-mask modes.
 
-    Maintains state across the training loop.  Epoch advancement is a stateful
-    operation — the same schedule instance is used for the entire run and is
-    serialised into every checkpoint.
+    Maintains state across the training loop. Three modes:
 
-    Config keys consumed (via constructor args, not direct config access):
-        MASKING_START_RATIOS, MASKING_END_RATIOS, MASKING_TRANSITION_SHAPE,
-        MASKING_TRANSITION_MIDPOINT_EPOCH, NUM_ALWAYS_VISIBLE_FEATURES,
-        MASKING_RANDOM_K_MIN_FRACTION, MASKING_RANDOM_K_MAX_FRACTION,
-        MASKING_ADVERSARIAL_K_MIN_FRACTION, MASKING_ADVERSARIAL_K_MAX_FRACTION.
+      random      — zero k feature slots selected uniformly at random per sample
+      adversarial — zero the top-k highest-gradient slots per sample
+      none        — return X unchanged
+
+    The probability of each mode evolves via a sigmoid crossover schedule
+    computed in ``get_mode_probabilities``. The first
+    ``NUM_ALWAYS_VISIBLE_FEATURES`` slots (in insertion order) are never
+    masked; all remaining slots are maskable.
     """
 
     def __init__(
         self,
+        config: RewardModelConfig,
         feature_index_map: Dict[str, Tuple[int, int]],
-        start_ratios: Dict[str, float],
-        end_ratios: Dict[str, float],
-        transition_shape: str,
-        transition_midpoint_epoch: int,
-        total_epochs: int,
-        num_always_visible: int = 5,
-        random_k_min_fraction: float = 0.5,
-        random_k_max_fraction: float = 1.0,
-        adversarial_k_min_fraction: float = 0.3,
-        adversarial_k_max_fraction: float = 0.7,
     ) -> None:
-        """Initialise the masking schedule.
+        self._start_ratios = config.MASKING_START_RATIOS
+        self._end_ratios = config.MASKING_END_RATIOS
+        self._transition_midpoint_epoch = config.MASKING_TRANSITION_MIDPOINT_EPOCH
+        self._total_epochs = config.MAX_EPOCHS
+        self._random_k_min_fraction = config.MASKING_RANDOM_K_MIN_FRACTION
+        self._random_k_max_fraction = config.MASKING_RANDOM_K_MAX_FRACTION
+        self._adversarial_k_min_fraction = config.MASKING_ADVERSARIAL_K_MIN_FRACTION
+        self._adversarial_k_max_fraction = config.MASKING_ADVERSARIAL_K_MAX_FRACTION
 
-        Args:
-            feature_index_map: Mapping of feature column name to ``(start, end)``
-                index range within the flat input tensor.  The first
-                ``num_always_visible`` entries (in insertion order) are treated
-                as always-visible; all remaining entries are maskable.
-            start_ratios: Mode probabilities at epoch 0.
-            end_ratios: Mode probabilities at the final epoch.
-            transition_shape: Crossover curve shape (only ``'sigmoid'`` supported).
-            transition_midpoint_epoch: Epoch at sigmoid crossover inflection point.
-            total_epochs: Total training epochs.
-            num_always_visible: Number of leading slots in ``feature_index_map``
-                that are never masked.  Positional — must match the leading
-                always-visible slots enforced by the upstream preprocessing
-                pipeline column order.
-            random_k_min_fraction: Minimum fraction of maskable slots zeroed per
-                sample in random mode.
-            random_k_max_fraction: Maximum fraction of maskable slots zeroed per
-                sample in random mode (effective upper bound is M−1).
-            adversarial_k_min_fraction: Minimum fraction of maskable slots zeroed
-                per sample in adversarial mode.
-            adversarial_k_max_fraction: Maximum fraction of maskable slots zeroed
-                per sample in adversarial mode.
-        """
-        self._feature_index_map = feature_index_map
-        self._start_ratios = start_ratios
-        self._end_ratios = end_ratios
-        self._transition_shape = transition_shape
-        self._transition_midpoint_epoch = transition_midpoint_epoch
-        self._total_epochs = total_epochs
-        self._random_k_min_fraction = random_k_min_fraction
-        self._random_k_max_fraction = random_k_max_fraction
-        self._adversarial_k_min_fraction = adversarial_k_min_fraction
-        self._adversarial_k_max_fraction = adversarial_k_max_fraction
-
-        # Derive always-visible and maskable slots positionally from the map.
         all_slots: List[str] = list(feature_index_map.keys())
-        self._always_visible_slots: List[str] = all_slots[:num_always_visible]
-        self._maskable_slots: List[str] = all_slots[num_always_visible:]
+        self._always_visible_slots: List[str] = all_slots[:config.NUM_ALWAYS_VISIBLE_FEATURES]
+        self._maskable_slots: List[str] = all_slots[config.NUM_ALWAYS_VISIBLE_FEATURES:]
         self._M: int = len(self._maskable_slots)
 
     # ------------------------------------------------------------------
@@ -122,13 +69,17 @@ class MaskingSchedule:
 
     def get_mode_probabilities(self, epoch: int) -> Tuple[float, float, float]:
         """Return ``(p_random, p_adversarial, p_none)`` for the given epoch."""
-        return sigmoid_crossover(
-            epoch=epoch,
-            total_epochs=self._total_epochs,
-            start_ratios=self._start_ratios,
-            end_ratios=self._end_ratios,
-            midpoint=self._transition_midpoint_epoch,
-        )
+        clamped = max(0, min(epoch, self._total_epochs))
+        scale = max(self._total_epochs * 0.1, 1.0)
+        progress = 1.0 / (1.0 + math.exp(-(clamped - self._transition_midpoint_epoch) / scale))
+        probs = [
+            s + (e - s) * progress
+            for s, e in (
+                (self._start_ratios[k], self._end_ratios[k])
+                for k in ("random", "adversarial", "none")
+            )
+        ]
+        return probs[0], probs[1], probs[2]
 
     def sample_mode(self, epoch: int) -> str:
         """Draw a masking mode string for this mini-batch."""
@@ -199,6 +150,7 @@ class MaskingSchedule:
         for i in range(X.shape[0]):
             #per sample decide how many features to mask
             k = self._sample_k(
+
                 self._adversarial_k_min_fraction, self._adversarial_k_max_fraction
             )
             # Compute RMS importance for every maskable slot.
@@ -220,6 +172,3 @@ class MaskingSchedule:
                 masked[i, start:end] = 0.0
         return masked
 
-    def apply_no_mask(self, X: torch.Tensor) -> torch.Tensor:
-        """Return a clone of X with no masking applied."""
-        return X.clone()

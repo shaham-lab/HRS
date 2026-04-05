@@ -1,3 +1,9 @@
+# DEPRECATED: run_pipeline.py is retired.
+# The pipeline is now orchestrated by Snakemake via
+# src/preprocessing/Snakefile. Each preprocessing module
+# is called directly by Snakemake's script: directive.
+# This file is kept for reference only.
+
 """
 run_pipeline.py – Orchestrator for the CDSS preprocessing pipeline.
 
@@ -20,6 +26,7 @@ import logging
 import os
 import sys
 import time
+
 
 from preprocessing_utils import _load_config, _PATH_KEYS  # noqa: F401  (re-exported for tests)
 

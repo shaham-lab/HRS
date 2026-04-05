@@ -2,7 +2,7 @@
 #SBATCH --job-name=reward_train
 #SBATCH --output=logs/reward_train_%j.out
 #SBATCH --error=logs/reward_train_%j.err
-#SBATCH --partition=H200-12h
+#SBATCH --partition=H200-4h
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --mail-user=eli.kazum@biu.ac.il
@@ -26,6 +26,9 @@ mkdir -p logs
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate hrs
 export LD_LIBRARY_PATH="$HOME/miniconda3/envs/hrs/lib:$LD_LIBRARY_PATH"
+export NCCL_BUFFSIZE=268435456
+export NCCL_DEBUG=INFO
+
 
 
 # Launch DDP training.
@@ -33,7 +36,7 @@ export LD_LIBRARY_PATH="$HOME/miniconda3/envs/hrs/lib:$LD_LIBRARY_PATH"
 # --rdzv_backend=c10d uses the built-in rendezvous; no external store required.
 # "$@" forwards any arguments passed to sbatch (e.g. --resume).
 torchrun \
-    --nproc_per_node=1 \
+    --nproc_per_node=2 \
     --rdzv_backend=c10d \
     --rdzv_endpoint=localhost:29500 \
     src/reward_model/reward_model_main.py \

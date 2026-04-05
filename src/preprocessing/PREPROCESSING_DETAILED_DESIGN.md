@@ -128,10 +128,16 @@ Corrects for MIMIC-IV's year-shift anonymisation.
 
 | Priority | Source | Notes |
 |----------|--------|-------|
-| 1 | `omr.result_name` contains "Height" / "Weight" | `chartdate ≤ admittime`. Inches → cm (×2.54). Lbs → kg (×0.453592). |
-| 2–5 | `chartevents` itemids: height 226707, 226730; weight 226512, 224639, 226531, 226846 | First value within admission window. Unit conversion per itemid. |
+| 1 | OMR `result_name` contains "Height"/"Weight" | Closest record to `admittime` via `_closest_to_admittime()` — pre-admission preferred, post-admission as fallback with no window limit. Inches → cm (×2.54). Lbs → kg (×0.453592). |
+| 2–5 | chartevents itemids: height 226707, 226730; weight 226512, 224639, 226531, 226846 | First value within admission window. Unit conversion per itemid. |
 
-Plausibility filters: height 50–250 cm, weight 20–400 kg. Values outside range discarded before imputation.
+Plausibility filters: height 45–230 cm, weight 2–500 kg,
+BMI 5–100. Zero or negative values treated as invalid data
+entry errors (e.g. MIMIC-IV OMR contains Height = 0 for some
+patients) and discarded before selection. Values outside
+physiological bounds also discarded. BMI clipped to [5, 100]
+after derivation. Imputed height and weight clipped to
+physiological bounds before BMI is derived.
 
 After merge (pre-imputation): height missing 41.5%, weight missing 29.7%, BMI missing 43.2%.
 
@@ -808,7 +814,7 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `REDUCTION_ENABLED` | bool | `false` | Run `reduce_dataset.py` to emit reduced embeddings |
 | `REDUCTION_METHOD` | str | `"svd"` | `"svd"` = compact SVD (no mean centering; preserves zero vectors); `"pca_nonzero"` = fit PCA on non-zero rows only and scatter results back into a zero-initialised matrix |
 | `REDUCED_EMBEDDING_DIM` | int | `128` | Target embedding dimensionality for all `*_embedding` columns |
-| `REDUCTION_OUTPUT_DIR` | str | `data/preprocessing/classifications/reduced` | Destination for reduced parquet, transformers, and explained-variance stats |
+| `REDUCTION_OUTPUT_DIR` | str | `data/preprocessing/reduced` | Destination for reduced parquet, transformers, and explained-variance stats |
 | `LAB_ADMISSION_WINDOW` | int\|`"full"` | `24` | Hours of lab events from `admittime`; `"full"` = entire admission |
 | `HADM_LINKAGE_STRATEGY` | str | `"drop"` | `"drop"` or `"link"` for null `hadm_id` records in lab/note/chartevents |
 | `HADM_LINKAGE_TOLERANCE_HOURS` | int | `2` | Tolerance in hours for time-window linkage (lab/note/chartevents) |
@@ -822,6 +828,8 @@ All configuration in `config/preprocessing.yaml`. No module reads this file dire
 | `FEATURES_DIR` | str | `data/preprocessing/features` | Raw feature parquets |
 | `EMBEDDINGS_DIR` | str | `data/preprocessing/features/embeddings` | Embedding parquets |
 | `CLASSIFICATIONS_DIR` | str | `data/preprocessing/classifications` | Labels, config artefacts |
+| `STATS_DIR` | str | `data/preprocessing/stats` | Output directory for imputation_stats.json and hadm_linkage_stats.json |
+| `FULL_DATASET_DIR` | str | `data/preprocessing/full` | Output directory for full_cdss_dataset.parquet |
 | `HASH_REGISTRY_PATH` | str | `data/preprocessing/source_hashes.json` | MD5 registry for incremental runs |
 
 ---

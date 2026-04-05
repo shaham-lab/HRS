@@ -4,8 +4,7 @@ ACTIVATION: relu
 NUM_TARGETS: 2
 
 MAX_EPOCHS: 100
-BATCH_SIZE_PER_GPU: 256
-NUM_GPUS: 2
+BATCH_SIZE_PER_GPU: 1024
 LEARNING_RATE: 0.0001
 WEIGHT_DECAY: 0.00001
 ADAM_BETA1: 0.9
@@ -13,7 +12,6 @@ ADAM_BETA2: 0.999
 LR_WARMUP_EPOCHS: 5
 LR_MIN: 0.000001
 EARLY_STOPPING_PATIENCE: 10
-CHECKPOINT_KEEP_N: 3
 
 LOSS_WEIGHTS: [0.75, 0.25]
 POS_WEIGHTS: null
@@ -34,7 +32,7 @@ MASKING_ADVERSARIAL_K_MIN_FRACTION: 0.3
 MASKING_ADVERSARIAL_K_MAX_FRACTION: 0.7
 NUM_ALWAYS_VISIBLE_FEATURES: 5
 
-INPUT_DIM: 42248
+INPUT_DIM: 7048
 #DATASET_PATH: data/preprocessing/full/full_cdss_dataset.parquet
 # Inside your reward model config
 DATASET_PATH: "data/preprocessing/reduced/reduced_cdss_dataset.parquet"
@@ -43,6 +41,6 @@ DATASET_ROW_GROUP_CACHE_SIZE: 2
 DATALOADER_NUM_WORKERS: 2
 
 CHECKPOINT_DIR: data/reward_model/checkpoints
-METRICS_PATH: data/reward_model/training_metrics.parquet
+METRICS_PATH: data/reward_model/training_metrics.csv
 CALIBRATION_PARAMS_PATH: data/reward_model/calibration_params.json
 EXPORT_PATH: data/reward_model/frozen_model.pt

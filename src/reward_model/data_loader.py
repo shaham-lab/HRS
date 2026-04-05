@@ -10,7 +10,6 @@ import pyarrow.parquet as pq
 from dataset_bundle import DatasetBundle
 from parquet_dataset import ParquetDataset
 from reward_model_config import RewardModelConfig
-from schema_error import SchemaError
 
 logger = logging.getLogger(__name__)
 
@@ -34,7 +33,7 @@ class DataLoader(ABC):
     # pragma: no cover  # abstract hook
     @abstractmethod
     def _validate_schema(self, parquet_file: pq.ParquetFile) -> None:
-        """Validate dataset-level schema/columns; raise ``SchemaError`` on violation."""
+        """Validate dataset-level schema/columns; raise ``ValueError`` on violation."""
 
     # pragma: no cover  # abstract hook
     @abstractmethod
@@ -44,7 +43,7 @@ class DataLoader(ABC):
     # pragma: no cover  # abstract hook
     @abstractmethod
     def _validate_labels(self, label_table: pa.Table) -> None:
-        """Validate label consistency (dtypes, NaN rules) and raise ``SchemaError`` on failure."""
+        """Validate label consistency (dtypes, NaN rules) and raise ``ValueError`` on failure."""
 
     # pragma: no cover  # abstract hook
     @abstractmethod
@@ -70,7 +69,7 @@ class DataLoader(ABC):
         split_values = split_table.column("split").to_pylist()
         for idx, value in enumerate(split_values):
             if value not in splits:
-                raise SchemaError(f"Unexpected split label '{value}' in split column")
+                raise ValueError(f"Unexpected split label '{value}' in split column")
             splits[value].append(idx)
         return splits
 
@@ -92,20 +91,14 @@ class DataLoader(ABC):
         train_rows = split_indices["train"]
         pos_weights = self._compute_pos_weights(label_table, train_rows)
 
-        derived_dim = max(end for _, end in feature_index_map.values())
-
-        cache_size = self._config.DATASET_ROW_GROUP_CACHE_SIZE
         train_dataset = ParquetDataset(
-            parquet_file, self._config.DATASET_PATH, train_rows, feature_index_map,
-            cache_size, label_columns,
+            self._config, parquet_file, train_rows, feature_index_map, label_columns,
         )
         dev_dataset = ParquetDataset(
-            parquet_file, self._config.DATASET_PATH, split_indices["dev"], feature_index_map,
-            cache_size, label_columns,
+            self._config, parquet_file, split_indices["dev"], feature_index_map, label_columns,
         )
         test_dataset = ParquetDataset(
-            parquet_file, self._config.DATASET_PATH, split_indices["test"], feature_index_map,
-            cache_size, label_columns,
+            self._config, parquet_file, split_indices["test"], feature_index_map, label_columns,
         )
 
         n_train = len(train_rows)
@@ -115,7 +108,9 @@ class DataLoader(ABC):
                     n_train, n_dev, n_test)
         n_slots = len(feature_index_map)
         logger.info("Input dim: %d  (%d feature slots: 1 structured + 55 embeddings)",
-                    derived_dim, n_slots)
+                    self._config.INPUT_DIM, n_slots)
+
+        label_names = [c.split("_", 1)[1] for c in label_columns]
 
         return DatasetBundle(
             train_dataset=train_dataset,
@@ -123,5 +118,5 @@ class DataLoader(ABC):
             test_dataset=test_dataset,
             feature_index_map=feature_index_map,
             pos_weights=pos_weights,
-            input_dim=derived_dim,
+            label_names=label_names,
         )

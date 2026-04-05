@@ -33,11 +33,9 @@ def _setup_logging(initial_rank: int) -> None:
         logging.basicConfig(level=logging.ERROR)
 
 
-def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
+def _init_ddp() -> tuple[int, int, int, bool]:
     """Initialise the DDP process group from torchrun environment variables."""
-    configured_gpus = int(num_gpus)
-    available_gpus = torch.cuda.device_count()
-    if configured_gpus == 1 or available_gpus < 2:
+    if torch.cuda.device_count() < 2:
         logger.warning("Insufficient CUDA devices for DDP — running in single-process mode")
         return 0, 0, 1, False
 
@@ -50,12 +48,12 @@ def _init_ddp(num_gpus: int) -> tuple[int, int, int, bool]:
         return 0, 0, 1, False
 
     torch.cuda.set_device(local_rank)
-    dist.init_process_group(backend="nccl")
+    dist.init_process_group(backend="nccl", device_id=torch.device(f"cuda:{local_rank}"))
     return rank, local_rank, world_size, True
 
 
 def _init_runtime(config) -> tuple[int, int, int, bool, torch.device]:
-    rank, local_rank, world_size, is_ddp = _init_ddp(config.NUM_GPUS)
+    rank, local_rank, world_size, is_ddp = _init_ddp()
     device = get_device(local_rank)
     return rank, local_rank, world_size, is_ddp, device
 

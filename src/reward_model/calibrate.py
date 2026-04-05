@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Dict, List, Tuple
 
 import numpy as np
 import torch
@@ -36,52 +36,32 @@ logger = logging.getLogger(__name__)
 
 
 def _load_model_from_checkpoint(
+    config: RewardModelConfig,
     checkpoint_path: Path,
     device: torch.device,
-) -> Tuple[RewardModel, Dict[str, Tuple[int, int]], Dict[str, Any]]:
+) -> RewardModel:
     """Load a frozen ``RewardModel`` from a checkpoint file.
 
-    Instantiates ``RewardModel`` from the architecture config embedded in the
-    checkpoint (not the current ``config/reward_model.yaml`` — the checkpoint
-    config is authoritative for architecture).  Loads the state dict, moves
-    the model to ``device``, and calls ``model.eval()``.
+    Instantiates ``RewardModel`` from ``config``, loads the state dict, moves
+    the model to ``device``, sets eval mode, and freezes all parameters.
 
     Args:
-        checkpoint_path: Absolute path to ``best_model.pt`` (or any epoch
-            checkpoint written by ``reward_model_manager.py``).
+        config: Validated ``RewardModelConfig`` instance; authoritative for
+            architecture and ``INPUT_DIM``.
+        checkpoint_path: Absolute path to ``best_model.pt``.
         device: Target device for the loaded model.
 
     Returns:
-        Three-tuple of:
-
-        - *model* — Loaded ``RewardModel`` in eval mode on ``device``.
-        - *feature_index_map* — ``Dict[str, Tuple[int, int]]`` snapshot saved
-          inside the checkpoint (maps feature column name to ``(start, end)``
-          byte-range in the flat input tensor).
-        - *config_snapshot* — Raw ``Dict`` from ``config.model_dump()`` as
-           saved by ``reward_model_manager.py``; authoritative for architecture keys
-           ``LAYER_WIDTHS``, ``DROPOUT_RATES``, ``ACTIVATION``, and
-           ``NUM_TARGETS``.
+        Loaded ``RewardModel`` in eval mode on ``device`` with frozen gradients.
     """
     ckpt = torch.load(checkpoint_path, map_location=device, weights_only=True)
-    config_snapshot: Dict[str, Any] = ckpt["config"]
-    feature_index_map: Dict[str, Tuple[int, int]] = ckpt["feature_index_map"]
-    input_dim = sum(end - start for start, end in feature_index_map.values())
-
-    model = RewardModel(
-        input_dim=input_dim,
-        layer_widths=config_snapshot["LAYER_WIDTHS"],
-        dropout_rates=config_snapshot["DROPOUT_RATES"],
-        activation=config_snapshot.get("ACTIVATION", "relu"),
-        num_targets=config_snapshot.get("NUM_TARGETS", 2),
-    )
+    model = RewardModel(config)
     model.load_state_dict(ckpt["model_state_dict"])
     model.to(device)
     model.eval()
     for param in model.parameters():
         param.requires_grad_(False)
-
-    return model, feature_index_map, config_snapshot
+    return model
 
 
 # ---------------------------------------------------------------------------
@@ -210,12 +190,11 @@ class TemperatureCalibrator:
         self.device = device
 
         checkpoint_path = Path(self.config.CHECKPOINT_DIR) / "best_model.pt"
-        self.model, self.feature_index_map, self.config_snapshot = _load_model_from_checkpoint(
-            checkpoint_path, self.device
-        )
-        self.num_targets = self.config_snapshot.get("NUM_TARGETS", 2)
+        self.model = _load_model_from_checkpoint(self.config, checkpoint_path, self.device)
+        self.num_targets = self.config.NUM_TARGETS
 
         bundle = Mimic4DataLoader(self.config).load()
+        self.feature_index_map = bundle.feature_index_map
         self.dev_dataset = bundle.dev_dataset
 
     def _collect_logits(self) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:

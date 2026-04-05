@@ -2,11 +2,25 @@
 
 import hashlib
 import json
+import logging
 import os
 from typing import Any, cast
 
 import pandas as pd
 import yaml
+
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+
+def _setup_logging() -> None:
+    """Configure root logger with a standard timestamped format."""
+    logging.basicConfig(
+        level=logging.INFO,
+        format="%(asctime)s  %(levelname)-8s  %(name)s  %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -30,6 +44,18 @@ def _load_config(config_path: str) -> dict:
         raise ValueError(
             f"Configuration file {config_path} must contain a YAML mapping."
         )
+    for key in _PATH_KEYS:
+        if key in cfg and isinstance(cfg[key], str):
+            cfg[key] = os.path.expanduser(cfg[key])
+    return cfg
+
+
+def _normalize_config(cfg: dict) -> dict:
+    """Expand ~ in path values of a config dict already loaded into memory.
+
+    Use this when config comes from snakemake.config (which skips _load_config).
+    """
+    cfg = dict(cfg)
     for key in _PATH_KEYS:
         if key in cfg and isinstance(cfg[key], str):
             cfg[key] = os.path.expanduser(cfg[key])

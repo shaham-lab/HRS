@@ -11,4 +11,4 @@ class DatasetBundle(NamedTuple):
     test_dataset: ParquetDataset
     feature_index_map: Dict[str, Tuple[int, int]]
     pos_weights: List[float]
-    input_dim: int
+    label_names: List[str]

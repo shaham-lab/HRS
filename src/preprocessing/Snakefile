@@ -1,0 +1,310 @@
+"""
+Snakefile — CDSS-ML Preprocessing Pipeline DAG
+Each CPU rule calls its module directly via Snakemake's script: directive.
+GPU embed and reduce rules keep shell: since they require CLI arguments.
+"""
+import math
+import os
+import sys
+
+configfile: "config/preprocessing.yaml"
+
+# ── Paths ──────────────────────────────────────────────────────────────────────
+REPO_ROOT   = os.path.abspath(
+    os.path.join(os.path.dirname(workflow.snakefile), "..", "..")
+)
+CONFIG_FILE = os.path.join(REPO_ROOT, "config", "preprocessing.yaml")
+
+SLICE_SIZE  = int(config.get("BERT_SLICE_SIZE_PER_GPU", 20000))
+N_GPUS      = 2
+SPLITS_FILE = os.path.join(REPO_ROOT, "data", "preprocessing", "data_splits.parquet")
+
+# N_SLICES = ceil(total_admissions / (SLICE_SIZE * N_GPUS))
+# Falls back to the documented MIMIC-IV v3.1 corpus size when data_splits.parquet
+# does not yet exist so the DAG can be built before any data is present.
+if os.path.exists(SPLITS_FILE):
+    import pandas as _pd
+    _total = len(_pd.read_parquet(SPLITS_FILE))
+else:
+    _total = 546028
+
+N_SLICES = math.ceil(_total / (SLICE_SIZE * N_GPUS))
+
+MAIL       = "eli.kazum@biu.ac.il"
+MAIL_FLAGS = "END,FAIL"
+PYTHON     = sys.executable
+
+# SLURM account: use ug_shaham for shaham-L40/L40-fast/L4/L4-fast partitions instead.
+ACCOUNT_DSI = "ug_dsi"
+
+PREP    = os.path.join(REPO_ROOT, "data", "preprocessing")
+FEAT    = os.path.join(PREP, "features")
+EMB     = os.path.join(FEAT, "embeddings")
+CLS     = os.path.join(PREP, "classifications")
+FULL    = os.path.join(PREP, "full")
+REDUCED = os.path.join(PREP, "reduced")
+
+# All extract_* outputs — used as the dependency for embed slice 0.
+EXTRACT_OUTPUTS = [
+    f"{FEAT}/demographics_features.parquet",
+    f"{FEAT}/diag_history_features.parquet",
+    f"{FEAT}/discharge_history_features.parquet",
+    f"{FEAT}/triage_features.parquet",
+    f"{FEAT}/chief_complaint_features.parquet",
+    f"{FEAT}/labs_features.parquet",
+    f"{FEAT}/extract_microbiology.done",
+    f"{FEAT}/radiology_features.parquet",
+    f"{CLS}/y_labels.parquet",
+]
+
+
+# ── Default target ─────────────────────────────────────────────────────────────
+rule all:
+    input:
+        f"{REDUCED}/reduced_cdss_dataset.parquet",
+
+
+# ── Step 1: create_splits ──────────────────────────────────────────────────────
+rule create_splits:
+    output:
+        f"{PREP}/data_splits.parquet",
+    threads: 8
+    resources:
+        mem_mb          = 32 * 1024,
+        runtime         = 8 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "create_splits.py"
+
+
+# ── Step 2: build_lab_panel_config ────────────────────────────────────────────
+rule build_lab_panel_config:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{CLS}/lab_panel_config.yaml",
+    threads: 8
+    resources:
+        mem_mb          = 32 * 1024,
+        runtime         = 8 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "build_lab_panel_config.py"
+
+
+# ── Step 3: extract_demographics ──────────────────────────────────────────────
+rule extract_demographics:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{FEAT}/demographics_features.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_demographics.py"
+
+
+# ── Step 4: extract_diag_history ──────────────────────────────────────────────
+rule extract_diag_history:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{FEAT}/diag_history_features.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_diag_history.py"
+
+
+# ── Step 5: extract_discharge_history ─────────────────────────────────────────
+rule extract_discharge_history:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{FEAT}/discharge_history_features.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_discharge_history.py"
+
+
+# ── Step 6: extract_triage_and_complaint ──────────────────────────────────────
+rule extract_triage_and_complaint:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{FEAT}/triage_features.parquet",
+        f"{FEAT}/chief_complaint_features.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_triage_and_complaint.py"
+
+
+# ── Step 7: extract_labs ──────────────────────────────────────────────────────
+rule extract_labs:
+    input:
+        f"{PREP}/data_splits.parquet",
+        f"{CLS}/lab_panel_config.yaml",
+    output:
+        f"{FEAT}/labs_features.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_labs.py"
+
+
+# ── Step 8: extract_microbiology (sentinel output) ────────────────────────────
+# Produces 37 dynamically-named parquets — use a sentinel to avoid tracking them.
+rule extract_microbiology:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        touch(f"{FEAT}/extract_microbiology.done"),
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_microbiology.py"
+
+
+# ── Step 9: extract_radiology ─────────────────────────────────────────────────
+rule extract_radiology:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{FEAT}/radiology_features.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_radiology.py"
+
+
+# ── Step 10: extract_y_data ───────────────────────────────────────────────────
+rule extract_y_data:
+    input:
+        f"{PREP}/data_splits.parquet",
+    output:
+        f"{CLS}/y_labels.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "extract_y_data.py"
+
+
+# ── Step 11: embed_features (N_SLICES sequential GPU jobs) ───────────────────
+# Slices are chained sequentially to prevent concurrent parquet append conflicts.
+# Slice 0 waits for all extract_* outputs; slice N waits for slice N-1's sentinel.
+def _embed_input(wildcards):
+    idx = int(wildcards.slice_idx)
+    if idx == 0:
+        return EXTRACT_OUTPUTS
+    return [f"{EMB}/embed_slice_{idx - 1}.done"]
+
+
+rule embed_features:
+    input:
+        _embed_input,
+    output:
+        touch(f"{EMB}/embed_slice_{{slice_idx}}.done"),
+    params:
+        py  = PYTHON,
+        cfg = CONFIG_FILE,
+    threads: 8
+    resources:
+        mem_mb          = 64 * 1024,
+        runtime         = 4 * 60,
+        slurm_partition = "B200-4h",
+        gpu             = 2,
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--gres=gpu:2 --mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    shell:
+        """
+        nvidia-smi
+        {params.py} src/preprocessing/embed_features.py \
+            --config {params.cfg} \
+            --slice-index {wildcards.slice_idx}
+        """
+
+
+# ── Step 12: combine_dataset ──────────────────────────────────────────────────
+rule combine_dataset:
+    input:
+        expand(f"{EMB}/embed_slice_{{slice_idx}}.done", slice_idx=range(N_SLICES)),
+    output:
+        f"{FULL}/full_cdss_dataset.parquet",
+    threads: 48
+    resources:
+        mem_mb          = 256 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    script:
+        "combine_dataset.py"
+
+
+# ── Step 13: reduce_dataset ───────────────────────────────────────────────────
+rule reduce_dataset:
+    input:
+        f"{FULL}/full_cdss_dataset.parquet",
+    output:
+        f"{REDUCED}/reduced_cdss_dataset.parquet",
+    params:
+        py  = PYTHON,
+        cfg = CONFIG_FILE,
+    threads: 48
+    resources:
+        mem_mb          = 128 * 1024,
+        runtime         = 24 * 60,
+        slurm_partition = "cpu1T-24h",
+        slurm_account   = ACCOUNT_DSI,
+        slurm_extra     = f"--mail-user={MAIL} --mail-type={MAIL_FLAGS}",
+    shell:
+        """
+        {params.py} src/preprocessing/reduce_dataset.py \
+            --config {params.cfg}
+        """

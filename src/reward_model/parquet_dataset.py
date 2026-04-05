@@ -8,23 +8,24 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 import torch
 
+from reward_model_config import RewardModelConfig
+
 
 class ParquetDataset(torch.utils.data.Dataset):
     def __init__(
         self,
+        config: RewardModelConfig,
         parquet_file: pq.ParquetFile,
-        dataset_path: str,
         row_indices: List[int],
         feature_index_map: Dict[str, Tuple[int, int]],
-        cache_size: int,
         label_columns: List[str],
     ) -> None:
         """Create a lazy Parquet-backed dataset with LRU row-group cache."""
         self._parquet_file = parquet_file
-        self._dataset_path = dataset_path
+        self._dataset_path = config.DATASET_PATH
         self._row_indices = list(row_indices)
         self._feature_index_map = feature_index_map
-        self._cache_size = max(1, cache_size)
+        self._cache_size = max(1, config.DATASET_ROW_GROUP_CACHE_SIZE)
         self._cache: OrderedDict[int, pa.Table] = OrderedDict()
         self._label_columns = list(label_columns)
         self._columns_needed = list(feature_index_map.keys()) + self._label_columns
@@ -75,7 +76,7 @@ class ParquetDataset(torch.utils.data.Dataset):
             value = float("nan") if value is None else float(value)
             label_tensors.append(torch.tensor(value, dtype=torch.float32))
 
-        return (X, *label_tensors)
+        return X, *label_tensors
 
     def _locate_row_group(self, row_idx: int) -> Tuple[int, int]:
         i = bisect_right(self._rg_starts, row_idx) - 1

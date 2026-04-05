@@ -21,7 +21,8 @@ from typing import Any, Dict
 
 import torch
 
-from reward_model_config import RewardModelConfig,load_and_validate_config
+from reward_model_config import RewardModelConfig, load_and_validate_config
+from mimic4_data_loader import Mimic4DataLoader
 
 logger = logging.getLogger(__name__)
 
@@ -31,75 +32,51 @@ logger = logging.getLogger(__name__)
 # ---------------------------------------------------------------------------
 
 
-def _build_export_dict(
-    checkpoint_path: Path,
-    calibration_params_path: Path,
-) -> Dict[str, Any]:
+def _build_export_dict(config: RewardModelConfig) -> Dict[str, Any]:
     """Assemble a self-contained export dict from a checkpoint and calibration file.
 
-    Loads ``best_model.pt`` (or any epoch checkpoint written by
-    ``reward_model_manager.py``)
-    and ``calibration_params.json`` and merges them into a single dict
-    suitable for writing with ``torch.save``.  The result can be loaded by
-    ``inference.py`` without access to ``config/reward_model.yaml``.
+    Loads ``best_model.pt`` from ``CHECKPOINT_DIR`` and ``calibration_params.json``
+    from ``CALIBRATION_PARAMS_PATH`` and merges them into a single dict suitable
+    for writing with ``torch.save``. The result can be loaded by ``inference.py``
+    without access to ``config/reward_model.yaml``.
 
     Contents of the returned dict:
 
     - *model_state_dict* — Model weights, unwrapped from DDP by stripping
-      the ``module.`` key prefix if present (applied directly to the state
-      dict keys, since no live model object is available at export time).
-    - *feature_index_map* — ``Dict[str, Tuple[int, int]]`` snapshot from the
-      checkpoint; maps feature column name to ``(start, end)`` index range.
+      the ``module.`` key prefix if present.
+    - *feature_index_map* — ``Dict[str, Tuple[int, int]]`` from the dataset;
+      maps feature column name to ``(start, end)`` index range.
     - *T_0, T_1, …* — Scalar calibration temperature per target head.
-    - *config_snapshot* — Architecture sub-dict containing only
-      ``LAYER_WIDTHS``, ``DROPOUT_RATES``, ``ACTIVATION``, and
-      ``NUM_TARGETS``.  Input dimensionality is stored separately as its own
-      top-level key in the export dict.
-    - *input_dim* — Input dimensionality derived from the feature index map
-      (sum of all slot widths).
+    - *input_dim* — Input dimensionality from config.
+    - *NUM_TARGETS* — Number of output heads.
 
     Args:
-        checkpoint_path: Absolute path to ``best_model.pt``.
-        calibration_params_path: Absolute path to ``calibration_params.json``
-            containing ``{'T_0': float, 'T_1': float, ...}``.
+        config: Validated ``RewardModelConfig`` instance.
 
     Returns:
         Dict ready to be written with ``torch.save``.
     """
+    checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
     ckpt = torch.load(checkpoint_path, map_location="cpu", weights_only=True)
-    with open(calibration_params_path, "r") as f:
+    with open(config.CALIBRATION_PARAMS_PATH, "r") as f:
         calib = json.load(f)
 
-    feature_index_map = ckpt["feature_index_map"]
-    input_dim = sum(end - start for start, end in feature_index_map.values())
+    feature_index_map = Mimic4DataLoader(config).load().feature_index_map
 
     raw_state_dict = ckpt["model_state_dict"]
     if any(key.startswith("module.") for key in raw_state_dict.keys()):
-        model_state_dict = {k[len("module.") :]: v for k, v in raw_state_dict.items()}
+        model_state_dict = {k[len("module."):]: v for k, v in raw_state_dict.items()}
     else:
         model_state_dict = raw_state_dict
 
-    config_snapshot = ckpt["config"]
-    num_targets = config_snapshot.get("NUM_TARGETS", 2)
-    config_snapshot = {
-        "LAYER_WIDTHS": config_snapshot["LAYER_WIDTHS"],
-        "DROPOUT_RATES": config_snapshot["DROPOUT_RATES"],
-        "ACTIVATION": config_snapshot["ACTIVATION"],
-        "NUM_TARGETS": num_targets,
-    }
-
-    temperatures = {
-        f"T_{i}": float(calib[f"T_{i}"])
-        for i in range(num_targets)
-    }
+    temperatures = {f"T_{i}": float(calib[f"T_{i}"]) for i in range(config.NUM_TARGETS)}
 
     return {
         "model_state_dict": model_state_dict,
         "feature_index_map": feature_index_map,
         **temperatures,
-        "config_snapshot": config_snapshot,
-        "input_dim": input_dim,
-        "NUM_TARGETS": num_targets,
+        "input_dim": config.INPUT_DIM,
+        "NUM_TARGETS": config.NUM_TARGETS,
     }
 
 
@@ -127,12 +104,10 @@ def run(config: RewardModelConfig) -> None:
     Args:
         config: Validated ``RewardModelConfig`` instance.
     """
-    checkpoint_path = Path(config.CHECKPOINT_DIR) / "best_model.pt"
-    calibration_params_path = Path(config.CALIBRATION_PARAMS_PATH)
     export_path = Path(config.EXPORT_PATH)
     export_path.parent.mkdir(parents=True, exist_ok=True)
 
-    export_dict = _build_export_dict(checkpoint_path, calibration_params_path)
+    export_dict = _build_export_dict(config)
     torch.save(export_dict, export_path)
 
     param_count = sum(v.numel() for v in export_dict["model_state_dict"].values())

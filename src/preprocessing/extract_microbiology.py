@@ -36,7 +36,7 @@ from preprocessing_utils import (
     _link_hadm_for_row,
     _load_csv,
     _record_hashes,
-    _sources_unchanged,
+    _setup_logging,
 )
 from build_micro_text import aggregate_panel_text
 
@@ -83,12 +83,6 @@ def run(config: dict) -> None:
         _gz_or_csv(mimic_dir, "hosp", "admissions"),
     ]
     output_paths = [os.path.join(features_dir, "micro_blood_culture_routine.parquet")]
-
-    if registry_path and not config.get("FORCE_RERUN", False):
-        if _sources_unchanged(
-            "extract_microbiology", source_paths, output_paths, registry_path, logger
-        ):
-            return
 
     # Load micro panel config
     config_path = Path(config["MICRO_PANEL_CONFIG_PATH"]).resolve()
@@ -283,3 +277,18 @@ def run(config: dict) -> None:
 
     if registry_path:
         _record_hashes("extract_microbiology", source_paths, registry_path)
+
+
+if __name__ == "__main__":
+    import argparse
+    from preprocessing_utils import _load_config
+    _setup_logging()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/preprocessing.yaml")
+    args = parser.parse_args()
+    run(_load_config(args.config))
+
+elif "snakemake" in dir():
+    from preprocessing_utils import _normalize_config
+    _setup_logging()
+    run(_normalize_config(dict(snakemake.config)))

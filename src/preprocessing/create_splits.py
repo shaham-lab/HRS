@@ -19,7 +19,7 @@ import pandas as pd
 from sklearn.model_selection import train_test_split
 from tqdm import tqdm
 
-from preprocessing_utils import _check_required_keys, _gz_or_csv, _record_hashes, _sources_unchanged
+from preprocessing_utils import _check_required_keys, _gz_or_csv, _record_hashes, _setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -128,11 +128,6 @@ def run(config: dict) -> None:
     ] if os.path.exists(p)]
     output_paths = [os.path.join(preprocessing_dir, "data_splits.parquet")]
 
-    if registry_path and not config.get("FORCE_RERUN", False):
-        if _sources_unchanged("create_splits", source_paths,
-                               output_paths, registry_path, logger):
-            return
-
     # Resolve admissions path before starting progress bar
     admissions_path = os.path.join(mimic_dir, "hosp", "admissions.csv.gz")
     if not os.path.exists(admissions_path):
@@ -201,3 +196,18 @@ def run(config: dict) -> None:
 
     if registry_path:
         _record_hashes("create_splits", source_paths, registry_path)
+
+
+if __name__ == "__main__":
+    import argparse
+    from preprocessing_utils import _load_config
+    _setup_logging()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/preprocessing.yaml")
+    args = parser.parse_args()
+    run(_load_config(args.config))
+
+elif "snakemake" in dir():
+    from preprocessing_utils import _normalize_config
+    _setup_logging()
+    run(_normalize_config(dict(snakemake.config)))

@@ -31,7 +31,7 @@ from tqdm import tqdm
 
 WRITE_CHUNK_SIZE = 50_000  # rows per row group written to parquet
 
-from preprocessing_utils import _check_required_keys
+from preprocessing_utils import _check_required_keys, _setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -283,3 +283,18 @@ def run(config: dict) -> None:
         os.replace(tmp_path, output_path)
         logger.info("Saved %s", os.path.basename(output_path))
         pbar.update(1)
+
+
+if __name__ == "__main__":
+    import argparse
+    from preprocessing_utils import _load_config
+    _setup_logging()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/preprocessing.yaml")
+    args = parser.parse_args()
+    run(_load_config(args.config))
+
+elif "snakemake" in dir():
+    from preprocessing_utils import _normalize_config
+    _setup_logging()
+    run(_normalize_config(dict(snakemake.config)))

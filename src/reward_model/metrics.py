@@ -1,5 +1,5 @@
+import csv
 import logging
-import os
 from pathlib import Path
 from typing import Dict, List, Union
 
@@ -75,72 +75,29 @@ def compute_metrics(
 
 
 class MetricsLogger:
-    def __init__(self, metrics_path: Path, num_targets: int) -> None:
-        self.metrics_path = metrics_path
-        self.num_targets = num_targets
+    def __init__(self, metrics_path: Path, label_names: list) -> None:
+        self.csv_path = metrics_path.with_suffix(".csv")
+        self.label_names = label_names
 
     def append_row(self, row: Dict) -> None:
-        """Append one epoch's metrics to *metrics_path* (rank 0 only).
+        """Append one epoch's metrics to a CSV file (rank 0 only).
 
-        Uses an atomic write (write to temp file, rename) so that a SLURM
-        preemption mid-write cannot corrupt the Parquet file. If the file does
-        not yet exist it is created with the correct schema.
-
-        Columns written (Architecture §9):
-            epoch, wall_time_s, masking_random_pct, masking_adversarial_pct,
-            masking_none_pct, loss_total,
-            loss_target_<i>, auroc_target_<i>, auprc_target_<i>, ece_target_<i>
-            for each i in 0..num_targets-1.
+        Columns written:
+            epoch, time(seconds), loss_total,
+            loss_<label>, auroc_<label>, auprc_<label>, ece_<label>
+            for each label in label_names.
         """
-        import pyarrow as pa
-        import pyarrow.parquet as pq
+        columns = ["epoch", "time(seconds)", "loss_total"]
+        for name in self.label_names:
+            columns += [f"loss_{name}", f"auroc_{name}", f"auprc_{name}", f"ece_{name}"]
 
-        metrics_path = self.metrics_path
-        num_targets = self.num_targets
-
-        metrics_path.parent.mkdir(parents=True, exist_ok=True)
-        columns = [
-            "epoch",
-            "wall_time_s",
-            "masking_random_pct",
-            "masking_adversarial_pct",
-            "masking_none_pct",
-            "loss_total",
-        ]
-        for i in range(num_targets):
-            columns += [
-                f"loss_target_{i}",
-                f"auroc_target_{i}",
-                f"auprc_target_{i}",
-                f"ece_target_{i}",
-            ]
-
-        schema_fields = [
-            ("epoch", pa.int64()),
-            ("wall_time_s", pa.float64()),
-            ("masking_random_pct", pa.float64()),
-            ("masking_adversarial_pct", pa.float64()),
-            ("masking_none_pct", pa.float64()),
-            ("loss_total", pa.float64()),
-        ]
-        for i in range(num_targets):
-            schema_fields += [
-                (f"loss_target_{i}", pa.float64()),
-                (f"auroc_target_{i}", pa.float64()),
-                (f"auprc_target_{i}", pa.float64()),
-                (f"ece_target_{i}", pa.float64()),
-            ]
-        schema = pa.schema(schema_fields)
-
-        new_row = {name: [row[name]] for name in columns}
-        new_table = pa.table(new_row, schema=schema)
-
-        if metrics_path.exists():
-            existing = pq.read_table(metrics_path)
-            table = pa.concat_tables([existing, new_table])
-        else:
-            table = new_table
-
-        tmp_path = metrics_path.with_suffix(".parquet.tmp")
-        pq.write_table(table, tmp_path)
-        os.replace(tmp_path, metrics_path)
+        self.csv_path.parent.mkdir(parents=True, exist_ok=True)
+        write_header = not self.csv_path.exists()
+        with open(self.csv_path, "a", newline="") as f:
+            writer = csv.DictWriter(f, fieldnames=columns)
+            if write_header:
+                writer.writeheader()
+            writer.writerow({
+                k: round(row[k], 4) if isinstance(row[k], float) else row[k]
+                for k in columns
+            })

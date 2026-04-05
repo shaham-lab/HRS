@@ -30,7 +30,7 @@ import os
 import yaml
 from tqdm import tqdm
 
-from preprocessing_utils import _gz_or_csv, _load_d_labitems, _record_hashes, _sources_unchanged
+from preprocessing_utils import _gz_or_csv, _load_d_labitems, _record_hashes, _setup_logging
 
 logger = logging.getLogger(__name__)
 
@@ -126,11 +126,6 @@ def run(config: dict) -> None:
     ] if os.path.exists(p)]
     output_paths = [os.path.join(classifications_dir, "lab_panel_config.yaml")]
 
-    if registry_path and not config.get("FORCE_RERUN", False):
-        if _sources_unchanged("build_lab_panel_config", source_paths,
-                               output_paths, registry_path, logger):
-            return
-
     # ------------------------------------------------------------------ #
     # Load d_labitems
     # ------------------------------------------------------------------ #
@@ -162,3 +157,18 @@ def run(config: dict) -> None:
 
     if registry_path:
         _record_hashes("build_lab_panel_config", source_paths, registry_path)
+
+
+if __name__ == "__main__":
+    import argparse
+    from preprocessing_utils import _load_config
+    _setup_logging()
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", default="config/preprocessing.yaml")
+    args = parser.parse_args()
+    run(_load_config(args.config))
+
+elif "snakemake" in dir():
+    from preprocessing_utils import _normalize_config
+    _setup_logging()
+    run(_normalize_config(dict(snakemake.config)))
