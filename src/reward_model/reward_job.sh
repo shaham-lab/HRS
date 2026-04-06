@@ -2,7 +2,7 @@
 #SBATCH --job-name=reward_train
 #SBATCH --output=logs/reward_train_%j.out
 #SBATCH --error=logs/reward_train_%j.err
-#SBATCH --partition=H200-4h
+#SBATCH --partition=H200-12h
 #SBATCH --gres=gpu:1
 #SBATCH --mem=64G
 #SBATCH --mail-user=eli.kazum@biu.ac.il
@@ -36,7 +36,7 @@ export NCCL_DEBUG=INFO
 # --rdzv_backend=c10d uses the built-in rendezvous; no external store required.
 # "$@" forwards any arguments passed to sbatch (e.g. --resume).
 torchrun \
-    --nproc_per_node=2 \
+    --nproc_per_node=1 \
     --rdzv_backend=c10d \
     --rdzv_endpoint=localhost:29500 \
     src/reward_model/reward_model_main.py \

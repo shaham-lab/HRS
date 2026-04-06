@@ -62,6 +62,7 @@ class MaskingSchedule:
         self._always_visible_slots: List[str] = all_slots[:config.NUM_ALWAYS_VISIBLE_FEATURES]
         self._maskable_slots: List[str] = all_slots[config.NUM_ALWAYS_VISIBLE_FEATURES:]
         self._M: int = len(self._maskable_slots)
+        self._feature_index_map: Dict[str, Tuple[int, int]] = feature_index_map
 
     # ------------------------------------------------------------------
     # Curriculum schedule

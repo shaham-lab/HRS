@@ -98,9 +98,8 @@ for nb in "${REQUESTED[@]}"; do
         continue
     fi
     base="$(basename "$resolved" .ipynb)"
-    job_name="explore_${base}"
-    job_id=$(sbatch --parsable --job-name="$job_name" "${SCRIPT_DIR}/exploration_job.sh" "$resolved")
-    echo "  [${job_id}] $resolved (job-name: $job_name)"
+    job_id=$(sbatch --parsable "${SCRIPT_DIR}/exploration_job.sh" "$resolved")
+    echo "  [${job_id}] $resolved"
 done
 
 echo "Done. Monitor with: squeue -u $USER"

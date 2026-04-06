@@ -286,6 +286,12 @@ class RewardModelManager:
         if ckpt_state is not None:
             unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
             self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+            # LinearLR uses a multiplicative formula that depends on group['lr'].
+            # Loading optimizer state overwrites lr with the checkpointed value, which
+            # corrupts the fast-forward below. Reset to the scheduler's init-step lr so
+            # the multiplicative formula compounds from the correct base.
+            for group, lr in zip(self.optimizer.param_groups, self.scheduler.get_last_lr()):
+                group['lr'] = lr
         for _ in range(start_step):
             self.scheduler.step()
         if self.rank == 0 and self.train_loader is not None:
@@ -486,8 +492,6 @@ class RewardModelManager:
                     probs[1] * 100,
                     probs[2] * 100,
                 )
-                self.metrics_logger.append_row(row)
-
                 current_dev_loss = dev_metrics["loss_total"]
                 improved = current_dev_loss < best_dev_loss
                 if improved:
@@ -511,6 +515,8 @@ class RewardModelManager:
                         f"Dev loss did not improve. Early stopping patience: "
                         f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
                     )
+
+                self.metrics_logger.append_row(row)
 
                 should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
             else:

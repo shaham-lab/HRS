@@ -1,0 +1,9 @@
+executor: slurm
+jobs: 100
+rerun-incomplete: true
+default-resources:
+  slurm_partition: "cpu1T-24h"
+  mem_mb: 32768
+  runtime: 480
+  slurm_account: "ug_dsi"
+  slurm_extra: "--mail-user=eli.kazum@biu.ac.il --mail-type=END,FAIL"
