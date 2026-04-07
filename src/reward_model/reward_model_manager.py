@@ -65,7 +65,8 @@ class RewardModelManager:
 
         self.masking_schedule: Optional[MaskingSchedule] = None
         self.train_loader: Optional[DataLoader] = None
-        self.scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+        self.warmup_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
+        self.plateau_scheduler: Optional[torch.optim.lr_scheduler.ReduceLROnPlateau] = None
 
         if self.rank == 0:
             logger.info(f"Initialized RewardModel with input_dim={self.config.INPUT_DIM} and DDP={self.is_ddp}")
@@ -141,29 +142,23 @@ class RewardModelManager:
             betas=(self.config.ADAM_BETA1, self.config.ADAM_BETA2),
         )
 
-    def _build_lr_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LRScheduler:
+    def _build_warmup_scheduler(self, steps_per_epoch: int) -> torch.optim.lr_scheduler.LRScheduler:
         warmup_steps = max(self.config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
-        total_steps = max(self.config.MAX_EPOCHS * max(steps_per_epoch, 1), 1)
+        return torch.optim.lr_scheduler.LinearLR(
+            self.optimizer,
+            start_factor=0.01,
+            end_factor=1.0,
+            total_iters=warmup_steps,
+        )
 
-        if warmup_steps > 0:
-            warmup = torch.optim.lr_scheduler.LinearLR(
-                self.optimizer,
-                start_factor=0.01,
-                end_factor=1.0,
-                total_iters=warmup_steps,
-            )
-            cosine = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer, T_max=max(total_steps - warmup_steps, 1), eta_min=self.config.LR_MIN
-            )
-            scheduler: torch.optim.lr_scheduler.LRScheduler = torch.optim.lr_scheduler.SequentialLR(
-                self.optimizer, schedulers=[warmup, cosine], milestones=[warmup_steps]
-            )
-        else:
-            scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-                self.optimizer, T_max=total_steps, eta_min=self.config.LR_MIN
-            )
-
-        return scheduler
+    def _build_plateau_scheduler(self) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
+        return torch.optim.lr_scheduler.ReduceLROnPlateau(
+            self.optimizer,
+            mode='min',
+            factor=self.config.LR_PLATEAU_FACTOR,
+            patience=self.config.LR_PLATEAU_PATIENCE,
+            min_lr=self.config.LR_MIN
+        )
 
     def compute_loss(
         self, logits_list: list[torch.Tensor], labels_list: list[torch.Tensor]
@@ -281,19 +276,11 @@ class RewardModelManager:
             raise RuntimeError("Train dataset unavailable for DDP training")
 
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
-        start_step = start_epoch * steps_per_epoch
-        self.scheduler = self._build_lr_scheduler(steps_per_epoch)
+        self.warmup_scheduler = self._build_warmup_scheduler(steps_per_epoch)
+        self.plateau_scheduler = self._build_plateau_scheduler()
         if ckpt_state is not None:
             unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
             self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
-            # LinearLR uses a multiplicative formula that depends on group['lr'].
-            # Loading optimizer state overwrites lr with the checkpointed value, which
-            # corrupts the fast-forward below. Reset to the scheduler's init-step lr so
-            # the multiplicative formula compounds from the correct base.
-            for group, lr in zip(self.optimizer.param_groups, self.scheduler.get_last_lr()):
-                group['lr'] = lr
-        for _ in range(start_step):
-            self.scheduler.step()
         if self.rank == 0 and self.train_loader is not None:
             steps = len(self.train_loader)
             logger.info(
@@ -388,7 +375,11 @@ class RewardModelManager:
 
     def train_epochs(self, start_epoch: int, best_dev_loss: float) -> Tuple[int, float]:
         """Run the epoch loop and return the last completed epoch and best dev loss."""
-        if self.masking_schedule is None or self.scheduler is None:
+        if (
+            self.masking_schedule is None
+            or self.warmup_scheduler is None
+            or self.plateau_scheduler is None
+        ):
             raise RuntimeError("Training state must be set up before training epochs")
 
         T = self.config.NUM_TARGETS
@@ -426,19 +417,20 @@ class RewardModelManager:
                 grad_norm = loss_vals[1]
                 #for debugging
                 if self.rank == 0 and batch_idx % 1 == 0:  # every batch
-                    lr = self.scheduler.get_last_lr()[0]
+                    lr = self.optimizer.param_groups[0]["lr"]
                     logger.info(
                         "Epoch %d | batch %d/%d | loss=%.4f | "
                         "grad_norm=%.4f | lr=%.2e",
                         epoch, batch_idx, len(self.train_loader),
                         total_loss, grad_norm, lr,
                     )
-                self.scheduler.step()
+                if epoch < self.config.LR_WARMUP_EPOCHS:
+                    self.warmup_scheduler.step()
                 batch_losses.append(loss_vals[0])
 
                 # Log every 50 batches on rank 0
                 if self.rank == 0 and batch_idx % 50 == 0:
-                    lr = self.scheduler.get_last_lr()[0]
+                    lr = self.optimizer.param_groups[0]["lr"]
                     logger.info(
                         "Epoch %d | batch %d/%d | loss=%.4f | lr=%.2e",
                         epoch,
@@ -493,6 +485,8 @@ class RewardModelManager:
                     probs[2] * 100,
                 )
                 current_dev_loss = dev_metrics["loss_total"]
+                if epoch >= self.config.LR_WARMUP_EPOCHS:
+                    self.plateau_scheduler.step(current_dev_loss)
                 improved = current_dev_loss < best_dev_loss
                 if improved:
                     best_dev_loss = current_dev_loss
