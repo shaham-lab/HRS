@@ -124,7 +124,6 @@ def run(config: dict) -> None:
     source_paths = [p for p in [
         _gz_or_csv(mimic_dir, "hosp", "d_labitems"),
     ] if os.path.exists(p)]
-    output_paths = [os.path.join(classifications_dir, "lab_panel_config.yaml")]
 
     # ------------------------------------------------------------------ #
     # Load d_labitems
