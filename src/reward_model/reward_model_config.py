@@ -22,6 +22,8 @@ class RewardModelConfig(BaseModel):
     ADAM_BETA2: float
     LR_WARMUP_EPOCHS: int
     LR_MIN: float
+    LR_PLATEAU_PATIENCE: int = 3
+    LR_PLATEAU_FACTOR: float = 0.5
     EARLY_STOPPING_PATIENCE: int
 
     LOSS_WEIGHTS: List[float]
