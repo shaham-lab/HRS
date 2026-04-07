@@ -67,6 +67,8 @@ class RewardModelManager:
         self.train_loader: Optional[DataLoader] = None
         self.warmup_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
         self.plateau_scheduler: Optional[torch.optim.lr_scheduler.ReduceLROnPlateau] = None
+        self.warmup_total_steps: int = 0
+        self.warmup_steps_taken: int = 0
 
         if self.rank == 0:
             logger.info(f"Initialized RewardModel with input_dim={self.config.INPUT_DIM} and DDP={self.is_ddp}")
@@ -154,7 +156,7 @@ class RewardModelManager:
     def _build_plateau_scheduler(self) -> torch.optim.lr_scheduler.ReduceLROnPlateau:
         return torch.optim.lr_scheduler.ReduceLROnPlateau(
             self.optimizer,
-            mode='min',
+            mode="min",
             factor=self.config.LR_PLATEAU_FACTOR,
             patience=self.config.LR_PLATEAU_PATIENCE,
             min_lr=self.config.LR_MIN
@@ -276,11 +278,14 @@ class RewardModelManager:
             raise RuntimeError("Train dataset unavailable for DDP training")
 
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
+        self.warmup_total_steps = max(self.config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
         self.warmup_scheduler = self._build_warmup_scheduler(steps_per_epoch)
         self.plateau_scheduler = self._build_plateau_scheduler()
+        self.warmup_steps_taken = 0
         if ckpt_state is not None:
             unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
             self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
+            self.warmup_steps_taken = self.warmup_total_steps
         if self.rank == 0 and self.train_loader is not None:
             steps = len(self.train_loader)
             logger.info(
@@ -424,8 +429,12 @@ class RewardModelManager:
                         epoch, batch_idx, len(self.train_loader),
                         total_loss, grad_norm, lr,
                     )
-                if epoch < self.config.LR_WARMUP_EPOCHS:
+                if (
+                    epoch < self.config.LR_WARMUP_EPOCHS
+                    and self.warmup_steps_taken < self.warmup_total_steps
+                ):
                     self.warmup_scheduler.step()
+                    self.warmup_steps_taken += 1
                 batch_losses.append(loss_vals[0])
 
                 # Log every 50 batches on rank 0
