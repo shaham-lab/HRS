@@ -10,7 +10,7 @@
 # submit_reward.sh — see Architecture §14 (Job Chain).
 #
 # SLURM resource sizing (Architecture §14, Memory Requirements §10):
-#   GPUs : 1  (single GPU; no DDP; model weights ~1.4 GB)
+#   GPUs : 1  (single GPU; model weights ~1.4 GB)
 #   RAM  : 32G (dev split loaded lazily via ParquetDataset; well within 32G)
 #   CPUs : 4  (DataLoader prefetch workers)
 #   Time : 1h (calibration completes in < 5 min; conservative upper bound)

@@ -60,7 +60,7 @@ def compute_metrics(
     result: Dict[Union[int, str], object] = {}
 
     for i, (logits, labels) in enumerate(zip(logits_list, labels_list)):
-        probs = torch.sigmoid(logits).detach().cpu().view(-1).numpy()
+        probs = torch.sigmoid(logits).detach().cpu().float().view(-1).numpy()
         labels_np = labels.detach().cpu().view(-1).numpy().astype(float)
         valid_mask = ~np.isnan(labels_np)
         p_valid = probs[valid_mask]

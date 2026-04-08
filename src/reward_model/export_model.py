@@ -42,8 +42,7 @@ def _build_export_dict(config: RewardModelConfig) -> Dict[str, Any]:
 
     Contents of the returned dict:
 
-    - *model_state_dict* — Model weights, unwrapped from DDP by stripping
-      the ``module.`` key prefix if present.
+    - *model_state_dict* — Model weights.
     - *feature_index_map* — ``Dict[str, Tuple[int, int]]`` from the dataset;
       maps feature column name to ``(start, end)`` index range.
     - *T_0, T_1, …* — Scalar calibration temperature per target head.

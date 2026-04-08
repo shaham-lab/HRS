@@ -12,7 +12,7 @@ applies the correct masking mode to each mini-batch.  Three modes:
 The probability of each mode evolves via a sigmoid crossover schedule computed
 in ``MaskingSchedule.get_mode_probabilities``.
 
-See Detailed Design §5 (masking.py) and §6.3 (adversarial masking under DDP).
+See Detailed Design §5 (masking.py) and §6.3 (adversarial masking).
 """
 
 import logging

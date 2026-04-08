@@ -1,7 +1,7 @@
 """Temperature-scaling calibration for the CDSS-ML reward model.
 
 Applies temperature scaling to the best trained model on the dev split.
-Single GPU — no DDP.  Writes calibration parameters to
+Single GPU.  Writes calibration parameters to
 ``CALIBRATION_PARAMS_PATH`` as JSON.
 
 Usage::
@@ -17,7 +17,7 @@ import json
 import logging
 import sys
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import List, Tuple
 
 import numpy as np
 import torch
@@ -105,19 +105,19 @@ def _fit_temperature(
     logits_t = torch.tensor(logits[mask], dtype=torch.float32)
     labels_t = torch.tensor(labels[mask], dtype=torch.float32)
 
-    log_T = torch.nn.Parameter(torch.zeros(1))
-    optimizer = torch.optim.LBFGS([log_T], lr=0.01, max_iter=50)
+    log_temperature = torch.nn.Parameter(torch.zeros(1))
+    optimizer = torch.optim.LBFGS([log_temperature], lr=0.01, max_iter=50)
 
     def closure() -> torch.Tensor:
         optimizer.zero_grad()
-        T_pos = torch.exp(log_T)
-        scaled_logits = logits_t / T_pos
+        temperature_pos = torch.exp(log_temperature)
+        scaled_logits = logits_t / temperature_pos
         loss = torch.nn.functional.binary_cross_entropy_with_logits(scaled_logits, labels_t)
         loss.backward()
         return loss
 
     optimizer.step(closure)
-    return float(max(torch.exp(log_T).item(), 1e-8))
+    return float(max(torch.exp(log_temperature).item(), 1e-8))
 
 
 # ---------------------------------------------------------------------------
@@ -128,7 +128,7 @@ def _fit_temperature(
 def _compute_ece_from_logits(
     logits: np.ndarray,
     labels: np.ndarray,
-    T: float,
+    temperature: float,
     mask: np.ndarray,
 ) -> float:
     """Compute Expected Calibration Error (ECE) after applying temperature *T*.
@@ -143,7 +143,7 @@ def _compute_ece_from_logits(
         logits: Raw model logits of shape ``(N,)``, float32.
         labels: Binary ground-truth labels of shape ``(N,)`` with values in
             ``{0, 1}``.
-        T: Scalar temperature applied before sigmoid.  Pass ``T = 1.0`` to
+        temperature: Scalar temperature applied before sigmoid.  Pass ``T = 1.0`` to
             compute the pre-calibration ECE.
         mask: Boolean array of shape ``(N,)`` selecting which samples to
             include in the ECE computation.
@@ -155,7 +155,7 @@ def _compute_ece_from_logits(
         return float("nan")
     masked_logits = logits[mask]
     masked_labels = labels[mask]
-    probs = 1.0 / (1.0 + np.exp(-masked_logits / T))
+    probs = 1.0 / (1.0 + np.exp(-masked_logits / temperature))
 
     n_bins = 10
     bin_edges = np.percentile(probs, range(0, 101, 100 // n_bins))
@@ -200,15 +200,15 @@ class TemperatureCalibrator:
     def _collect_logits(self) -> Tuple[List[torch.Tensor], List[torch.Tensor]]:
         """Run dev forward pass to collect logits and labels per head."""
         dataloader = DataLoader(
-            self.dev_dataset, batch_size=self.config.BATCH_SIZE_PER_GPU, num_workers=0, shuffle=False
+            self.dev_dataset, batch_size=self.config.BATCH_SIZE, shuffle=False
         )
         all_logits: List[List[torch.Tensor]] = [[] for _ in range(self.num_targets)]
         all_labels: List[List[torch.Tensor]] = [[] for _ in range(self.num_targets)]
 
         with torch.no_grad():
             for batch in dataloader:
-                X = batch[0].to(self.device)
-                model_outputs = self.model(X)
+                x = batch[0].to(self.device)
+                model_outputs = self.model(x)
                 for i in range(self.num_targets):
                     all_logits[i].append(model_outputs[i].detach().cpu().reshape(-1))
                     all_labels[i].append(batch[i + 1].detach().cpu().reshape(-1))
@@ -230,11 +230,11 @@ class TemperatureCalibrator:
             pre_ece = _compute_ece_from_logits(logits_np, labels_np, 1.0, mask_i)
             logger.info("Pre-calibration ECE — target %d: %.6f", i, pre_ece)
 
-            T_i = _fit_temperature(logits_np, labels_np, mask_i)
-            temperatures.append(T_i)
+            temperature_i = _fit_temperature(logits_np, labels_np, mask_i)
+            temperatures.append(temperature_i)
 
-            post_ece = _compute_ece_from_logits(logits_np, labels_np, T_i, mask_i)
-            logger.info("Post-calibration ECE — target %d: %.6f (T=%.6f)", i, post_ece, T_i)
+            post_ece = _compute_ece_from_logits(logits_np, labels_np, temperature_i, mask_i)
+            logger.info("Post-calibration ECE — target %d: %.6f (T=%.6f)", i, post_ece, temperature_i)
 
         params = {f"T_{i}": float(T_i) for i, T_i in enumerate(temperatures)}
         calibration_path = Path(self.config.CALIBRATION_PARAMS_PATH)

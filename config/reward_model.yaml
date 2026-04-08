@@ -4,7 +4,7 @@ ACTIVATION: relu
 NUM_TARGETS: 2
 
 MAX_EPOCHS: 100
-BATCH_SIZE_PER_GPU: 1024
+BATCH_SIZE: 1024
 LEARNING_RATE: 0.00005
 WEIGHT_DECAY: 0.00001
 ADAM_BETA1: 0.9
@@ -40,7 +40,6 @@ INPUT_DIM: 7048
 DATASET_PATH: "data/preprocessing/reduced/reduced_cdss_dataset.parquet"
 EMBEDDING_DIM: 128
 DATASET_ROW_GROUP_CACHE_SIZE: 2
-DATALOADER_NUM_WORKERS: 2
 
 CHECKPOINT_DIR: data/reward_model/checkpoints
 METRICS_PATH: data/reward_model/training_metrics.csv

@@ -25,5 +25,6 @@ class RewardModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         """Compute logits for each target head given input features."""
-        features = self.backbone(x)
-        return tuple(head(features) for head in self.heads)
+        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
+            features = self.backbone(x)
+            return tuple(head(features) for head in self.heads)

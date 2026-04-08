@@ -1,19 +1,15 @@
 """Training utilities and manager class for the CDSS-ML reward model.
 
 Houses data loading, masking curriculum, model/optimizer construction, and the
-RewardModelManager class. The torchrun entry point lives in
-``reward_model_main.py``.
+RewardModelManager class. The entry point lives in ``reward_model_main.py``.
 """
 import math
 import logging
 import time
-from contextlib import nullcontext
 from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import torch
-import torch.distributed as dist
-from torch.nn.parallel import DistributedDataParallel
 from torch.utils.data import DataLoader
 
 from checkpoint_manager import CheckpointManager
@@ -24,7 +20,6 @@ from reward_model import RewardModel
 from dataset_bundle import DatasetBundle
 from reward_model_config import RewardModelConfig
 from row_group_block_sampler import RowGroupBlockSampler
-from reward_model_utils import unwrap_ddp
 
 logger = logging.getLogger(__name__)
 
@@ -33,17 +28,9 @@ class RewardModelManager:
     def __init__(
         self,
         config: RewardModelConfig,
-        rank: int,
-        local_rank: int,
-        world_size: int,
-        is_ddp: bool,
         device: torch.device,
     ):
         self.config = config
-        self.rank = rank
-        self.local_rank = local_rank
-        self.world_size = world_size
-        self.is_ddp = is_ddp
         self.device = device
 
         self.bundle, self.pos_weights = self._load_datasets_and_weights()
@@ -52,8 +39,7 @@ class RewardModelManager:
         self.dev_dataset = self.bundle.dev_dataset
         self.label_names: list = self.bundle.label_names
 
-        if self.rank == 0:
-            logger.info("Successfully loaded datasets and broadcasted positive weights.")
+        logger.info("Successfully loaded datasets.")
 
         self.checkpoint_manager = CheckpointManager(
             Path(self.config.CHECKPOINT_DIR)
@@ -70,71 +56,30 @@ class RewardModelManager:
         self.warmup_total_steps: int = 0
         self.warmup_steps_taken: int = 0
 
-        if self.rank == 0:
-            logger.info(f"Initialized RewardModel with input_dim={self.config.INPUT_DIM} and DDP={self.is_ddp}")
+        logger.info(f"Initialized RewardModel with input_dim={self.config.INPUT_DIM}")
 
     def resume_from_checkpoint(self) -> Tuple[dict, int, float]:
         latest = self.checkpoint_manager.find_latest()
         if latest is None:
             raise RuntimeError("Resume requested but no checkpoint found")
-        ckpt_state: Optional[dict] = None
-        if self.rank == 0:
-            ckpt_state = self.checkpoint_manager.load(latest)
-        if self.is_ddp:
-            obj_state: list = [ckpt_state]
-            dist.broadcast_object_list(obj_state, src=0)
-            ckpt_state = obj_state[0]
-            dist.barrier()
+        ckpt_state = self.checkpoint_manager.load(latest)
         if ckpt_state is None:
             raise RuntimeError("Checkpoint state could not be loaded")
         start_epoch = ckpt_state["epoch"] + 1
         best_dev_loss = ckpt_state.get("best_dev_loss", float("inf"))
         return ckpt_state, start_epoch, best_dev_loss
 
-    def broadcast_tensor(self, tensor: torch.Tensor, src_rank: int) -> torch.Tensor:
-        """Broadcast a tensor from src_rank to all ranks if distributed is initialised."""
-        if torch.distributed.is_available() and torch.distributed.is_initialized():
-            torch.distributed.broadcast(tensor, src=src_rank)
-        return tensor
-
-    def _load_and_broadcast_dataset(self) -> Tuple[DatasetBundle, list]:
-        """Load dataset on rank 0 and broadcast pos_weights to all ranks."""
-        T = self.config.NUM_TARGETS
-        bundle: Optional[DatasetBundle] = None
-        if self.rank == 0:
-            bundle = Mimic4DataLoader(self.config).load()
-            pos_weights_local = list(bundle.pos_weights)
-        else:
-            pos_weights_local = [0.0] * T
-
-        weight_tensors = [torch.tensor(w, device=self.device) for w in pos_weights_local]
-        if self.is_ddp:
-            for t in weight_tensors:
-                self.broadcast_tensor(t, src_rank=0)
-            obj_list = [bundle]
-            dist.broadcast_object_list(obj_list, src=0)
-            bundle = obj_list[0]
-            dist.barrier()
-
-        return bundle, [float(t.item()) for t in weight_tensors]
-
     def _load_datasets_and_weights(self) -> Tuple[DatasetBundle, list]:
-        bundle, pos_weights = self._load_and_broadcast_dataset()
-        if bundle is None:
-            raise RuntimeError("Dataset must be available on all ranks after broadcast")
-        pos_weights = [math.sqrt(w) for w in pos_weights]
-        if self.rank == 0:
-            logger.info(
-                "pos_weight after sqrt scaling: y1=%.4f  y2=%.4f",
-                pos_weights[0], pos_weights[1]
-            )
+        bundle = Mimic4DataLoader(self.config).load()
+        pos_weights = [math.sqrt(w) for w in bundle.pos_weights]
+        logger.info(
+            "pos_weight after sqrt scaling: y1=%.4f  y2=%.4f",
+            pos_weights[0], pos_weights[1]
+        )
         return bundle, pos_weights
 
     def _build_model(self) -> torch.nn.Module:
-        model = RewardModel(self.config).to(self.device)
-        if self.is_ddp:
-            model = DistributedDataParallel(model, device_ids=[self.local_rank])
-        return model
+        return RewardModel(self.config).to(self.device)
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         return torch.optim.AdamW(
@@ -211,32 +156,30 @@ class RewardModelManager:
     # ---------------------------------------------------------------------------
 
     def _eval_dev(self) -> Dict:
-        """Run full dev-split evaluation on rank 0 (no DDP, no masking)."""
-        T = self.config.NUM_TARGETS
-        eval_model = unwrap_ddp(self.model)
-        eval_model.eval()
+        """Run full dev-split evaluation (no masking)."""
+        num_targets = self.config.NUM_TARGETS
+        self.model.eval()
 
         dataloader = DataLoader(
             self.dev_dataset,
-            batch_size=self.config.BATCH_SIZE_PER_GPU,
+            batch_size=self.config.BATCH_SIZE,
             shuffle=False,
-            num_workers=self.config.DATALOADER_NUM_WORKERS,
             pin_memory=torch.cuda.is_available(),
         )
 
         total_loss_acc = 0.0
-        component_loss_acc = [0.0] * T
+        component_loss_acc = [0.0] * num_targets
         n_batches = 0
 
-        logits_all = [[] for _ in range(T)]
-        labels_all = [[] for _ in range(T)]
+        logits_all = [[] for _ in range(num_targets)]
+        labels_all = [[] for _ in range(num_targets)]
 
         with torch.no_grad():
             for batch in dataloader:
                 X = batch[0].to(self.device)
-                batch_labels = [batch[i + 1].to(self.device) for i in range(T)]
+                batch_labels = [batch[i + 1].to(self.device) for i in range(num_targets)]
 
-                logits_list = list(eval_model(X))
+                logits_list = list(self.model(X))
                 loss_total, component_losses = self.compute_loss(logits_list, batch_labels)
 
                 total_loss_acc += float(loss_total.detach().item())
@@ -244,12 +187,12 @@ class RewardModelManager:
                     component_loss_acc[i] += float(cl.detach().item())
                 n_batches += 1
 
-                for i in range(T):
+                for i in range(num_targets):
                     logits_all[i].append(logits_list[i].detach())
                     labels_all[i].append(batch_labels[i].detach())
 
         nan_result: Dict = {"loss_total": float("nan")}
-        for i in range(T):
+        for i in range(num_targets):
             nan_result[f"loss_target_{i}"] = float("nan")
             nan_result[f"auroc_target_{i}"] = float("nan")
             nan_result[f"auprc_target_{i}"] = float("nan")
@@ -257,13 +200,13 @@ class RewardModelManager:
         if n_batches == 0:
             return nan_result
 
-        logits_cat = [torch.cat(logits_all[i], dim=0) for i in range(T)]
-        labels_cat = [torch.cat(labels_all[i], dim=0) for i in range(T)]
+        logits_cat = [torch.cat(logits_all[i], dim=0) for i in range(num_targets)]
+        labels_cat = [torch.cat(labels_all[i], dim=0) for i in range(num_targets)]
 
         per_target = compute_metrics(logits_cat, labels_cat, masked=False)
 
         result: Dict = {"loss_total": total_loss_acc / n_batches}
-        for i in range(T):
+        for i in range(num_targets):
             result[f"loss_target_{i}"] = component_loss_acc[i] / n_batches
             target_metrics = per_target[i]
             result[f"auroc_target_{i}"] = target_metrics["auroc"]
@@ -274,29 +217,24 @@ class RewardModelManager:
     def setup_training_state(self, ckpt_state: Optional[dict], start_epoch: int) -> None:
         self.masking_schedule = self._build_masking_schedule()
         self.train_loader = self._build_train_loader()
-        if self.is_ddp and self.train_loader is None:
-            raise RuntimeError("Train dataset unavailable for DDP training")
-
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
         self.warmup_total_steps = max(self.config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
         self.warmup_scheduler = self._build_warmup_scheduler(steps_per_epoch)
         self.plateau_scheduler = self._build_plateau_scheduler()
         self.warmup_steps_taken = 0
         if ckpt_state is not None:
-            unwrap_ddp(self.model).load_state_dict(ckpt_state["model_state_dict"])
+            self.model.load_state_dict(ckpt_state["model_state_dict"])
             self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
             self.warmup_steps_taken = self.warmup_total_steps
-        if self.rank == 0 and self.train_loader is not None:
-            steps = len(self.train_loader)
+            if ckpt_state.get("plateau_scheduler_state_dict") is not None:
+                self.plateau_scheduler.load_state_dict(ckpt_state["plateau_scheduler_state_dict"])
+        if self.train_loader is not None:
             logger.info(
-                "Train loader: %d batches/epoch, batch_size=%d, "
-                "effective_batch=%d",
-                steps,
-                self.config.BATCH_SIZE_PER_GPU,
-                self.config.BATCH_SIZE_PER_GPU * self.world_size,
+                "Train loader: %d batches/epoch, batch_size=%d",
+                len(self.train_loader),
+                self.config.BATCH_SIZE,
             )
-        if self.rank == 0:
-            logger.info(f"Training state setup complete. Resuming from epoch {start_epoch}.")
+        logger.info(f"Training state setup complete. Resuming from epoch {start_epoch}.")
 
     def _build_masking_schedule(self) -> MaskingSchedule:
         return MaskingSchedule(self.config, self.feature_index_map)
@@ -305,18 +243,11 @@ class RewardModelManager:
         if self.train_dataset is None:
             return None
 
-        sampler = RowGroupBlockSampler(
-            dataset=self.train_dataset,
-            rank=self.rank,
-            world_size=self.world_size if self.is_ddp else 1,
-            shuffle=True,
-            seed=0,
-        )
+        sampler = RowGroupBlockSampler(dataset=self.train_dataset, shuffle=True, seed=0)
         return DataLoader(
             self.train_dataset,
-            batch_size=self.config.BATCH_SIZE_PER_GPU,
+            batch_size=self.config.BATCH_SIZE,
             sampler=sampler,
-            num_workers=self.config.DATALOADER_NUM_WORKERS,
             pin_memory=torch.cuda.is_available(),
         )
 
@@ -324,36 +255,35 @@ class RewardModelManager:
         """Execute one mini-batch forward/backward/step."""
 
         mode = self.masking_schedule.sample_mode(epoch)
+        #logger.info("_run_train_batch: mode=%s", mode)
 
         self.optimizer.zero_grad()
 
         if mode == "adversarial":
-            context = (
-                self.model.no_sync()
-                if self.is_ddp and hasattr(self.model, "no_sync")
-                else nullcontext()
-            )
             X_grad = X.clone().requires_grad_(True)
-            with context:
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits_list = list(self.model(X_grad))
-                    loss_total, _ = self.compute_loss(logits_list, labels)
-                loss_total.backward()
+            #logger.info("_run_train_batch: adversarial forward")
+            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                logits_list = list(self.model(X_grad))
+                loss_total, _ = self.compute_loss(logits_list, labels)
+            #logger.info("_run_train_batch: adversarial backward")
+            loss_total.backward()
 
             gradients = X_grad.grad.detach()
             self.optimizer.zero_grad()
-            # mask the features with highest gradients
+            #logger.info("_run_train_batch: applying adversarial mask")
             X = self.masking_schedule.apply_adversarial_mask(X, gradients)
         else:
             if mode == "random":
-                # choose randomly which features to mask
                 X = self.masking_schedule.apply_random_mask(X)
 
         # forward step with masked (or unmasked) input
+        #logger.info("_run_train_batch: main forward")
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             logits_list = list(self.model(X))
             loss_total, component_losses = self.compute_loss(logits_list, labels)
+        #logger.info("_run_train_batch: main backward")
         loss_total.backward()
+        #logger.info("_run_train_batch: backward done")
         #for debugging
         layer_norms = {}
         total_sq = 0.0
@@ -387,21 +317,20 @@ class RewardModelManager:
         ):
             raise RuntimeError("Training state must be set up before training epochs")
 
-        T = self.config.NUM_TARGETS
+        num_targets = self.config.NUM_TARGETS
         epochs_without_improve = 0
         last_epoch_completed = start_epoch - 1
 
-        if self.rank == 0:
-            logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
-            probs_start = self.masking_schedule.get_mode_probabilities(start_epoch)
-            logger.info(
-                "Masking schedule at epoch %d: Random=%.0f%%  "
-                "Adversarial=%.0f%%  None=%.0f%%",
-                start_epoch,
-                probs_start[0] * 100,
-                probs_start[1] * 100,
-                probs_start[2] * 100,
-            )
+        logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
+        probs_start = self.masking_schedule.get_mode_probabilities(start_epoch)
+        logger.info(
+            "Masking schedule at epoch %d: Random=%.0f%%  "
+            "Adversarial=%.0f%%  None=%.0f%%",
+            start_epoch,
+            probs_start[0] * 100,
+            probs_start[1] * 100,
+            probs_start[2] * 100,
+        )
 
         for epoch in range(start_epoch, self.config.MAX_EPOCHS):
             if self.train_loader is None:
@@ -413,15 +342,19 @@ class RewardModelManager:
             epoch_start = time.time()
 
             batch_losses = []
+            logger.info("Epoch %d — starting data iteration", epoch)
             for batch_idx, batch in enumerate(self.train_loader):
+                logger.info("Epoch %d | batch %d — loaded from DataLoader", epoch, batch_idx)
                 X = batch[0].to(self.device, non_blocking=True)
-                labels = [batch[i + 1].to(self.device, non_blocking=True) for i in range(T)]
+                labels = [batch[i + 1].to(self.device, non_blocking=True) for i in range(num_targets)]
+                logger.info("Epoch %d | batch %d — data moved to device", epoch, batch_idx)
 
                 loss_vals = self._run_train_batch(X, labels, epoch)
+                logger.info("Epoch %d | batch %d — train batch done", epoch, batch_idx)
                 total_loss = loss_vals[0]
                 grad_norm = loss_vals[1]
                 #for debugging
-                if self.rank == 0 and batch_idx % 1 == 0:  # every batch
+                if batch_idx % 1 == 0:  # every batch
                     lr = self.optimizer.param_groups[0]["lr"]
                     logger.info(
                         "Epoch %d | batch %d/%d | loss=%.4f | "
@@ -437,8 +370,8 @@ class RewardModelManager:
                     self.warmup_steps_taken += 1
                 batch_losses.append(loss_vals[0])
 
-                # Log every 50 batches on rank 0
-                if self.rank == 0 and batch_idx % 50 == 0:
+                # Log every 50 batches
+                if batch_idx % 50 == 0:
                     lr = self.optimizer.param_groups[0]["lr"]
                     logger.info(
                         "Epoch %d | batch %d/%d | loss=%.4f | lr=%.2e",
@@ -457,104 +390,82 @@ class RewardModelManager:
                         )
                         break
 
-            if self.is_ddp:
-                dist.barrier()
+            probs = self.masking_schedule.get_mode_probabilities(epoch)
+            dev_metrics = self._eval_dev()
+            self.model.train()
 
-            if self.rank == 0:
-                probs = self.masking_schedule.get_mode_probabilities(epoch)
-                dev_metrics = self._eval_dev()
-                self.model.train()
-
-                row: Dict = {
-                    "epoch": epoch,
-                    "time(seconds)": int(time.time() - epoch_start),
-                    "loss_total": dev_metrics["loss_total"],
-                }
-                for i, name in enumerate(self.label_names):
-                    row[f"loss_{name}"] = dev_metrics[f"loss_target_{i}"]
-                    row[f"auroc_{name}"] = dev_metrics[f"auroc_target_{i}"]
-                    row[f"auprc_{name}"] = dev_metrics[f"auprc_target_{i}"]
-                    row[f"ece_{name}"] = dev_metrics[f"ece_target_{i}"]
-                logger.info(
-                    "Epoch %d | %.1fs | Loss=%.4f | "
-                    "Y1: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
-                    "Y2: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
-                    "Mask R/A/N=%.0f%%/%.0f%%/%.0f%%",
+            row: Dict = {
+                "epoch": epoch,
+                "time(seconds)": int(time.time() - epoch_start),
+                "loss_total": dev_metrics["loss_total"],
+            }
+            for i, name in enumerate(self.label_names):
+                row[f"loss_{name}"] = dev_metrics[f"loss_target_{i}"]
+                row[f"auroc_{name}"] = dev_metrics[f"auroc_target_{i}"]
+                row[f"auprc_{name}"] = dev_metrics[f"auprc_target_{i}"]
+                row[f"ece_{name}"] = dev_metrics[f"ece_target_{i}"]
+            logger.info(
+                "Epoch %d | %.1fs | Loss=%.4f | "
+                "Y1: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
+                "Y2: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
+                "Mask R/A/N=%.0f%%/%.0f%%/%.0f%%",
+                epoch,
+                time.time() - epoch_start,
+                dev_metrics["loss_total"],
+                dev_metrics["auroc_target_0"],
+                dev_metrics["auprc_target_0"],
+                dev_metrics["ece_target_0"],
+                dev_metrics["auroc_target_1"],
+                dev_metrics["auprc_target_1"],
+                dev_metrics["ece_target_1"],
+                probs[0] * 100,
+                probs[1] * 100,
+                probs[2] * 100,
+            )
+            current_dev_loss = dev_metrics["loss_total"]
+            if epoch >= self.config.LR_WARMUP_EPOCHS:
+                self.plateau_scheduler.step(current_dev_loss)
+            improved = current_dev_loss < best_dev_loss
+            if improved:
+                best_dev_loss = current_dev_loss
+                epochs_without_improve = 0
+                logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
+                self.checkpoint_manager.save_train_checkpoint(
+                    self.model,
+                    self.optimizer,
                     epoch,
-                    time.time() - epoch_start,
-                    dev_metrics["loss_total"],
-                    dev_metrics["auroc_target_0"],
-                    dev_metrics["auprc_target_0"],
-                    dev_metrics["ece_target_0"],
-                    dev_metrics["auroc_target_1"],
-                    dev_metrics["auprc_target_1"],
-                    dev_metrics["ece_target_1"],
-                    probs[0] * 100,
-                    probs[1] * 100,
-                    probs[2] * 100,
+                    best_dev_loss,
+                    plateau_scheduler_state=self.plateau_scheduler.state_dict(),
                 )
-                current_dev_loss = dev_metrics["loss_total"]
-                if epoch >= self.config.LR_WARMUP_EPOCHS:
-                    self.plateau_scheduler.step(current_dev_loss)
-                improved = current_dev_loss < best_dev_loss
-                if improved:
-                    best_dev_loss = current_dev_loss
-                    epochs_without_improve = 0
-                    logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
-                    self.checkpoint_manager.save_train_checkpoint(
-                        self.model,
-                        self.optimizer,
-                        epoch,
-                        best_dev_loss,
-                    )
-                    self.checkpoint_manager.save_best_model(
-                        self.model,
-                        epoch,
-                        best_dev_loss,
-                    )
-                else:
-                    epochs_without_improve += 1
-                    logger.info(
-                        f"Dev loss did not improve. Early stopping patience: "
-                        f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
-                    )
-
-                self.metrics_logger.append_row(row)
-
-                should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
+                self.checkpoint_manager.save_best_model(
+                    self.model,
+                    epoch,
+                    best_dev_loss,
+                )
             else:
-                should_stop = False
+                epochs_without_improve += 1
+                logger.info(
+                    f"Dev loss did not improve. Early stopping patience: "
+                    f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
+                )
 
-            if self.is_ddp:
-                stop_tensor = torch.tensor(1 if should_stop else 0, device=self.device)
-                self.broadcast_tensor(stop_tensor, src_rank=0)
-                should_stop = bool(stop_tensor.item())
-
-            if should_stop:
-                if self.rank == 0:
-                    logger.info(f"Early stopping triggered at epoch {epoch}.")
-                break
-
-            if self.is_ddp:
-                dist.barrier()
+            self.metrics_logger.append_row(row)
 
             last_epoch_completed = epoch
+            should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
+            if should_stop:
+                logger.info(f"Early stopping triggered at epoch {epoch}.")
+                break
 
-        if self.is_ddp:
-            dist.barrier()
-        if self.rank == 0:
-            self.checkpoint_manager.save_train_checkpoint(
-                self.model,
-                self.optimizer,
-                last_epoch_completed if last_epoch_completed >= 0 else 0,
-                best_dev_loss,
-            )
-        if self.is_ddp:
-            dist.barrier()
-
-        if self.rank == 0:
-            logger.info(
-                f"Training finished. Last completed epoch: {last_epoch_completed}, "
-                f"Best Dev Loss: {best_dev_loss:.4f}"
-            )
+        self.checkpoint_manager.save_train_checkpoint(
+            self.model,
+            self.optimizer,
+            last_epoch_completed if last_epoch_completed >= 0 else 0,
+            best_dev_loss,
+            plateau_scheduler_state=self.plateau_scheduler.state_dict(),
+        )
+        logger.info(
+            f"Training finished. Last completed epoch: {last_epoch_completed}, "
+            f"Best Dev Loss: {best_dev_loss:.4f}"
+        )
         return last_epoch_completed, best_dev_loss

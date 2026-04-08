@@ -26,20 +26,8 @@ mkdir -p logs
 source ~/miniconda3/etc/profile.d/conda.sh
 conda activate hrs
 export LD_LIBRARY_PATH="$HOME/miniconda3/envs/hrs/lib:$LD_LIBRARY_PATH"
-export NCCL_BUFFSIZE=268435456
-export NCCL_DEBUG=INFO
-
-
-
-# Launch DDP training.
-# --nproc_per_node must equal the number of GPUs requested above (--gres=gpu:N).
-# --rdzv_backend=c10d uses the built-in rendezvous; no external store required.
 # "$@" forwards any arguments passed to sbatch (e.g. --resume).
-torchrun \
-    --nproc_per_node=1 \
-    --rdzv_backend=c10d \
-    --rdzv_endpoint=localhost:29500 \
-    src/reward_model/reward_model_main.py \
+python src/reward_model/reward_model_main.py \
     --config config/reward_model.yaml \
     "$@"
 

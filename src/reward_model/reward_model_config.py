@@ -15,7 +15,7 @@ class RewardModelConfig(BaseModel):
     NUM_TARGETS: int = 2
 
     MAX_EPOCHS: int
-    BATCH_SIZE_PER_GPU: int
+    BATCH_SIZE: int
     LEARNING_RATE: float
     WEIGHT_DECAY: float
     ADAM_BETA1: float
@@ -43,7 +43,6 @@ class RewardModelConfig(BaseModel):
     INPUT_DIM: Optional[int] = None
     DATASET_PATH: str
     DATASET_ROW_GROUP_CACHE_SIZE: int = 2
-    DATALOADER_NUM_WORKERS: int = 4
 
     CHECKPOINT_DIR: str
     METRICS_PATH: str

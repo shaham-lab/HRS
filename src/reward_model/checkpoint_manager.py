@@ -4,7 +4,6 @@ from typing import Optional
 
 import torch
 
-from reward_model_utils import unwrap_ddp
 
 
 class CheckpointManager:
@@ -33,12 +32,14 @@ class CheckpointManager:
         optimizer: torch.optim.Optimizer,
         epoch: int,
         best_dev_loss: float,
+        plateau_scheduler_state: Optional[dict] = None,
     ) -> None:
         state = {
-            "model_state_dict": unwrap_ddp(model).state_dict(),
+            "model_state_dict": model.state_dict(),
             "optimizer_state_dict": optimizer.state_dict(),
             "epoch": epoch,
             "best_dev_loss": best_dev_loss,
+            "plateau_scheduler_state_dict": plateau_scheduler_state,
         }
         target_path = self.checkpoint_dir / "best_model_train.pt"
         tmp_path = target_path.with_suffix(".pt.tmp")
@@ -52,7 +53,7 @@ class CheckpointManager:
         best_dev_loss: float,
     ) -> None:
         state = {
-            "model_state_dict": unwrap_ddp(model).state_dict(),
+            "model_state_dict": model.state_dict(),
             "epoch": epoch,
             "best_dev_loss": best_dev_loss,
         }
