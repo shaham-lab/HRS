@@ -27,7 +27,7 @@ source ~/miniconda3/etc/profile.d/conda.sh
 conda activate hrs
 export LD_LIBRARY_PATH="$HOME/miniconda3/envs/hrs/lib:$LD_LIBRARY_PATH"
 # "$@" forwards any arguments passed to sbatch (e.g. --resume).
-python src/reward_model/reward_model_main.py \
+accelerate launch src/reward_model/reward_model_main.py \
     --config config/reward_model.yaml \
     "$@"
 
