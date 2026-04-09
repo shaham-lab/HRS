@@ -464,11 +464,18 @@ class RewardModelManager:
 
             last_epoch_completed = epoch
             self.accelerator.wait_for_everyone()
+            should_stop = False
             if self.accelerator.is_main_process:
                 should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
                 if should_stop:
                     logger.info(f"Early stopping triggered at epoch {epoch}.")
-                    break
+            should_stop_tensor = torch.tensor(
+                int(should_stop),
+                device=self.accelerator.device,
+            )
+            should_stop = bool(self.accelerator.gather(should_stop_tensor).max().item())
+            if should_stop:
+                break
 
         if self.accelerator.is_main_process:
             self.checkpoint_manager.save_train_checkpoint(
