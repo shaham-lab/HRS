@@ -418,6 +418,7 @@ class RewardModelManager:
             current_dev_loss = dev_metrics["loss_total"]
             if epoch >= self.config.LR_WARMUP_EPOCHS:
                 self.plateau_scheduler.step(current_dev_loss)
+            self.accelerator.wait_for_everyone()
             if self.accelerator.is_main_process:
                 logger.info(
                     "Epoch %d | %.1fs | Loss=%.4f | "
@@ -442,15 +443,16 @@ class RewardModelManager:
                     best_dev_loss = current_dev_loss
                     epochs_without_improve = 0
                     logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
+                    unwrapped_model = self.accelerator.unwrap_model(self.model)
                     self.checkpoint_manager.save_train_checkpoint(
-                        self.model,
+                        unwrapped_model,
                         self.optimizer,
                         epoch,
                         best_dev_loss,
                         plateau_scheduler_state=self.plateau_scheduler.state_dict(),
                     )
                     self.checkpoint_manager.save_best_model(
-                        self.model,
+                        unwrapped_model,
                         epoch,
                         best_dev_loss,
                     )
@@ -479,8 +481,9 @@ class RewardModelManager:
                 break
 
         if self.accelerator.is_main_process:
+            unwrapped_model = self.accelerator.unwrap_model(self.model)
             self.checkpoint_manager.save_train_checkpoint(
-                self.model,
+                unwrapped_model,
                 self.optimizer,
                 last_epoch_completed if last_epoch_completed >= 0 else 0,
                 best_dev_loss,
