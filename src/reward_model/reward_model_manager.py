@@ -355,10 +355,10 @@ class RewardModelManager:
             for batch_idx, batch in enumerate(self.train_loader):
                 if self.accelerator.is_main_process:
                     logger.info("Epoch %d | batch %d — loaded from DataLoader", epoch, batch_idx)
-                X = batch[0].to(self.accelerator.device, non_blocking=True)
-                labels = [batch[i + 1].to(self.accelerator.device, non_blocking=True) for i in range(num_targets)]
+                X = batch[0]
+                labels = [batch[i + 1] for i in range(num_targets)]
                 if self.accelerator.is_main_process:
-                    logger.info("Epoch %d | batch %d — data moved to device", epoch, batch_idx)
+                    logger.info("Epoch %d | batch %d — batch tensors ready", epoch, batch_idx)
 
                 loss_vals = self._run_train_batch(X, labels, epoch)
                 if self.accelerator.is_main_process:
