@@ -228,7 +228,8 @@ class RewardModelManager:
         self.plateau_scheduler = self._build_plateau_scheduler()
         self.warmup_steps_taken = 0
         if ckpt_state is not None:
-            self.model.load_state_dict(ckpt_state["model_state_dict"])
+            clean_model = self.accelerator.unwrap_model(self.model)
+            clean_model.load_state_dict(ckpt_state["model_state_dict"])
             self.optimizer.load_state_dict(ckpt_state["optimizer_state_dict"])
             self.warmup_steps_taken = self.warmup_total_steps
             if ckpt_state.get("plateau_scheduler_state_dict") is not None:
