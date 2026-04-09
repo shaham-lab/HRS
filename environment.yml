@@ -28,6 +28,7 @@ dependencies:
   - snakemake
   - snakemake-executor-plugin-slurm
   - shap
+  - accelerate
   - pip
   - pip:
       - pydantic==2.10.3
