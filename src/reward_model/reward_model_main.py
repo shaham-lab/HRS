@@ -5,9 +5,9 @@ import logging
 import sys
 
 import torch
+from accelerate import Accelerator
 
 from reward_model_config import load_and_validate_config
-from reward_model_utils import get_device
 from reward_model_manager import RewardModelManager
 
 logger = logging.getLogger(__name__)
@@ -30,12 +30,13 @@ def _setup_logging() -> None:
 
 def main() -> int:
     args = _parse_args()
-    _setup_logging()
+    accelerator = Accelerator(mixed_precision="bf16")
+    if accelerator.is_local_main_process:
+        _setup_logging()
 
     config = load_and_validate_config(args.config)
-    device = get_device()
 
-    manager = RewardModelManager(config, device)
+    manager = RewardModelManager(config, accelerator)
     ckpt_state = None
     start_epoch = 0
     best_dev_loss = float("inf")
