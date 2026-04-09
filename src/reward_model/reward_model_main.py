@@ -6,6 +6,7 @@ import sys
 
 import torch
 from accelerate import Accelerator
+from accelerate.utils import InitProcessGroupKwargs
 
 from reward_model_config import load_and_validate_config
 from reward_model_manager import RewardModelManager
@@ -30,7 +31,10 @@ def _setup_logging() -> None:
 
 def main() -> int:
     args = _parse_args()
-    accelerator = Accelerator(mixed_precision="bf16")
+    process_group_kwargs = InitProcessGroupKwargs(backend="gloo")
+    accelerator = Accelerator(
+        mixed_precision="bf16", kwargs_handlers=[process_group_kwargs]
+    )
     if accelerator.is_local_main_process:
         _setup_logging()
 
