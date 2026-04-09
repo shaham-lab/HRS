@@ -3,7 +3,7 @@
 #SBATCH --output=logs/reward_train_%j.out
 #SBATCH --error=logs/reward_train_%j.err
 #SBATCH --partition=H200-12h
-#SBATCH --gres=gpu:1
+#SBATCH --gres=gpu:2
 #SBATCH --mem=64G
 #SBATCH --mail-user=eli.kazum@biu.ac.il
 #SBATCH --mail-type=END,FAIL
