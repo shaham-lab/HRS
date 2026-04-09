@@ -473,7 +473,8 @@ class RewardModelManager:
                 int(should_stop),
                 device=self.accelerator.device,
             )
-            should_stop = bool(self.accelerator.gather(should_stop_tensor).max().item())
+            should_stop_tensor = self.accelerator.reduce(should_stop_tensor, reduction="max")
+            should_stop = bool(should_stop_tensor.item())
             if should_stop:
                 break
 
