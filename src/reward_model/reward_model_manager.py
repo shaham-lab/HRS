@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Dict, Optional, Tuple
 
 import torch
+from accelerate import Accelerator
 from torch.utils.data import DataLoader
 
 from checkpoint_manager import CheckpointManager
@@ -28,10 +29,10 @@ class RewardModelManager:
     def __init__(
         self,
         config: RewardModelConfig,
-        device: torch.device,
+        accelerator: Accelerator,
     ):
         self.config = config
-        self.device = device
+        self.accelerator = accelerator
 
         self.bundle, self.pos_weights = self._load_datasets_and_weights()
         self.feature_index_map: Dict[str, Tuple[int, int]] = self.bundle.feature_index_map
@@ -50,11 +51,16 @@ class RewardModelManager:
         self.optimizer = self._build_optimizer()
 
         self.masking_schedule: Optional[MaskingSchedule] = None
-        self.train_loader: Optional[DataLoader] = None
+        self.train_loader: Optional[DataLoader] = self._build_train_loader()
         self.warmup_scheduler: Optional[torch.optim.lr_scheduler.LRScheduler] = None
         self.plateau_scheduler: Optional[torch.optim.lr_scheduler.ReduceLROnPlateau] = None
         self.warmup_total_steps: int = 0
         self.warmup_steps_taken: int = 0
+        self.model, self.optimizer, self.train_loader = self.accelerator.prepare(
+            self.model,
+            self.optimizer,
+            self.train_loader,
+        )
 
         logger.info(f"Initialized RewardModel with input_dim={self.config.INPUT_DIM}")
 
@@ -79,7 +85,7 @@ class RewardModelManager:
         return bundle, pos_weights
 
     def _build_model(self) -> torch.nn.Module:
-        return RewardModel(self.config).to(self.device)
+        return RewardModel(self.config)
 
     def _build_optimizer(self) -> torch.optim.Optimizer:
         return torch.optim.AdamW(
@@ -176,8 +182,8 @@ class RewardModelManager:
 
         with torch.no_grad():
             for batch in dataloader:
-                X = batch[0].to(self.device)
-                batch_labels = [batch[i + 1].to(self.device) for i in range(num_targets)]
+                X = batch[0].to(self.accelerator.device)
+                batch_labels = [batch[i + 1].to(self.accelerator.device) for i in range(num_targets)]
 
                 logits_list = list(self.model(X))
                 loss_total, component_losses = self.compute_loss(logits_list, batch_labels)
@@ -216,7 +222,6 @@ class RewardModelManager:
 
     def setup_training_state(self, ckpt_state: Optional[dict], start_epoch: int) -> None:
         self.masking_schedule = self._build_masking_schedule()
-        self.train_loader = self._build_train_loader()
         steps_per_epoch = len(self.train_loader) if self.train_loader is not None else 1
         self.warmup_total_steps = max(self.config.LR_WARMUP_EPOCHS * max(steps_per_epoch, 1), 0)
         self.warmup_scheduler = self._build_warmup_scheduler(steps_per_epoch)
@@ -266,7 +271,7 @@ class RewardModelManager:
                 logits_list = list(self.model(X_grad))
                 loss_total, _ = self.compute_loss(logits_list, labels)
             #logger.info("_run_train_batch: adversarial backward")
-            loss_total.backward()
+            self.accelerator.backward(loss_total)
 
             gradients = X_grad.grad.detach()
             self.optimizer.zero_grad()
@@ -282,7 +287,7 @@ class RewardModelManager:
             logits_list = list(self.model(X))
             loss_total, component_losses = self.compute_loss(logits_list, labels)
         #logger.info("_run_train_batch: main backward")
-        loss_total.backward()
+        self.accelerator.backward(loss_total)
         #logger.info("_run_train_batch: backward done")
         #for debugging
         layer_norms = {}
@@ -302,6 +307,7 @@ class RewardModelManager:
             grad_norm,
             " | ".join(f"{n}={v:.2f}" for n, v in top_layers))
 
+        self.accelerator.clip_grad_norm_(self.model.parameters(), max_norm=1.0)
         self.optimizer.step()
 
         return (float(loss_total.detach().item()), grad_norm) + tuple(
@@ -321,16 +327,17 @@ class RewardModelManager:
         epochs_without_improve = 0
         last_epoch_completed = start_epoch - 1
 
-        logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
-        probs_start = self.masking_schedule.get_mode_probabilities(start_epoch)
-        logger.info(
-            "Masking schedule at epoch %d: Random=%.0f%%  "
-            "Adversarial=%.0f%%  None=%.0f%%",
-            start_epoch,
-            probs_start[0] * 100,
-            probs_start[1] * 100,
-            probs_start[2] * 100,
-        )
+        if self.accelerator.is_main_process:
+            logger.info(f"Starting training loop from epoch {start_epoch} to {self.config.MAX_EPOCHS}")
+            probs_start = self.masking_schedule.get_mode_probabilities(start_epoch)
+            logger.info(
+                "Masking schedule at epoch %d: Random=%.0f%%  "
+                "Adversarial=%.0f%%  None=%.0f%%",
+                start_epoch,
+                probs_start[0] * 100,
+                probs_start[1] * 100,
+                probs_start[2] * 100,
+            )
 
         for epoch in range(start_epoch, self.config.MAX_EPOCHS):
             if self.train_loader is None:
@@ -342,19 +349,23 @@ class RewardModelManager:
             epoch_start = time.time()
 
             batch_losses = []
-            logger.info("Epoch %d — starting data iteration", epoch)
+            if self.accelerator.is_main_process:
+                logger.info("Epoch %d — starting data iteration", epoch)
             for batch_idx, batch in enumerate(self.train_loader):
-                logger.info("Epoch %d | batch %d — loaded from DataLoader", epoch, batch_idx)
-                X = batch[0].to(self.device, non_blocking=True)
-                labels = [batch[i + 1].to(self.device, non_blocking=True) for i in range(num_targets)]
-                logger.info("Epoch %d | batch %d — data moved to device", epoch, batch_idx)
+                if self.accelerator.is_main_process:
+                    logger.info("Epoch %d | batch %d — loaded from DataLoader", epoch, batch_idx)
+                X = batch[0].to(self.accelerator.device, non_blocking=True)
+                labels = [batch[i + 1].to(self.accelerator.device, non_blocking=True) for i in range(num_targets)]
+                if self.accelerator.is_main_process:
+                    logger.info("Epoch %d | batch %d — data moved to device", epoch, batch_idx)
 
                 loss_vals = self._run_train_batch(X, labels, epoch)
-                logger.info("Epoch %d | batch %d — train batch done", epoch, batch_idx)
+                if self.accelerator.is_main_process:
+                    logger.info("Epoch %d | batch %d — train batch done", epoch, batch_idx)
                 total_loss = loss_vals[0]
                 grad_norm = loss_vals[1]
                 #for debugging
-                if batch_idx % 1 == 0:  # every batch
+                if self.accelerator.is_main_process and batch_idx % 1 == 0:  # every batch
                     lr = self.optimizer.param_groups[0]["lr"]
                     logger.info(
                         "Epoch %d | batch %d/%d | loss=%.4f | "
@@ -371,7 +382,7 @@ class RewardModelManager:
                 batch_losses.append(loss_vals[0])
 
                 # Log every 50 batches
-                if batch_idx % 50 == 0:
+                if self.accelerator.is_main_process and batch_idx % 50 == 0:
                     lr = self.optimizer.param_groups[0]["lr"]
                     logger.info(
                         "Epoch %d | batch %d/%d | loss=%.4f | lr=%.2e",
@@ -404,68 +415,72 @@ class RewardModelManager:
                 row[f"auroc_{name}"] = dev_metrics[f"auroc_target_{i}"]
                 row[f"auprc_{name}"] = dev_metrics[f"auprc_target_{i}"]
                 row[f"ece_{name}"] = dev_metrics[f"ece_target_{i}"]
-            logger.info(
-                "Epoch %d | %.1fs | Loss=%.4f | "
-                "Y1: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
-                "Y2: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
-                "Mask R/A/N=%.0f%%/%.0f%%/%.0f%%",
-                epoch,
-                time.time() - epoch_start,
-                dev_metrics["loss_total"],
-                dev_metrics["auroc_target_0"],
-                dev_metrics["auprc_target_0"],
-                dev_metrics["ece_target_0"],
-                dev_metrics["auroc_target_1"],
-                dev_metrics["auprc_target_1"],
-                dev_metrics["ece_target_1"],
-                probs[0] * 100,
-                probs[1] * 100,
-                probs[2] * 100,
-            )
             current_dev_loss = dev_metrics["loss_total"]
             if epoch >= self.config.LR_WARMUP_EPOCHS:
                 self.plateau_scheduler.step(current_dev_loss)
-            improved = current_dev_loss < best_dev_loss
-            if improved:
-                best_dev_loss = current_dev_loss
-                epochs_without_improve = 0
-                logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
-                self.checkpoint_manager.save_train_checkpoint(
-                    self.model,
-                    self.optimizer,
-                    epoch,
-                    best_dev_loss,
-                    plateau_scheduler_state=self.plateau_scheduler.state_dict(),
-                )
-                self.checkpoint_manager.save_best_model(
-                    self.model,
-                    epoch,
-                    best_dev_loss,
-                )
-            else:
-                epochs_without_improve += 1
+            if self.accelerator.is_main_process:
                 logger.info(
-                    f"Dev loss did not improve. Early stopping patience: "
-                    f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
+                    "Epoch %d | %.1fs | Loss=%.4f | "
+                    "Y1: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
+                    "Y2: AUROC=%.4f AUPRC=%.4f ECE=%.4f | "
+                    "Mask R/A/N=%.0f%%/%.0f%%/%.0f%%",
+                    epoch,
+                    time.time() - epoch_start,
+                    dev_metrics["loss_total"],
+                    dev_metrics["auroc_target_0"],
+                    dev_metrics["auprc_target_0"],
+                    dev_metrics["ece_target_0"],
+                    dev_metrics["auroc_target_1"],
+                    dev_metrics["auprc_target_1"],
+                    dev_metrics["ece_target_1"],
+                    probs[0] * 100,
+                    probs[1] * 100,
+                    probs[2] * 100,
                 )
-
-            self.metrics_logger.append_row(row)
+                improved = current_dev_loss < best_dev_loss
+                if improved:
+                    best_dev_loss = current_dev_loss
+                    epochs_without_improve = 0
+                    logger.info(f"New best dev loss: {best_dev_loss:.4f} (improved). Saving best_model.pt.")
+                    self.checkpoint_manager.save_train_checkpoint(
+                        self.model,
+                        self.optimizer,
+                        epoch,
+                        best_dev_loss,
+                        plateau_scheduler_state=self.plateau_scheduler.state_dict(),
+                    )
+                    self.checkpoint_manager.save_best_model(
+                        self.model,
+                        epoch,
+                        best_dev_loss,
+                    )
+                else:
+                    epochs_without_improve += 1
+                    logger.info(
+                        f"Dev loss did not improve. Early stopping patience: "
+                        f"{epochs_without_improve}/{self.config.EARLY_STOPPING_PATIENCE}"
+                    )
+                self.metrics_logger.append_row(row)
 
             last_epoch_completed = epoch
-            should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
-            if should_stop:
-                logger.info(f"Early stopping triggered at epoch {epoch}.")
-                break
+            self.accelerator.wait_for_everyone()
+            if self.accelerator.is_main_process:
+                should_stop = epochs_without_improve >= self.config.EARLY_STOPPING_PATIENCE
+                if should_stop:
+                    logger.info(f"Early stopping triggered at epoch {epoch}.")
+                    break
 
-        self.checkpoint_manager.save_train_checkpoint(
-            self.model,
-            self.optimizer,
-            last_epoch_completed if last_epoch_completed >= 0 else 0,
-            best_dev_loss,
-            plateau_scheduler_state=self.plateau_scheduler.state_dict(),
-        )
-        logger.info(
-            f"Training finished. Last completed epoch: {last_epoch_completed}, "
-            f"Best Dev Loss: {best_dev_loss:.4f}"
-        )
+        if self.accelerator.is_main_process:
+            self.checkpoint_manager.save_train_checkpoint(
+                self.model,
+                self.optimizer,
+                last_epoch_completed if last_epoch_completed >= 0 else 0,
+                best_dev_loss,
+                plateau_scheduler_state=self.plateau_scheduler.state_dict(),
+            )
+            logger.info(
+                f"Training finished. Last completed epoch: {last_epoch_completed}, "
+                f"Best Dev Loss: {best_dev_loss:.4f}"
+            )
+        self.accelerator.wait_for_everyone()
         return last_epoch_completed, best_dev_loss
