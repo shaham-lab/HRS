@@ -16,8 +16,7 @@ class RewardModel(nn.Module):
 
         layers = []
         in_dim = config.INPUT_DIM
-        self.pad_size = (16 - in_dim % 16) % 16
-        in_dim += self.pad_size
+
         for width, rate in zip(config.LAYER_WIDTHS, config.DROPOUT_RATES):
             layers += [nn.Linear(in_dim, width), nn.BatchNorm1d(width), activations[config.ACTIVATION](), nn.Dropout(rate)]
             in_dim = width

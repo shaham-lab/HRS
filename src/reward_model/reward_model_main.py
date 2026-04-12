@@ -33,7 +33,7 @@ def main() -> int:
     args = _parse_args()
     process_group_kwargs = InitProcessGroupKwargs(backend="gloo")
     accelerator = Accelerator(
-        mixed_precision="bf16", kwargs_handlers=[process_group_kwargs]
+        kwargs_handlers=[process_group_kwargs]
     )
     if accelerator.is_local_main_process:
         _setup_logging()
