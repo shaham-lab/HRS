@@ -49,6 +49,7 @@ class MaskingSchedule:
         config: RewardModelConfig,
         feature_index_map: Dict[str, Tuple[int, int]],
     ) -> None:
+        self._mode_rng = np.random.default_rng(42)
         self._start_ratios = config.MASKING_START_RATIOS
         self._end_ratios = config.MASKING_END_RATIOS
         self._transition_midpoint_epoch = config.MASKING_TRANSITION_MIDPOINT_EPOCH
@@ -86,7 +87,8 @@ class MaskingSchedule:
         """Draw a masking mode string for this mini-batch."""
         probs = np.array(self.get_mode_probabilities(epoch), dtype=np.float64)
         probs /= probs.sum()
-        return str(np.random.choice(["random", "adversarial", "none"], p=probs))
+        return str(self._mode_rng.choice(["random", "adversarial", "none"], p=probs))
+        #return str(np.random.choice(["random", "adversarial", "none"], p=probs))
 
     # ------------------------------------------------------------------
     # k sampling

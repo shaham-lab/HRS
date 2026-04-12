@@ -182,8 +182,13 @@ class RewardModelManager:
 
         with torch.no_grad():
             for batch in dataloader:
-                X = batch[0].to(self.accelerator.device)
-                batch_labels = [batch[i + 1].to(self.accelerator.device) for i in range(num_targets)]
+
+                X = batch[0].to(self.accelerator.device).float().contiguous()
+                pad_size = (16 - X.shape[1] % 16) % 16
+                if pad_size > 0:
+                    X = torch.nn.functional.pad(X, (0, pad_size)).contiguous()
+
+                batch_labels = [batch[i + 1].to(self.accelerator.device).float().contiguous() for i in range(num_targets)]
 
                 logits_list = list(self.model(X))
                 loss_total, component_losses = self.compute_loss(logits_list, batch_labels)
@@ -260,19 +265,31 @@ class RewardModelManager:
     def _run_train_batch(self, X: torch.Tensor, labels: list, epoch: int) -> Tuple[float, ...]:
         """Execute one mini-batch forward/backward/step."""
 
+        pad_size = (16 - X.shape[1] % 16) % 16
+        if pad_size > 0:
+            X = torch.nn.functional.pad(X, (0, pad_size)).contiguous()
+
         mode = self.masking_schedule.sample_mode(epoch)
+
         #logger.info("_run_train_batch: mode=%s", mode)
 
         self.optimizer.zero_grad()
 
         if mode == "adversarial":
             X_grad = X.clone().requires_grad_(True)
+            with self.accelerator.no_sync(self.model):
+                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+                    logits_list = list(self.model(X_grad))
+                    loss_total, _ = self.compute_loss(logits_list, labels)
+                self.accelerator.backward(loss_total)
+        #if mode == "adversarial":
+            #X_grad = X.clone().requires_grad_(True)
             #logger.info("_run_train_batch: adversarial forward")
-            with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                logits_list = list(self.model(X_grad))
-                loss_total, _ = self.compute_loss(logits_list, labels)
+            #with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
+            #    logits_list = list(self.model(X_grad))
+            #    loss_total, _ = self.compute_loss(logits_list, labels)
             #logger.info("_run_train_batch: adversarial backward")
-            self.accelerator.backward(loss_total)
+            #self.accelerator.backward(loss_total)
 
             gradients = X_grad.grad.detach()
             self.optimizer.zero_grad()
@@ -284,6 +301,7 @@ class RewardModelManager:
 
         # forward step with masked (or unmasked) input
         #logger.info("_run_train_batch: main forward")
+        X = X.contiguous()
         with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
             logits_list = list(self.model(X))
             loss_total, component_losses = self.compute_loss(logits_list, labels)
@@ -355,8 +373,10 @@ class RewardModelManager:
             for batch_idx, batch in enumerate(self.train_loader):
                 if self.accelerator.is_main_process:
                     logger.info("Epoch %d | batch %d — loaded from DataLoader", epoch, batch_idx)
-                X = batch[0]
-                labels = [batch[i + 1] for i in range(num_targets)]
+
+                X = batch[0].float().contiguous()
+                labels = [batch[i + 1].float().contiguous() for i in range(num_targets)]
+
                 if self.accelerator.is_main_process:
                     logger.info("Epoch %d | batch %d — batch tensors ready", epoch, batch_idx)
 
