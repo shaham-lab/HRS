@@ -30,7 +30,7 @@ export LD_LIBRARY_PATH="$HOME/miniconda3/envs/hrs/lib:$LD_LIBRARY_PATH"
 accelerate launch \
     --multi_gpu \
     --num_processes=2 \
-    --mixed_precision=bf16 \
+    --mixed_precision=no \   # not using BF16 as decision
     src/reward_model/reward_model_main.py \
     --config config/reward_model.yaml \
     "$@"

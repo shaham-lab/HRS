@@ -27,15 +27,8 @@ class RewardModel(nn.Module):
 
     def forward(self, x: torch.Tensor) -> Tuple[torch.Tensor, ...]:
         """Compute logits for each target head given input features."""
-        # 1. Run the massive backbone in blazing fast bfloat16
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16, enabled=torch.cuda.is_available()):
-
-            features = self.backbone(x)
-
-        # 2. Safely drop down to float32 for the final N=1 projection heads
-        with torch.autocast(device_type="cuda", enabled=False):
-            features_fp32 = features.float().contiguous()
-            return tuple(head(features_fp32) for head in self.heads)
+        features = self.backbone(x)
+        return tuple(head(features) for head in self.heads)
 
 
 

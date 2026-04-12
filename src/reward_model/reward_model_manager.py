@@ -184,9 +184,6 @@ class RewardModelManager:
             for batch in dataloader:
 
                 X = batch[0].to(self.accelerator.device).float().contiguous()
-                pad_size = (16 - X.shape[1] % 16) % 16
-                if pad_size > 0:
-                    X = torch.nn.functional.pad(X, (0, pad_size)).contiguous()
 
                 batch_labels = [batch[i + 1].to(self.accelerator.device).float().contiguous() for i in range(num_targets)]
 
@@ -265,22 +262,16 @@ class RewardModelManager:
     def _run_train_batch(self, X: torch.Tensor, labels: list, epoch: int) -> Tuple[float, ...]:
         """Execute one mini-batch forward/backward/step."""
 
-        pad_size = (16 - X.shape[1] % 16) % 16
-        if pad_size > 0:
-            X = torch.nn.functional.pad(X, (0, pad_size)).contiguous()
-
         mode = self.masking_schedule.sample_mode(epoch)
 
         #logger.info("_run_train_batch: mode=%s", mode)
-
         self.optimizer.zero_grad()
 
         if mode == "adversarial":
             X_grad = X.clone().requires_grad_(True)
             with self.accelerator.no_sync(self.model):
-                with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-                    logits_list = list(self.model(X_grad))
-                    loss_total, _ = self.compute_loss(logits_list, labels)
+                logits_list = list(self.model(X_grad))
+                loss_total, _ = self.compute_loss(logits_list, labels)
                 self.accelerator.backward(loss_total)
         #if mode == "adversarial":
             #X_grad = X.clone().requires_grad_(True)
@@ -302,9 +293,8 @@ class RewardModelManager:
         # forward step with masked (or unmasked) input
         #logger.info("_run_train_batch: main forward")
         X = X.contiguous()
-        with torch.autocast(device_type="cuda", dtype=torch.bfloat16):
-            logits_list = list(self.model(X))
-            loss_total, component_losses = self.compute_loss(logits_list, labels)
+        logits_list = list(self.model(X))
+        loss_total, component_losses = self.compute_loss(logits_list, labels)
         #logger.info("_run_train_batch: main backward")
         self.accelerator.backward(loss_total)
         #logger.info("_run_train_batch: backward done")
